@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-parity-summary-v2",
+  "title": "M3 one-case parity summary with adjudicated validity disjunction",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "utc_time", "case_id", "status", "verdict", "device", "protocol", "stream_map_sha256", "stream_classes", "attempted_pairs", "pair_valid_target", "pair_valid_pairs_collected", "original_valid_count", "amended_valid_count", "pair_valid_count", "discarded_pairs", "validity_count_invariant", "operating_regime", "mixed_validity_classes", "pair_cap_hit", "run_median_clock_mhz", "pair_valid_ratios_linked_over_reference", "median_ratio_linked_over_reference", "ratio_floor", "equality_at_floor_passes", "statistic", "telemetry"],
+  "properties": {
+    "schema_version": {"const": "m3-parity-summary-v2"},
+    "utc_time": {"type": "string"},
+    "case_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["PASS", "MISS", "EXECUTION_FAIL"]},
+    "verdict": {"enum": ["PASS", "BELOW_RATIO_FLOOR", "PAIR_CAP_HIT"]},
+    "device": {"type": "object", "required": ["physical_index", "uuid", "pci_bus_id"]},
+    "protocol": {"type": "object", "required": ["pair_valid_target"]},
+    "stream_map_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "stream_classes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+    "attempted_pairs": {"type": "integer", "minimum": 0},
+    "pair_valid_target": {"type": "integer", "minimum": 1},
+    "pair_valid_pairs_collected": {"type": "integer", "minimum": 0},
+    "original_valid_count": {"type": "integer", "minimum": 0},
+    "amended_valid_count": {"type": "integer", "minimum": 0},
+    "pair_valid_count": {"type": "integer", "minimum": 0},
+    "discarded_pairs": {"type": "integer", "minimum": 0},
+    "validity_count_invariant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pair_valid_count", "original_plus_amended_count", "equal"],
+      "properties": {
+        "pair_valid_count": {"type": "integer", "minimum": 0},
+        "original_plus_amended_count": {"type": "integer", "minimum": 0},
+        "equal": {"const": true}
+      }
+    },
+    "operating_regime": {"enum": ["none", "original-only", "amended-only", "mixed-original-and-amended"]},
+    "mixed_validity_classes": {"type": "boolean"},
+    "pair_cap_hit": {"type": "boolean"},
+    "run_median_clock_mhz": {"oneOf": [{"type": "number", "exclusiveMinimum": 0}, {"type": "null"}]},
+    "pair_valid_ratios_linked_over_reference": {"type": "array", "items": {"type": "number", "exclusiveMinimum": 0}},
+    "median_ratio_linked_over_reference": {"oneOf": [{"type": "number", "exclusiveMinimum": 0}, {"type": "null"}]},
+    "ratio_floor": {"const": 0.97},
+    "equality_at_floor_passes": {"const": true},
+    "statistic": {"const": "median of the first chronological pair-valid throughput_linked/throughput_reference ratios"},
+    "telemetry": {"type": "object", "required": ["field", "sample_hz", "common_clock_condition", "original_valid_branch", "amended_valid_branch", "pair_valid_disjunction"]}
+  }
+}

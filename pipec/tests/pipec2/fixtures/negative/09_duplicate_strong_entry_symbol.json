@@ -1,0 +1,14 @@
+{
+  "name": "duplicate_strong_entry_symbol",
+  "reference": "design §8.3",
+  "description": "Two artifact symbol tables define the same strong entry symbol.",
+  "base": "symbols",
+  "phase": "symbols.check",
+  "expected_clause": "L-SYM",
+  "expected_path": "$.symbols.defined_strong",
+  "expected_message": "is defined by multiple artifacts",
+  "mutation": {
+    "path": ["tables", "beta.stage", "strong", 0],
+    "value": "alpha_stage_entry"
+  }
+}

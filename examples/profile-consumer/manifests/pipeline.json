@@ -1,0 +1,109 @@
+{
+  "pipelink_abi": {
+    "schema": "2.0-draft",
+    "target": {
+      "profile": "sm_103a",
+      "lto_arch": "lto_103a",
+      "toolkit": "cuda-13.3.0"
+    }
+  },
+  "pipeline": {
+    "name": "pipelink.profile_consumer.consumer",
+    "stages": [
+      {
+        "artifact_path": "../build/artifacts/interpreter.plink",
+        "stage_id": "org.pipelink.profile-consumer.0-interpreter"
+      },
+      {
+        "artifact_path": "../build/artifacts/instruction1.plink",
+        "stage_id": "org.pipelink.profile-consumer.1-instruction"
+      },
+      {
+        "artifact_path": "../build/artifacts/instruction2.plink",
+        "stage_id": "org.pipelink.profile-consumer.2-instruction"
+      }
+    ],
+    "handles": {
+      "pipelink_profile_consumer_scheduler_smem_base": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "smem",
+        "owner": "claim:scheduler_state"
+      },
+      "pipelink_profile_consumer_page_stage1": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "smem_page",
+        "owner": "claim:instruction1_page"
+      },
+      "pipelink_profile_consumer_page_stage2": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "smem_page",
+        "owner": "claim:instruction2_page"
+      },
+      "pipelink_profile_consumer_page_barrier": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "named_barrier",
+        "owner": "claim:page_handoff_barrier"
+      },
+      "pipelink_profile_consumer_counter_slot": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "gmem_counter",
+        "owner": "claim:dependency_counter"
+      },
+      "pipelink_profile_consumer_warp_sched": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "warp",
+        "owner": "claim:scheduler_warp"
+      },
+      "pipelink_profile_consumer_warp_instr1": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "warp",
+        "owner": "claim:instruction1_warp"
+      },
+      "pipelink_profile_consumer_warp_instr2": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "warp",
+        "owner": "claim:instruction2_warp"
+      }
+    },
+    "phases": [
+      "instr_org.pipelink.profile-consumer.1-instruction",
+      "instr_org.pipelink.profile-consumer.2-instruction"
+    ],
+    "exclusive": [
+      ["instr_*", "instr_*"]
+    ],
+    "domains": {
+      "gmem_counter": {
+        "capacity": 64
+      },
+      "smem_page": {
+        "capacity": 2,
+        "page_bytes": 256
+      }
+    },
+    "depth_priority": [],
+    "regs_priority": [],
+    "forced_bindings": {
+      "pipelink_profile_consumer_scheduler_smem_base": 0,
+      "pipelink_profile_consumer_page_stage1": 1,
+      "pipelink_profile_consumer_page_stage2": 1,
+      "pipelink_profile_consumer_page_barrier": 1,
+      "pipelink_profile_consumer_counter_slot": 17,
+      "pipelink_profile_consumer_warp_sched": 0,
+      "pipelink_profile_consumer_warp_instr1": 1,
+      "pipelink_profile_consumer_warp_instr2": 2
+    },
+    "topology": {
+      "persistent": true,
+      "scheduler": "static"
+    }
+  }
+}

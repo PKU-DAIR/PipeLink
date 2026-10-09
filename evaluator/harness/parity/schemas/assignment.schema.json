@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-gpu-assignment-v2",
+  "type": "object",
+  "required": ["schema_version", "utc_time", "discovery_record", "ordered_eligible_gpus", "case_order", "assignments", "predicate"],
+  "properties": {
+    "schema_version": {"const": "m3-gpu-assignment-v2"},
+    "ordered_eligible_gpus": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
+    "assignments": {"type": "object", "additionalProperties": {"type": "object", "required": ["physical_index", "uuid", "pci_bus_id"]}}
+  }
+}

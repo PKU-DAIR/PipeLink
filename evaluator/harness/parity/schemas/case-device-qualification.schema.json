@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-case-device-branch-qualification-result-v1",
+  "type": "object",
+  "required": ["schema_version", "qualifier_version", "case_id", "assignment_epoch_id", "physical_index", "gpu_uuid", "pci_bus_id", "policy_sha256", "role_order", "roles", "disposition", "sealed_before_pairs", "pair_attempt_directories", "telemetry_only", "qualification_sha256"],
+  "properties": {
+    "schema_version": {"const": "m3-case-device-branch-qualification-result-v1"},
+    "qualifier_version": {"enum": ["f2-case-device-branch-qualification-v1", "gap-case-device-branch-qualification-v1"]},
+    "disposition": {"enum": ["PASS", "CASE_DEVICE_INELIGIBLE_TELEMETRY", "CASE_DEVICE_QUALIFICATION_FAIL"]},
+    "sealed_before_pairs": {"const": true},
+    "pair_attempt_directories": {"const": []},
+    "telemetry_only": {"const": true},
+    "qualification_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "mixed_cta_group",
+  "reference": "design §8.3",
+  "description": "The two independently valid stage manifests were compiled for different CTA groups.",
+  "base": "topology",
+  "phase": "solve",
+  "expected_clause": "L-TOPO",
+  "expected_path": "stages.topology.cta_group",
+  "expected_message": "stages disagree on compiled cta_group",
+  "mutation": {
+    "path": ["stages", 1, "topology", "cta_group", "fixed"],
+    "value": 2
+  }
+}

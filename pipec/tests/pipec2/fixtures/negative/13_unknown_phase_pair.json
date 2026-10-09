@@ -1,0 +1,14 @@
+{
+  "name": "unknown_phase_pair",
+  "reference": "D-finding",
+  "description": "An exclusivity pair names a phase absent from the finite phase list.",
+  "base": "topology",
+  "phase": "schema.pipeline",
+  "expected_clause": "L-PHASE",
+  "expected_path": "$.pipeline.exclusive[0][1]",
+  "expected_message": "unknown phase",
+  "mutation": {
+    "path": ["pipeline", "pipeline", "exclusive"],
+    "value": [["steady", "missing"]]
+  }
+}

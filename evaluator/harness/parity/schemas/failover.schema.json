@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-failover-record-v2",
+  "title": "M3 objective whole-case failover record",
+  "type": "object",
+  "required": ["schema_version", "utc_time", "case_id", "eligible_gpu_order", "assigned_device", "next_device", "job_interval", "trigger", "partial_evidence_archive", "raw_stderr_evidence", "objective_trigger", "restart"],
+  "properties": {
+    "schema_version": {"const": "m3-failover-record-v2"},
+    "utc_time": {"type": "string"},
+    "case_id": {"type": "string", "minLength": 1},
+    "eligible_gpu_order": {"type": "array", "minItems": 2, "maxItems": 4, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
+    "assigned_device": {"$ref": "#/$defs/device"},
+    "next_device": {"$ref": "#/$defs/device"},
+    "job_interval": {"type": "object", "required": ["start_ns", "end_ns"]},
+    "trigger": {
+      "type": "object",
+      "required": ["class"],
+      "properties": {"class": {"enum": ["device-absent-two-probes", "xid-in-job-interval", "cuda-status-reproduced"]}}
+    },
+    "partial_evidence_archive": {"type": "string", "minLength": 1},
+    "raw_stderr_evidence": {"type": "string"},
+    "objective_trigger": {"type": "object", "required": ["eligible", "reason"], "properties": {"eligible": {"const": true}, "reason": {"type": "string"}}},
+    "restart": {
+      "type": "object", "additionalProperties": false,
+      "required": ["scope", "attempt", "combine_pairs_across_devices"],
+      "properties": {
+        "scope": {"const": "entire-case-and-all-direct-comparison-series"},
+        "attempt": {"const": 0},
+        "combine_pairs_across_devices": {"const": false}
+      }
+    }
+  },
+  "$defs": {
+    "device": {
+      "type": "object", "required": ["physical_index", "uuid", "pci_bus_id"],
+      "properties": {"physical_index": {"type": "integer", "minimum": 1}, "uuid": {"type": "string"}, "pci_bus_id": {"type": "string"}}
+    }
+  }
+}

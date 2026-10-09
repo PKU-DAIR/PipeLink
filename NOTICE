@@ -1,0 +1,264 @@
+PipeLink
+Copyright 2026 The PipeLink Authors
+
+PipeLink is licensed under the Apache License, Version 2.0 (see LICENSE).
+Submodule code and derived portions retain their upstream licenses and notices;
+this inventory does not relicense them. Revisions below identify upstream source
+origins, not reproducibility gates on rebuilt PipeLink artifacts. Nested upstream
+components may have separate terms; preserve their accompanying notices too.
+The five top-level third_party repositories are pinned by gitlinks and .gitmodules.
+Initialize them recursively; Megakernels' PipeLink patches are applied by
+campaigns/megakernel/port/build.sh, not encoded as upstream commits.
+
+Third-party source inventory
+============================
+
+CUTLASS — BSD-3-Clause (C++ sources and derived portions)
+  Origin: https://github.com/NVIDIA/cutlass
+  Revision: dcf215af68a2d08d305076c152a06f201728cd53
+  Source/license: third_party/cutlass/LICENSE.txt
+  Copyright (c) 2017 - 2026 NVIDIA CORPORATION & AFFILIATES.
+  CUTLASS is used by the attention case study, the GEMM and other examples.
+  Exception: upstream python/CuTeDSL files are under the NVIDIA EULA, not
+  BSD-3-Clause. See the exception and URL in the reproduced license below.
+
+Megakernels — MIT
+  Origin: https://github.com/HazyResearch/Megakernels
+  Revision: 7309cec801537b61fea3b50d7dfe454a6cde578e
+  Source/license: third_party/Megakernels/LICENSE
+  Copyright (c) 2025 HazyResearch
+  Used by the megakernel campaign and its port.
+
+ThunderKittens — MIT
+  Origin: https://github.com/HazyResearch/ThunderKittens
+  Revision: 664c108d16f12707a73d3072ab525f26fb2b4f62
+  Source/license: third_party/Megakernels/ThunderKittens/LICENSE
+  Copyright (c) 2024 HazyResearch
+  Nested submodule of Megakernels; used by its kernels and PipeLink port.
+
+FlashAttention, including FlashAttention-3 Hopper/sm90 sources — BSD-3-Clause
+  Origin: https://github.com/Dao-AILab/flash-attention
+  Revision: ce088ab9ce0fc0434dcd8afa0a791da9fcc3a820
+  Source/license: third_party/flash-attention/LICENSE
+  Copyright (c) 2022, the respective contributors, as shown by the AUTHORS file.
+  See third_party/flash-attention/AUTHORS.
+  FA3 hopper sources and PipeLink's derived sm90 attention implementations:
+  Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar,
+  Pradeep Ramani, Tri Dao.
+  Origins include hopper/mainloop_fwd_sm90_tma_gmma_ws.hpp, epilogue_fwd.hpp,
+  tile_scheduler.hpp, mask.h, softmax.h, and flash_fwd_launch_template.h.
+  Derived portions carry per-file notices; original PipeLink wrappers and
+  declarations that only use these interfaces are not relabeled as upstream code.
+
+FlashMLA — MIT
+  Origin: https://github.com/deepseek-ai/FlashMLA
+  Revision: ba89a3466e9470ad08ab39738d4e7bb66989e1e7
+  Source/license: third_party/FlashMLA/LICENSE
+  Copyright (c) 2025 DeepSeek
+  Used by attention references and source adaptations.
+
+vLLM — Apache-2.0
+  Origin: https://github.com/vllm-project/vllm
+  Revision: d1922cb5a718259976fcb9044c18c9711c9ca694
+  Source/license: third_party/vllm/LICENSE
+  Used for CUDA kernel/reference inputs. Preserve individual file copyrights.
+  The full Apache-2.0 terms are reproduced in LICENSE.
+
+Patched TileLang 0.1.14 wheel — MIT; bundles Apache TVM — Apache-2.0
+  Origin: https://github.com/tile-ai/tilelang (v0.1.14)
+  Revision: 7e3bbf3703e769479757eb7ecec2f2626f3cd0a8
+  Copyright (c) Tile-AI.
+  Recipe: frontends/tilelang/env/build-tilelang.sh
+  Wheel: frontends/tilelang/env/wheels/tilelang-0.1.14-cp39-abi3-linux_x86_64.whl
+  PipeLink modifications are the two accompanying patches:
+    tilelang-0.1.14-device-function.patch
+    tilelang-0.1.14-ws-external-pipeline.patch
+  The wheel is a Linux x86_64 build; other platforms are unvalidated.
+  TileLang's license is reproduced below, including its dated collaboration note.
+
+  Bundled TVM compiler/runtime:
+    Upstream: https://github.com/apache/tvm
+    Source fork: https://github.com/TileLang/tvm
+    Revision: 907a88c8791ccf33b9874821bc875e7abf624367
+    Source licenses: TileLang 3rdparty/tvm/LICENSE and 3rdparty/tvm/NOTICE
+    Apache-2.0; the TVM NOTICE is reproduced below.
+  TileLang also vendors CUTLASS at b2dd65dc864e09688245b316ac46c4a6cd07e15c.
+  The wheel build recipe retains the bundled third-party licenses and notices
+  under tilelang-0.1.14.dist-info/licenses/, including TVM's LICENSE/NOTICE.
+  Keep that directory when redistributing the wheel; TVM's license also lists
+  separately licensed bundled components. See frontends/tilelang/env/README.md.
+
+Apache TVM NOTICE
+=================
+Apache TVM
+Copyright 2019-2023 The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+CUTLASS license
+===============
+Copyright (c) 2017 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: BSD-3-Clause
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Certain files within this repository are subject to separate licensing terms:
+
+- The files located in the `python/CuTeDSL` directory are licensed under the
+  NVIDIA End User License Agreement (EULA). Please refer to
+  https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/license.html
+  for the full terms.
+
+FlashAttention license
+======================
+BSD 3-Clause License
+
+Copyright (c) 2022, the respective contributors, as shown by the AUTHORS file.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+* Neither the name of the copyright holder nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Megakernels license
+===================
+MIT License
+
+Copyright (c) 2025 HazyResearch
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+ThunderKittens license
+======================
+MIT License
+
+Copyright (c) 2024 HazyResearch
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+FlashMLA license
+================
+MIT License
+
+Copyright (c) 2025 DeepSeek
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+TileLang license
+================
+    MIT License
+
+    Copyright (c) Tile-AI.
+    **During the period from December 1, 2024, to Mar 14, 2025, this project is
+    subject to additional collaboration terms with Microsoft Corporation.**
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE

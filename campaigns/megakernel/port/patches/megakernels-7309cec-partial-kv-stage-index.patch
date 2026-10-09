@@ -1,0 +1,12 @@
+diff --git a/demos/low-latency-llama/attention_partial.cu b/demos/low-latency-llama/attention_partial.cu
+--- a/demos/low-latency-llama/attention_partial.cu
++++ b/demos/low-latency-llama/attention_partial.cu
+@@ -356,7 +356,7 @@
+                 // Run the pipeline!
+                 for (int i = 0; i + start_blk_idx < end_blk_idx; ++i) {
+                     auto cur_blk_idx = start_blk_idx + i;
+-                    int stage = cur_blk_idx % NUM_STAGES;
++                    int stage = i % NUM_STAGES;
+                     kv_st &K_smem = get_K_smem(s, stage);
+                     kv_st &V_smem = get_V_smem(s, stage);
+ 

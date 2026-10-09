@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-resource-record-v2",
+  "title": "M3 image-derived subject-specific resource audit record",
+  "type": "object",
+  "required": ["schema_version", "utc_time", "subject_id", "case_id", "image_id", "image_sha256", "sass_sha256", "resources", "headline_predicate"],
+  "properties": {
+    "schema_version": {"const": "m3-resource-record-v2"},
+    "utc_time": {"type": "string"},
+    "subject_id": {"enum": ["family1", "family2", "family3", "A-specialization", "A-solver", "A-authoring", "A-F1-continuity", "N-register-coupling", "N-tiny-jit"]},
+    "case_id": {"type": "string", "minLength": 1},
+    "image_id": {"type": "string", "minLength": 1},
+    "image_sha256": {"$ref": "#/$defs/sha256"},
+    "sass_sha256": {"$ref": "#/$defs/sha256"},
+    "resources": {
+      "type": "object",
+      "required": ["REG", "STACK", "LOCAL", "spill_load_bytes", "spill_store_bytes", "dynamic_smem_bytes", "tmem", "named_mbarrier_map", "warp_map", "launch_topology", "occupancy", "blocks_per_sm", "control_blocks_per_sm"],
+      "properties": {
+        "REG": {"type": "integer", "minimum": 0},
+        "STACK": {"type": "integer", "minimum": 0},
+        "LOCAL": {"type": "integer", "minimum": 0},
+        "spill_load_bytes": {"type": "integer", "minimum": 0},
+        "spill_store_bytes": {"type": "integer", "minimum": 0},
+        "dynamic_smem_bytes": {"type": "integer", "minimum": 0},
+        "blocks_per_sm": {"type": "integer", "minimum": 0},
+        "control_blocks_per_sm": {"type": "integer", "minimum": 0}
+      }
+    },
+    "family2_comparator": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mapping_id", "row_id", "linked", "control", "stock"],
+      "properties": {
+        "mapping_id": {"type": "string", "minLength": 1},
+        "row_id": {"type": "string", "minLength": 1},
+        "linked": {"$ref": "#/$defs/comparatorEntry"},
+        "control": {"$ref": "#/$defs/comparatorEntry"},
+        "stock": {"$ref": "#/$defs/stockEntry"}
+      }
+    },
+    "family1_exception": {"$ref": "#/$defs/family1Exception"},
+    "headline_predicate": {"type": "object", "required": ["mode", "passed"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"subject_id": {"const": "family2"}}},
+      "then": {
+        "required": ["family2_comparator"],
+        "not": {"required": ["family1_exception"]},
+        "properties": {
+          "headline_predicate": {
+            "properties": {
+              "mode": {"const": "family2-componentwise-control-equality-and-stock-ceiling"}
+            }
+          }
+        }
+      },
+      "else": {
+        "not": {"required": ["family2_comparator"]}
+      }
+    },
+    {
+      "if": {"properties": {"subject_id": {"const": "family1"}}},
+      "then": {
+        "oneOf": [
+          {
+            "required": ["family1_exception"],
+            "properties": {
+              "headline_predicate": {
+                "properties": {
+                  "mode": {"const": "family1-narrow-cap-domain-componentwise-exception"}
+                }
+              }
+            }
+          },
+          {
+            "not": {"required": ["family1_exception"]},
+            "properties": {
+              "headline_predicate": {
+                "properties": {
+                  "mode": {"const": "absolute-stack-and-spills-zero"}
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "subject_id": {
+            "enum": ["family3", "A-specialization", "A-solver", "A-authoring", "A-F1-continuity", "N-register-coupling", "N-tiny-jit"]
+          }
+        }
+      },
+      "then": {
+        "not": {"required": ["family1_exception"]},
+        "properties": {
+          "headline_predicate": {
+            "properties": {
+              "mode": {"const": "absolute-stack-and-spills-zero"}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "capComponent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["tested_effective_cap_count", "minimum", "zero_unattainable"],
+      "properties": {
+        "tested_effective_cap_count": {"type": "integer", "minimum": 0},
+        "minimum": {"type": "integer", "minimum": 0},
+        "zero_unattainable": {"type": "boolean"}
+      }
+    },
+    "f1WrappedEntry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["register_cap", "entry"],
+      "properties": {
+        "register_cap": {"const": 255},
+        "entry": {"$ref": "#/$defs/comparatorEntry"}
+      }
+    },
+    "f1StockWrappedEntry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["register_cap", "entry"],
+      "properties": {
+        "register_cap": {"const": 255},
+        "entry": {"$ref": "#/$defs/stockEntry"}
+      }
+    },
+    "family1Exception": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mapping_id", "row_id", "winner_config_sha256", "variant", "performance_observations_used", "discriminator_sha256", "waived_components", "cap_domain", "linked", "control", "stock"],
+      "properties": {
+        "mapping_id": {"type": "string", "minLength": 1},
+        "row_id": {"type": "string", "minLength": 1},
+        "winner_config_sha256": {"$ref": "#/$defs/sha256"},
+        "variant": {"enum": ["v0", "v1", "v2", "v3", "v4"]},
+        "performance_observations_used": {"const": 0},
+        "discriminator_sha256": {"$ref": "#/$defs/sha256"},
+        "waived_components": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"enum": ["STACK", "spill_store_bytes", "spill_load_bytes"]}
+        },
+        "cap_domain": {
+          "type": "object", "additionalProperties": false,
+          "required": ["requested_cap_min", "requested_cap_max", "all_requested_caps_tested", "effective_cap_count", "effective_caps_sha256", "direct_counter_table_sha256", "per_component"],
+          "properties": {
+            "requested_cap_min": {"const": 1},
+            "requested_cap_max": {"const": 255},
+            "all_requested_caps_tested": {"type": "boolean"},
+            "effective_cap_count": {"type": "integer", "minimum": 1},
+            "effective_caps_sha256": {"$ref": "#/$defs/sha256"},
+            "direct_counter_table_sha256": {"$ref": "#/$defs/sha256"},
+            "per_component": {
+              "type": "object", "additionalProperties": false,
+              "required": ["STACK", "spill_store_bytes", "spill_load_bytes"],
+              "properties": {
+                "STACK": {"$ref": "#/$defs/capComponent"},
+                "spill_store_bytes": {"$ref": "#/$defs/capComponent"},
+                "spill_load_bytes": {"$ref": "#/$defs/capComponent"}
+              }
+            }
+          }
+        },
+        "linked": {"$ref": "#/$defs/f1WrappedEntry"},
+        "control": {"$ref": "#/$defs/f1WrappedEntry"},
+        "stock": {"$ref": "#/$defs/f1StockWrappedEntry"}
+      }
+    },
+    "vector": {
+      "type": "object", "additionalProperties": false,
+      "required": ["STACK", "spill_store_bytes", "spill_load_bytes", "LOCAL"],
+      "properties": {
+        "STACK": {"type": "integer", "minimum": 0},
+        "spill_store_bytes": {"type": "integer", "minimum": 0},
+        "spill_load_bytes": {"type": "integer", "minimum": 0},
+        "LOCAL": {"const": 0}
+      }
+    },
+    "evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cuobjdump_resources_sha256", "direct_spill_counters_sha256", "debug_frame_sha256", "reachable_symbols_sha256", "call_local_site_inventory_sha256", "counter_source"],
+      "properties": {
+        "cuobjdump_resources_sha256": {"$ref": "#/$defs/sha256"},
+        "direct_spill_counters_sha256": {"$ref": "#/$defs/sha256"},
+        "debug_frame_sha256": {"$ref": "#/$defs/sha256"},
+        "reachable_symbols_sha256": {"$ref": "#/$defs/sha256"},
+        "call_local_site_inventory_sha256": {"$ref": "#/$defs/sha256"},
+        "counter_source": {"enum": ["direct-final-link", "verbose-relink-byte-identical-sass"]},
+        "measured_elf_sha256": {"$ref": "#/$defs/sha256"},
+        "verbose_relink_elf_sha256": {"$ref": "#/$defs/sha256"},
+        "decoded_sass_identity_sha256": {"$ref": "#/$defs/sha256"},
+        "non_code_only_difference_sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"counter_source": {"const": "verbose-relink-byte-identical-sass"}}},
+          "then": {"required": ["measured_elf_sha256", "verbose_relink_elf_sha256", "decoded_sass_identity_sha256", "non_code_only_difference_sha256"]}
+        }
+      ]
+    },
+    "comparatorEntry": {
+      "type": "object",
+      "required": ["entry_symbol", "specialization_traits", "cubin_sha256", "sass_sha256", "elf_sha256", "resource_vector", "evidence"],
+      "properties": {
+        "entry_symbol": {"type": "string", "minLength": 1},
+        "specialization_traits": {"type": "object", "minProperties": 1},
+        "cubin_sha256": {"$ref": "#/$defs/sha256"},
+        "sass_sha256": {"$ref": "#/$defs/sha256"},
+        "elf_sha256": {"$ref": "#/$defs/sha256"},
+        "resource_vector": {"$ref": "#/$defs/vector"},
+        "evidence": {"$ref": "#/$defs/evidence"}
+      }
+    },
+    "stockEntry": {
+      "allOf": [
+        {"$ref": "#/$defs/comparatorEntry"},
+        {
+          "type": "object",
+          "required": ["source_sha256", "compile_command", "toolkit", "target"],
+          "properties": {
+            "source_sha256": {"$ref": "#/$defs/sha256"},
+            "compile_command": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+            "toolkit": {"type": "string", "minLength": 1},
+            "target": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    }
+  }
+}

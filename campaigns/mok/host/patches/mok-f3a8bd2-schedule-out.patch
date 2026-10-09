@@ -1,0 +1,115 @@
+diff --git a/csrc/scheduler.cuh b/csrc/scheduler.cuh
+--- a/csrc/scheduler.cuh
++++ b/csrc/scheduler.cuh
+@@ -182,4 +182,44 @@
+     return {schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert};
+ }
+ 
++// Caller owns all outputs and the count scratch; no allocation during replay.
++static __host__ void schedule_out_entrypoint(
++    const at::Tensor &topk_all,
++    const int num_local_experts,
++    const int schedule_capacity,
++    const int rank,
++    at::Tensor schedule_peer_rank,
++    at::Tensor schedule_peer_token_idx,
++    at::Tensor num_tokens,
++    at::Tensor tokens_per_expert,
++    at::Tensor tokens_per_expert_and_peer
++) {
++    const int world_size = static_cast<int>(topk_all.size(0));
++    TORCH_CHECK(schedule_peer_rank.numel() == schedule_capacity);
++    TORCH_CHECK(schedule_peer_token_idx.numel() == schedule_capacity);
++    TORCH_CHECK(num_tokens.numel() == 1);
++    TORCH_CHECK(tokens_per_expert.numel() == num_local_experts);
++    TORCH_CHECK(tokens_per_expert_and_peer.numel() == num_local_experts * world_size);
++    schedule_peer_rank.fill_(-1);
++    num_tokens.zero_();
++    tokens_per_expert_and_peer.zero_();
++
++    globals G {
++        .topk = kittens::py::tensor_to_gl<globals::topk_gl>(topk_all),
++        .schedule_peer_rank = kittens::py::tensor_to_gl<globals::index_gl>(schedule_peer_rank),
++        .schedule_peer_token_idx = kittens::py::tensor_to_gl<globals::index_gl>(schedule_peer_token_idx),
++        .num_tokens = kittens::py::tensor_to_gl<globals::index_gl>(num_tokens),
++        .tokens_per_expert = kittens::py::tensor_to_gl<globals::index_gl>(tokens_per_expert),
++        .tokens_per_expert_and_peer = kittens::py::tensor_to_gl<globals::index_gl>(tokens_per_expert_and_peer),
++        .rank = rank,
++    };
++    auto stream = at::cuda::getCurrentCUDAStream();
++    kittens::py::global_kernel<config, globals, scheduler::count_kernel>
++        <<<(G.topk.numel() + config::NUM_THREADS - 1) / config::NUM_THREADS, config::NUM_THREADS, num_local_experts * world_size * sizeof(int), stream>>>(G);
++    kittens::py::global_kernel<config, globals, scheduler::pad_kernel>
++        <<<num_local_experts, 1, 0, stream>>>(G);
++    kittens::py::global_kernel<config, globals, scheduler::schedule_kernel>
++        <<<num_local_experts * world_size, config::NUM_THREADS, world_size * sizeof(int), stream>>>(G);
++}
++
+ } // namespace scheduler
+diff --git a/csrc/bindings.cu b/csrc/bindings.cu
+--- a/csrc/bindings.cu
++++ b/csrc/bindings.cu
+@@ -12,6 +12,11 @@
+           pybind11::arg("barrier_buffer_multicast_ptr"), pybind11::arg("target"));
+     m.def("schedule", &scheduler::schedule_entrypoint, "",
+           pybind11::arg("topk_all"), pybind11::arg("num_local_experts"), pybind11::arg("schedule_capacity"), pybind11::arg("rank"));
++    m.def("schedule_out", &scheduler::schedule_out_entrypoint, "",
++          pybind11::arg("topk_all"), pybind11::arg("num_local_experts"), pybind11::arg("schedule_capacity"), pybind11::arg("rank"),
++          pybind11::arg("schedule_peer_rank"), pybind11::arg("schedule_peer_token_idx"),
++          pybind11::arg("num_tokens"), pybind11::arg("tokens_per_expert"),
++          pybind11::arg("tokens_per_expert_and_peer"));
+     m.def("mxfp8_quantize", &mxfp8::quantize_entrypoint, "",
+           pybind11::arg("x_bf16"),
+           pybind11::arg("return_normal"), pybind11::arg("return_transposed"));
+diff --git a/mok/ops.py b/mok/ops.py
+--- a/mok/ops.py
++++ b/mok/ops.py
+@@ -156,6 +156,48 @@
+     return _C.schedule(topk_all, num_local_experts, schedule_capacity, rank)
+ 
+ 
++@torch.library.custom_op("mok::schedule_out", mutates_args=(
++    "schedule_peer_rank", "schedule_peer_token_idx", "num_tokens",
++    "tokens_per_expert", "tokens_per_expert_and_peer"))
++def schedule_out(
++    topk_all: torch.Tensor, num_local_experts: int, schedule_capacity: int, rank: int,
++    schedule_peer_rank: torch.Tensor, schedule_peer_token_idx: torch.Tensor,
++    num_tokens: torch.Tensor, tokens_per_expert: torch.Tensor,
++    tokens_per_expert_and_peer: torch.Tensor,
++) -> None:
++    """The original three schedule kernels, writing into caller-owned storage."""
++    if topk_all.ndim != 3 or not topk_all.is_cuda or topk_all.dtype != torch.int32 or not topk_all.is_contiguous():
++        raise ValueError("topk_all must be contiguous CUDA int32 [ep_size, tokens, topk]")
++    world, tokens, topk = topk_all.shape
++    if world not in (1, 4, 8, 16, 32, 64) or tokens < 512 or tokens % 256 or not 0 < topk <= 255:
++        raise ValueError("invalid topk_all dimensions")
++    if num_local_experts <= 0 or not 0 <= rank < world:
++        raise ValueError("invalid local expert count or rank")
++    if schedule_capacity < tokens * topk or schedule_capacity % 256:
++        raise ValueError("invalid schedule capacity")
++    for tensor, size in (
++        (schedule_peer_rank, schedule_capacity),
++        (schedule_peer_token_idx, schedule_capacity),
++        (num_tokens, 1), (tokens_per_expert, num_local_experts),
++        (tokens_per_expert_and_peer, num_local_experts * world),
++    ):
++        if tensor.device != topk_all.device or tensor.dtype != torch.int32 or not tensor.is_contiguous() or tuple(tensor.shape) != (size,):
++            raise ValueError("schedule outputs must be contiguous int32 vectors on the input device with the required extent")
++    _C.schedule_out(topk_all, num_local_experts, schedule_capacity, rank,
++                    schedule_peer_rank, schedule_peer_token_idx, num_tokens,
++                    tokens_per_expert, tokens_per_expert_and_peer)
++
++
++@schedule_out.register_fake
++def _schedule_out_fake(
++    topk_all: torch.Tensor, num_local_experts: int, schedule_capacity: int, rank: int,
++    schedule_peer_rank: torch.Tensor, schedule_peer_token_idx: torch.Tensor,
++    num_tokens: torch.Tensor, tokens_per_expert: torch.Tensor,
++    tokens_per_expert_and_peer: torch.Tensor,
++) -> None:
++    return None
++
++
+ @torch.library.custom_op(
+     "mok::mxfp8_quantize", mutates_args=(),
+     schema="(Tensor x_bf16, bool return_normal, bool return_transposed) -> (Tensor?, Tensor?, Tensor?, Tensor?)",

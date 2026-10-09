@@ -1,0 +1,15 @@
+{
+  "name": "arrive_count_mismatch",
+  "reference": "design §8.3",
+  "description": "The consumer declares two full-barrier arrivals while the producer declares one.",
+  "base": "barrier",
+  "phase": "protocol.expand",
+  "channel": "ring",
+  "expected_clause": "L-PROTO",
+  "expected_path": "channels.ring.protocol.full.arrive",
+  "expected_message": "arrival declarations disagree",
+  "mutation": {
+    "path": ["stages", 1, "endpoints", 0, "protocol", "full", "arrive", "count"],
+    "value": 2
+  }
+}

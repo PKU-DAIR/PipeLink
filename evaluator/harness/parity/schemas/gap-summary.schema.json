@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-parity-summary-v6",
+  "title": "M3 ex-ante solo-bound gap-row summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "utc_time", "case_id", "status", "verdict", "device", "protocol", "protocol_variant", "selection_classifier", "eligibility_ledger_sha256", "score_sha256", "ratio_blind_eligibility", "throughput_read_after_eligibility_seal", "opening_solo_block_id", "opening_solo_sha256", "mid_series_solo_refresh_count", "identity_gating", "policy_sha256", "policy_record_sha256", "attempted_pairs", "gap_pair_valid_target", "gap_pair_valid_pairs_collected", "gap_pair_valid_count", "discarded_pairs", "strict_original_valid_count", "strict_amended_valid_count", "strict_pair_valid_count", "superseded_same_branch_valid_count", "cross_branch_valid_count", "branch_combination_counts", "pair_cap_hit", "gap_pair_valid_ratios_linked_over_reference", "median_ratio_linked_over_reference", "ratio_floor", "cross_half_clock_delta_linked_minus_reference_mhz", "identity_delta_percent", "per_half_power_draw_median_w", "timestamp_coverage_identical", "solo_clock_median_mhz", "solo_throughput", "result_wording", "clock_normalized_efficiency_claimed"],
+  "properties": {
+    "schema_version": {"const": "m3-parity-summary-v6"},
+    "utc_time": {"type": "string"},
+    "case_id": {"enum": ["A-specialization-0", "A-specialization-1", "A-specialization-2", "A-solver-D4", "A-solver-D2", "A-solver-R-id", "A-solver-R-rev"]},
+    "status": {"enum": ["PASS", "MISS", "EXECUTION_FAIL"]},
+    "verdict": {"enum": ["PASS", "BELOW_RATIO_FLOOR", "GAP_PAIR_CAP_HIT"]},
+    "device": {"type": "object", "required": ["physical_index", "uuid", "pci_bus_id"]},
+    "protocol": {"type": "object", "required": ["pair_valid_target", "selection_classifier", "gap_row_allowlist"]},
+    "protocol_variant": {"enum": ["gap-fast-v1", "gap-original-v1"]},
+    "selection_classifier": {"const": "gap-ex-ante-solo-v2"},
+    "eligibility_ledger_sha256": {"$ref": "#/$defs/sha256"},
+    "score_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "ratio_blind_eligibility": {"const": true},
+    "throughput_read_after_eligibility_seal": {"const": true},
+    "opening_solo_block_id": {"type": "string", "minLength": 1},
+    "opening_solo_sha256": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reference", "linked"],
+      "properties": {
+        "reference": {"$ref": "#/$defs/sha256"},
+        "linked": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "mid_series_solo_refresh_count": {"const": 0},
+    "identity_gating": {"type": "boolean"},
+    "policy_sha256": {"$ref": "#/$defs/sha256"},
+    "policy_record_sha256": {"$ref": "#/$defs/sha256"},
+    "attempted_pairs": {"type": "integer", "minimum": 0},
+    "gap_pair_valid_target": {"type": "integer", "minimum": 1},
+    "gap_pair_valid_pairs_collected": {"type": "integer", "minimum": 0},
+    "gap_pair_valid_count": {"type": "integer", "minimum": 0},
+    "discarded_pairs": {"type": "integer", "minimum": 0},
+    "strict_original_valid_count": {"type": "integer", "minimum": 0},
+    "strict_amended_valid_count": {"type": "integer", "minimum": 0},
+    "strict_pair_valid_count": {"type": "integer", "minimum": 0},
+    "superseded_same_branch_valid_count": {"type": "integer", "minimum": 0},
+    "cross_branch_valid_count": {"type": "integer", "minimum": 0},
+    "branch_combination_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "pair_cap_hit": {"type": "boolean"},
+    "gap_pair_valid_ratios_linked_over_reference": {"type": "array", "items": {"type": "number", "exclusiveMinimum": 0}},
+    "median_ratio_linked_over_reference": {"oneOf": [{"type": "number", "exclusiveMinimum": 0}, {"type": "null"}]},
+    "ratio_floor": {"const": 0.97},
+    "cross_half_clock_delta_linked_minus_reference_mhz": {"$ref": "#/$defs/distributionRecord"},
+    "identity_delta_percent": {"type": "object", "required": ["reference", "linked"], "additionalProperties": {"$ref": "#/$defs/distributionRecord"}},
+    "per_half_power_draw_median_w": {"type": "object", "required": ["reference", "linked"], "additionalProperties": {"$ref": "#/$defs/distributionRecord"}},
+    "timestamp_coverage_identical": {"const": true},
+    "solo_throughput": {
+      "type": "object", "required": ["reference", "linked"],
+      "additionalProperties": {
+        "type": "object", "required": ["value", "unit"],
+        "properties": {"value": {"type": "number", "exclusiveMinimum": 0}, "unit": {"type": "string", "minLength": 1}}
+      }
+    },
+    "solo_clock_median_mhz": {"type": "object", "required": ["reference", "linked"], "additionalProperties": {"type": "number", "exclusiveMinimum": 0}},
+    "result_wording": {"const": "realized throughput ratio under the observed operating points"},
+    "clock_normalized_efficiency_claimed": {"const": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "distribution": {"type": "object", "required": ["count", "min", "p10", "median", "p90", "max"]},
+    "distributionRecord": {"type": "object", "required": ["values", "distribution"], "properties": {"values": {"type": "array", "items": {"type": "number"}}, "distribution": {"$ref": "#/$defs/distribution"}}}
+  }
+}

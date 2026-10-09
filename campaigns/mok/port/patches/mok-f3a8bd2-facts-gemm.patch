@@ -1,0 +1,36 @@
+diff --git a/csrc/megakernel/grouped_gemm.cuh b/csrc/megakernel/grouped_gemm.cuh
+--- a/csrc/megakernel/grouped_gemm.cuh
++++ b/csrc/megakernel/grouped_gemm.cuh
+@@ -1,4 +1,5 @@
+ template <bool IS_SHARED, bool IS_WGRAD = false, bool IS_AB = false>
+ static __device__ __forceinline__ void expert_grouped_gemm_kernel(
++    const void* view,
+     const std::conditional_t<IS_SHARED, mlp_bf16_gl, routed_activation_gl> &a_gmem,
+     const std::conditional_t<IS_WGRAD, std::conditional_t<IS_SHARED, wgrad_bf16_gl, routed_activation_gl>,
+@@ -127,7 +128,7 @@
+         if (input_minibatch_ready != nullptr) {
+             const int minibatch_first_row = global_minibatch_idx * minibatch_size;
+             const int minibatch_rows = max(0, min(minibatch_size, num_tokens - minibatch_first_row));
+-            const int required_count = ((minibatch_rows + config::DISPATCH_Mb - 1) / config::DISPATCH_Mb) * ((a_gmem.cols() + config::DISPATCH_Nb - 1) / config::DISPATCH_Nb);
++            const int required_count = ((minibatch_rows + facts(view).DISPATCH_Mb - 1) / facts(view).DISPATCH_Mb) * ((a_gmem.cols() + facts(view).DISPATCH_Nb - 1) / facts(view).DISPATCH_Nb);
+             barrier_wait(*input_minibatch_ready, global_minibatch_idx, required_count);
+         }
+     };
+@@ -141,7 +142,7 @@
+             if (input_minibatch_ready != nullptr) {
+                 const int row_minibatch_idx = row / minibatch_size;
+                 const int minibatch_rows = min(minibatch_size, num_tokens - row_minibatch_idx * minibatch_size);
+-                const int required_count = ((minibatch_rows + config::DISPATCH_Mb - 1) / config::DISPATCH_Mb) * ((input_minibatch_ready_num_cols + config::DISPATCH_Nb - 1) / config::DISPATCH_Nb);
++                const int required_count = ((minibatch_rows + facts(view).DISPATCH_Mb - 1) / facts(view).DISPATCH_Mb) * ((input_minibatch_ready_num_cols + facts(view).DISPATCH_Nb - 1) / facts(view).DISPATCH_Nb);
+                 barrier_wait(*input_minibatch_ready, row_minibatch_idx, required_count);
+             }
+         }
+@@ -270,7 +271,7 @@
+                 const int previous_macrobatch_offset = (macrobatch_idx + 1) * macrobatch_size;
+                 const int row_idx = tile_coord.x * config::MLP_Mb + cta_rank * (config::MLP_Mb / config::CLUSTER_SIZE);
+                 const int previous_macrobatch_tokens = min(macrobatch_size, num_tokens - previous_macrobatch_offset);
+-                const int required_count = (config::MLP_Mb / config::CLUSTER_SIZE / config::COMBINE_Mb) * ((d_gmem.cols() + config::COMBINE_Nb - 1) / config::COMBINE_Nb);
++                const int required_count = (config::MLP_Mb / config::CLUSTER_SIZE / facts(view).COMBINE_Mb) * ((d_gmem.cols() + facts(view).COMBINE_Nb - 1) / facts(view).COMBINE_Nb);
+                 if (row_idx < previous_macrobatch_tokens)
+                     barrier_wait(*output_row_ready, (previous_macrobatch_offset + row_idx) / (config::MLP_Mb / config::CLUSTER_SIZE), required_count);
+             }

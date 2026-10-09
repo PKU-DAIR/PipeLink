@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-case-device-branch-qualification-result-v3",
+  "type": "object",
+  "required": ["schema_version", "qualifier_version", "case_id", "assignment_epoch_id", "physical_index", "gpu_uuid", "pci_bus_id", "policy_sha256", "role_order", "roles", "disposition", "sealed_before_pairs", "pair_attempt_directories", "telemetry_only", "compatibility_only", "may_supply_pair_branch_or_identity", "qualification_sha256"],
+  "properties": {
+    "schema_version": {"const": "m3-case-device-branch-qualification-result-v3"},
+    "qualifier_version": {"const": "f2-case-device-branch-qualification-v3"},
+    "case_id": {"pattern": "^F2-(0[0-9]|1[0-7])$"},
+    "roles": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/role"}},
+    "disposition": {"enum": ["PASS", "CASE_DEVICE_INELIGIBLE_TELEMETRY", "CASE_DEVICE_QUALIFICATION_FAIL"]},
+    "sealed_before_pairs": {"const": true},
+    "pair_attempt_directories": {"const": []},
+    "telemetry_only": {"const": true},
+    "compatibility_only": {"const": true},
+    "may_supply_pair_branch_or_identity": {"const": false},
+    "qualification_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "role": {
+      "type": "object",
+      "required": ["role_id", "classification", "reasons", "median_clock_mhz", "clock_min_mhz", "clock_max_mhz", "mask_set", "covering_sample_count", "strict_own_clock_valid_v1", "f2_solo_anchor_valid_v2", "f2_solo_anchor_valid_v3", "strict_own_clock_v1", "f2_solo_anchor_v2", "f2_solo_anchor_v3"],
+      "properties": {
+        "classification": {"enum": ["stable-original", "stable-power-cap", "mixed-cap-boundary", "fatal"]},
+        "strict_own_clock_valid_v1": {"type": "boolean"},
+        "f2_solo_anchor_valid_v2": {"type": "boolean"},
+        "f2_solo_anchor_valid_v3": {"type": "boolean"},
+        "strict_own_clock_v1": {"type": "object"},
+        "f2_solo_anchor_v2": {"type": "object"},
+        "f2_solo_anchor_v3": {"$ref": "#/$defs/v3Anchor"}
+      }
+    },
+    "sampleProof": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "object", "required": ["index_zero_based", "chronological_index_one_based", "time_ns", "clock_mhz"]}
+      ]
+    },
+    "v3Anchor": {
+      "type": "object",
+      "required": ["schema_version", "classifier_version", "valid", "reasons", "n", "minimum_mhz", "q05_mhz", "median_mhz", "q95_mhz", "maximum_mhz", "count_outside_3_percent", "count_outside_5_percent", "full_outlier_count_over_5_percent", "excluded_sample_count", "excluded_sample", "predecessor_sample", "successor_sample", "predecessor_gap_ns", "successor_gap_ns", "retained_n", "retained_minimum_mhz", "retained_q05_mhz", "retained_median_mhz", "retained_q95_mhz", "retained_maximum_mhz", "retained_count_outside_3_percent", "retained_count_outside_5_percent", "anchor_median_mhz", "timestamp_order_valid", "result_sha256"],
+      "properties": {
+        "schema_version": {"const": "m3-f2-solo-anchor-result-v3"},
+        "classifier_version": {"const": "f2-solo-anchor-isolated-tail-v3"},
+        "valid": {"type": "boolean"},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+        "excluded_sample_count": {"type": "integer", "minimum": 0, "maximum": 1},
+        "excluded_sample": {"$ref": "#/$defs/sampleProof"},
+        "predecessor_sample": {"$ref": "#/$defs/sampleProof"},
+        "successor_sample": {"$ref": "#/$defs/sampleProof"},
+        "timestamp_order_valid": {"type": "boolean"},
+        "result_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

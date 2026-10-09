@@ -1,0 +1,66 @@
+diff --git a/src/cuda/codegen/codegen_cuda.cc b/src/cuda/codegen/codegen_cuda.cc
+index b2bb732..a77157f 100644
+--- a/src/cuda/codegen/codegen_cuda.cc
++++ b/src/cuda/codegen/codegen_cuda.cc
+@@ -560,7 +560,7 @@ void CodeGenTileLangCUDA::ReserveKeywordsAsUnique_() {
+ }
+ 
+ void CodeGenTileLangCUDA::PrintFuncPrefix(std::ostream &os) {
+-  os << "extern \"C\" __global__ ";
++  os << (device_function_ ? "extern \"C\" __device__ " : "extern \"C\" __global__ ");
+ }
+ 
+ class LaunchConfigExtractor : public tirx::StmtVisitor {
+@@ -626,6 +626,9 @@ public:
+ };
+ 
+ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
++  if (device_function_) {
++    return;
++  }
+   LaunchConfigExtractor extractor;
+   extractor(f->body);
+   arith::Analyzer analyzer;
+@@ -6180,6 +6183,7 @@ void CodeGenTileLangCUDA::PrintVecElemLoadExpr(DataType t, int i,
+ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
+                                                  const PrimFunc &func,
+                                                  std::ostream &os) {
++  device_function_ = func->HasNonzeroAttr(tl::attr::kDeviceFunction);
+   PrintFuncPrefix(os);
+   CodeGenC::PrintType(func->ret_type, os);
+   CodeGenC::PrintExtraAttrs(func, os);
+@@ -6305,6 +6309,7 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
+     }
+   }
+ 
++  device_function_ = f->HasNonzeroAttr(tl::attr::kDeviceFunction);
+   this->PrintFuncPrefix(stream);
+   CodeGenC::PrintType(f->ret_type, stream);
+   this->PrintExtraAttrs(f);
+diff --git a/src/cuda/codegen/codegen_cuda.h b/src/cuda/codegen/codegen_cuda.h
+index 2792021..7032784 100644
+--- a/src/cuda/codegen/codegen_cuda.h
++++ b/src/cuda/codegen/codegen_cuda.h
+@@ -27,6 +27,8 @@ public:
+   // override behavior
+   void PrintFuncPrefix(std::ostream &os) final;
+   void PrintExtraAttrs(const PrimFunc &f);
++  // Set per function before printing its signature; see tl::attr::kDeviceFunction.
++  bool device_function_{false};
+   void VisitStmt_(const ForNode *op) final;
+   void PrintStorageSync(const CallNode *op) final;
+   void PrintStorageScope(const std::string &scope,
+diff --git a/src/transform/common/attr.h b/src/transform/common/attr.h
+index a02e4a1..d22a436 100644
+--- a/src/transform/common/attr.h
++++ b/src/transform/common/attr.h
+@@ -28,6 +28,9 @@ namespace attr {
+ // Attributes to mark CUDA sync calls
+ constexpr const char *kHasTriggerLaunch = "has_cuda_pdl_trigger";
+ constexpr const char *kHasGridSync = "has_cuda_pdl_sync";
++// Emit the PrimFunc as an `extern "C" __device__` function (no launch bounds)
++// instead of a `__global__` kernel entry.
++constexpr const char *kDeviceFunction = "tl.device_function";
+ 
+ // TileLang-only AttrStmt keys.
+ constexpr const char *volatile_scope = "volatile_scope";

@@ -1,0 +1,2 @@
+# Wheel build products only; the frontend virtualenv lives at ../.venv/.
+wheels/

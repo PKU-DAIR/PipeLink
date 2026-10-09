@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PIPELINK_CUDA_HOME: /usr/local/cuda
+  CUDA_VISIBLE_DEVICES: ""
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:13.3.0-devel-ubuntu24.04
+    env:
+      PIPELINK_SCRATCH_ROOT: ${{ runner.temp }}/pipelink
+    steps:
+      - name: Install host build tools
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends binutils g++ git ca-certificates
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Run compiler and evaluator tests
+        run: uv run --project pipec --locked python -m pytest pipec/tests evaluator
+
+  tutorials:
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:13.3.0-devel-ubuntu24.04
+    env:
+      PIPELINK_SCRATCH_ROOT: ${{ runner.temp }}/pipelink
+    steps:
+      - name: Install host build tools
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends binutils g++ git ca-certificates
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Run GPU-free tutorials
+        run: uv run --project pipec --locked python -m pytest docs/tutorials/test_tutorials.py -q
+
+  pack:
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:13.3.0-devel-ubuntu24.04
+    strategy:
+      fail-fast: false
+      # Admission follows docs/index.md and the example READMEs.
+      # Unsupported, not compiled: Hopper WGMMA GEMM on Blackwell profiles; T4 TMEM
+      # providers on sm_90a/sm_120a/sm_121a and Hopper WGMMA-register providers elsewhere.
+      # TileLang-authored cells require the pinned frontend and are owner-run.
+      matrix:
+        example: [hello-callable, ring-pipeline, contract-gallery, one-epilogue-many-producers, profile-consumer, hopper-gemm-split]
+        profile: [sm_90a, sm_100a, sm_103a, sm_120a, sm_121a]
+        exclude:
+          - example: hopper-gemm-split
+            profile: sm_100a
+          - example: hopper-gemm-split
+            profile: sm_103a
+          - example: hopper-gemm-split
+            profile: sm_120a
+          - example: hopper-gemm-split
+            profile: sm_121a
+    env:
+      PIPELINK_SCRATCH_ROOT: ${{ runner.temp }}/pipelink
+      PROFILE: ${{ matrix.profile }}
+      EXAMPLE: ${{ matrix.example }}
+    steps:
+      - name: Install host build tools
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends binutils g++ git ca-certificates
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Pack admitted example cells
+        run: |
+          eval "$(uv run --project pipec --locked python tools/pipelink_env.py --export)"
+          case "$EXAMPLE" in
+            contract-gallery)
+              uv run --project pipec --locked python examples/contract-gallery/check.py --profile "$PROFILE"
+              ;;
+            one-epilogue-many-producers)
+              # Pack only: linking even hand-CUDA non-alias adapters needs the
+              # pinned TileLang backend (T4 prerequisites); no wheel build in CI.
+              example_dir="examples/$EXAMPLE"
+              work_dir="${PIPELINK_SCRATCH_ROOT}/ci/${EXAMPLE}/${PROFILE}"
+              mkdir -p "$work_dir"
+              includes=(-I third_party/cutlass/include -I pipec/src/pipec2/pack/include)
+              for stage in consumer/epilogue providers/rowscale/rowscale; do
+                uv run --project pipec --locked pipec2 pack "${example_dir}/${stage}.cu" \
+                  --profile "$PROFILE" "${includes[@]}" -o "${work_dir}/${stage##*/}.plink"
+              done
+              case "$PROFILE" in
+                sm_90a)
+                  source_file=producer_sm90.cu
+                  placements=(REG SMEM)
+                  defines=(-D PL_TILE_N=128)
+                  ;;
+                sm_120a|sm_121a)
+                  source_file=producer_sm120.cu
+                  placements=(REG SMEM)
+                  defines=(-D PL_TILE_N=128)
+                  ;;
+                *)
+                  source_file=producer_source.cu
+                  placements=(TMEM SMEM)
+                  defines=(-D PL_TILE_N=128 -D PL_MMA_M=128)
+                  ;;
+              esac
+              for placement in "${placements[@]}"; do
+                uv run --project pipec --locked pipec2 pack \
+                  "${example_dir}/providers/accumulator/${source_file}" --profile "$PROFILE" \
+                  "${includes[@]}" "${defines[@]}" -D "PL_EXPORT_${placement}=1" \
+                  -o "${work_dir}/${placement,,}.plink"
+              done
+              ;;
+            hopper-gemm-split)
+              uv run --project pipec --locked python examples/hopper-gemm-split/build.py --profile "$PROFILE"
+              uv run --project pipec --locked python examples/hopper-gemm-split/build_host.py --profile "$PROFILE"
+              ;;
+            *)
+              uv run --project pipec --locked python "examples/$EXAMPLE/build.py" --profile "$PROFILE"
+              ;;
+          esac

@@ -1,0 +1,187 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" role="img" aria-labelledby="pl-title pl-desc">
+  <title id="pl-title">PipeLink overview</title>
+  <desc id="pl-desc">Stages from different owners are packed by pipec2 pack into .plink packages; pipec2 link checks their contracts, solves resources and roles, generates adapters, and emits one fused kernel, pipeline.cubin, where the stages run as warp roles in one CTA connected by rings and tensor hand-offs.</desc>
+  <defs>
+    <marker id="pl-arrow-teal" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0.8 L9 5 L0 9.2 Z" class="teal"/></marker>
+    <marker id="pl-arrow-blue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0.8 L9 5 L0 9.2 Z" class="blue"/></marker>
+    <marker id="pl-arrow-violet" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0.8 L9 5 L0 9.2 Z" class="violet"/></marker>
+    <marker id="pl-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0.8 L9 5 L0 9.2 Z" class="arrowhead"/>
+    </marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1f2328; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .title { font-size: 17px; font-weight: 600; }
+      .code { font-size: 14px; fill: #424a53; }
+      .muted { fill: #59636e; font-size: 14px; }
+      .small { fill: #59636e; font-size: 14px; }
+      .card { fill: #ffffff; stroke: #d1d9e0; stroke-width: 1.5; }
+      .chip { fill: #f6f8fa; }
+      .wire { fill: none; stroke: #8c959f; stroke-width: 2; }
+      .arrowhead { fill: #8c959f; }
+      .pill { fill: #ffffff; stroke: #8c959f; stroke-width: 1.5; }
+      .cta { fill: none; stroke: #8c959f; stroke-width: 1.5; stroke-dasharray: 5 4; }
+      .linkbox { fill: #f6f8fa; stroke: #d1d9e0; stroke-width: 1.5; }
+      .outbox { fill: #ffffff; stroke: #1f2328; stroke-width: 2; }
+      .verb { fill: #ffffff; stroke: #d1d9e0; stroke-width: 1.2; }
+      .icon { fill: none; stroke: #59636e; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+      .linktitle { font-size: 20px; font-weight: 700; }
+      .verbtext { font-size: 15.5px; font-weight: 500; }
+      .teal { fill: #0f9488; } .blue { fill: #2563eb; } .violet { fill: #7c3aed; }
+      .s-teal { stroke: #0f9488; } .s-blue { stroke: #2563eb; } .s-violet { stroke: #7c3aed; }
+      .lane-teal { fill: #e6f6f4; stroke: #0f9488; } .lane-blue { fill: #e8effd; stroke: #2563eb; } .lane-violet { fill: #f1eafd; stroke: #7c3aed; }
+      .lane { stroke-width: 1.5; }
+      .badge { fill: #fff4d6; stroke: #d4a72c; stroke-width: 1.2; }
+      .badgetext { fill: #7d4e00; font-size: 12.5px; font-weight: 600; }
+      .thread { fill: none; stroke-width: 2.5; stroke-linecap: round; }
+      .ring { fill: none; stroke-width: 3.5; stroke-dasharray: 6.2 3.2; }
+      @media (prefers-color-scheme: dark) {
+        text { fill: #e6edf3; }
+        .code { fill: #c9d1d9; }
+        .muted, .small { fill: #9198a1; }
+        .card { fill: #161b22; stroke: #3d444d; }
+        .chip { fill: #0d1117; }
+        .wire { stroke: #6e7681; }
+        .arrowhead { fill: #6e7681; }
+        .pill { fill: #0d1117; stroke: #6e7681; }
+        .cta { stroke: #6e7681; }
+        .linkbox { fill: #161b22; stroke: #3d444d; }
+        .outbox { fill: #0d1117; stroke: #9198a1; }
+        .verb { fill: #0d1117; stroke: #3d444d; }
+        .icon { stroke: #9198a1; }
+        .teal { fill: #2dd4bf; } .blue { fill: #60a5fa; } .violet { fill: #a78bfa; }
+        .s-teal { stroke: #2dd4bf; } .s-blue { stroke: #60a5fa; } .s-violet { stroke: #a78bfa; }
+        .lane-teal { fill: #0f2a2a; stroke: #2dd4bf; } .lane-blue { fill: #102341; stroke: #60a5fa; } .lane-violet { fill: #221a3d; stroke: #a78bfa; }
+        .badge { fill: #3a2c0a; stroke: #bb8009; }
+        .badgetext { fill: #f2cc60; }
+      }
+    </style>
+  </defs>
+
+  <!-- 1. Sources -->
+  <g>
+    <rect class="card" x="16" y="36" width="250" height="100" rx="14"/>
+    <rect class="teal" x="16" y="36" width="6" height="100" rx="3"/>
+    <text class="title" x="38" y="68">hand-written CUDA</text>
+    <rect class="chip" x="34" y="84" width="216" height="34" rx="8"/>
+    <text class="mono code" x="46" y="106">PL_STAGE("tma.load", …)</text>
+
+    <rect class="card" x="16" y="160" width="250" height="100" rx="14"/>
+    <rect class="blue" x="16" y="160" width="6" height="100" rx="3"/>
+    <text class="title" x="38" y="192">CUTLASS / CuTe CUDA</text>
+    <rect class="chip" x="34" y="208" width="216" height="34" rx="8"/>
+    <text class="mono code" x="46" y="230">PL_ROLE(mma, …)</text>
+
+    <rect class="card" x="16" y="284" width="250" height="100" rx="14"/>
+    <rect class="violet" x="16" y="284" width="6" height="100" rx="3"/>
+    <text class="title" x="38" y="316">TileLang recipe</text>
+    <rect class="chip" x="34" y="332" width="216" height="34" rx="8"/>
+    <text class="mono code" x="46" y="354">import_tensor(…)</text>
+  </g>
+
+  <!-- pack arrows -->
+  <path class="thread s-teal" d="M274 86 H392" marker-end="url(#pl-arrow-teal)"/>
+  <path class="thread s-blue" d="M274 210 H392" marker-end="url(#pl-arrow-blue)"/>
+  <path class="thread s-violet" d="M274 334 H392" marker-end="url(#pl-arrow-violet)"/>
+  <rect class="pill" x="272" y="196" width="104" height="28" rx="14"/>
+  <text class="mono" x="324" y="215" font-size="14" font-weight="600" text-anchor="middle">pipec2 pack</text>
+
+  <!-- 2. .plink packages -->
+  <g>
+    <path class="card" d="M412 44 H558 L580 66 V116 Q580 128 568 128 H412 Q400 128 400 116 V56 Q400 44 412 44 Z"/>
+    <path class="card" d="M558 44 V66 H580"/>
+    <rect class="teal" x="400" y="58" width="5" height="56" rx="2.5"/>
+    <text class="mono" x="420" y="80" font-size="16" font-weight="700">load.plink</text>
+    <text class="small" x="420" y="104">IR + manifest</text>
+
+    <path class="card" d="M412 168 H558 L580 190 V240 Q580 252 568 252 H412 Q400 252 400 240 V180 Q400 168 412 168 Z"/>
+    <path class="card" d="M558 168 V190 H580"/>
+    <rect class="blue" x="400" y="182" width="5" height="56" rx="2.5"/>
+    <text class="mono" x="420" y="204" font-size="16" font-weight="700">mma.plink</text>
+    <rect class="badge" x="418" y="216" width="108" height="22" rx="11"/>
+    <g transform="translate(428 220)">
+      <rect x="0" y="5.5" width="10" height="8" rx="1.5" class="badgetext"/>
+      <path d="M2.2 5.5 V3.6 a2.8 2.8 0 0 1 5.6 0 V5.5" fill="none" stroke-width="1.6" class="badge" style="fill:none"/>
+    </g>
+    <text class="badgetext" x="444" y="231.5">binary only</text>
+
+    <path class="card" d="M412 292 H558 L580 314 V364 Q580 376 568 376 H412 Q400 376 400 364 V304 Q400 292 412 292 Z"/>
+    <path class="card" d="M558 292 V314 H580"/>
+    <rect class="violet" x="400" y="306" width="5" height="56" rx="2.5"/>
+    <text class="mono" x="420" y="328" font-size="16" font-weight="700">epilogue.plink</text>
+    <text class="small" x="420" y="352">IR + manifest</text>
+  </g>
+
+  <!-- link arrows -->
+  <path class="thread s-teal" d="M586 86 C612 86 610 120 632 120" marker-end="url(#pl-arrow-teal)"/>
+  <path class="thread s-blue" d="M586 210 H632" marker-end="url(#pl-arrow-blue)"/>
+  <path class="thread s-violet" d="M586 334 C612 334 610 300 632 300" marker-end="url(#pl-arrow-violet)"/>
+
+  <!-- 3. pipec2 link -->
+  <g>
+    <rect class="linkbox" x="640" y="36" width="260" height="348" rx="18"/>
+    <text class="mono linktitle" x="770" y="80" text-anchor="middle">pipec2 link</text>
+
+    <rect class="verb" x="656" y="112" width="228" height="56" rx="12"/>
+    <path class="icon" d="M672 140 l6 6 l12 -13"/>
+    <text class="verbtext" x="702" y="145.5">check contracts</text>
+
+    <rect class="verb" x="656" y="182" width="228" height="56" rx="12"/>
+    <g class="icon">
+      <rect x="670" y="198" width="9" height="9" rx="2"/>
+      <rect x="683" y="198" width="9" height="9" rx="2"/>
+      <rect x="670" y="211" width="9" height="9" rx="2"/>
+      <rect x="683" y="211" width="9" height="9" rx="2"/>
+    </g>
+    <text class="verbtext" x="702" y="207">solve resources</text>
+    <text class="verbtext" x="702" y="226">&amp; roles</text>
+
+    <rect class="verb" x="656" y="252" width="228" height="56" rx="12"/>
+    <path class="icon" d="M670 274 h20 m-5 -5 l5 5 l-5 5 M692 287 h-20 m5 -5 l-5 5 l5 5"/>
+    <text class="verbtext" x="702" y="285.5">generate adapters</text>
+
+    <text class="small" x="770" y="350" text-anchor="middle">L-PROTO · L-HANDLE · …</text>
+  </g>
+
+  <!-- output arrow -->
+  <path class="wire" style="stroke-width:3" d="M906 210 H940" marker-end="url(#pl-arrow)"/>
+
+  <!-- 4. Output: one fused kernel -->
+  <g>
+    <rect class="outbox" x="950" y="20" width="234" height="380" rx="18"/>
+    <text class="mono" x="1067" y="52" font-size="17" font-weight="700" text-anchor="middle">pipeline.cubin</text>
+    <text class="muted" x="1067" y="74" text-anchor="middle">one fused kernel</text>
+
+    <rect class="cta" x="964" y="88" width="206" height="298" rx="12"/>
+    <text class="small mono" x="976" y="108">CTA</text>
+
+    <!-- lanes -->
+    <rect class="lane lane-teal" x="978" y="118" width="178" height="46" rx="10"/>
+    <text class="mono teal" x="994" y="146" font-size="15" font-weight="700">load</text>
+    <g class="teal" opacity="0.55">
+      <rect x="1094" y="134" width="8" height="14" rx="2"/><rect x="1106" y="134" width="8" height="14" rx="2"/><rect x="1118" y="134" width="8" height="14" rx="2"/><rect x="1130" y="134" width="8" height="14" rx="2"/>
+    </g>
+
+    <rect class="lane lane-blue" x="978" y="220" width="178" height="46" rx="10"/>
+    <text class="mono blue" x="994" y="248" font-size="15" font-weight="700">mma</text>
+    <g class="blue" opacity="0.55">
+      <rect x="1094" y="236" width="8" height="14" rx="2"/><rect x="1106" y="236" width="8" height="14" rx="2"/><rect x="1118" y="236" width="8" height="14" rx="2"/><rect x="1130" y="236" width="8" height="14" rx="2"/>
+    </g>
+
+    <rect class="lane lane-violet" x="978" y="322" width="178" height="46" rx="10"/>
+    <text class="mono violet" x="994" y="350" font-size="15" font-weight="700">epilogue</text>
+    <g class="violet" opacity="0.55">
+      <rect x="1094" y="338" width="8" height="14" rx="2"/><rect x="1106" y="338" width="8" height="14" rx="2"/><rect x="1118" y="338" width="8" height="14" rx="2"/><rect x="1130" y="338" width="8" height="14" rx="2"/>
+    </g>
+
+    <!-- smem ring: load -> mma -->
+    <path class="thread s-teal" d="M1006 166 V212" marker-end="url(#pl-arrow-teal)"/>
+    <circle class="ring s-teal" cx="1006" cy="190" r="10"/>
+    <text class="small" x="1026" y="195">smem ring</text>
+
+    <!-- tensor hand-off: mma -> epilogue -->
+    <path class="thread s-blue" d="M1006 268 V314" marker-end="url(#pl-arrow-blue)"/>
+    <circle class="ring s-blue" cx="1006" cy="292" r="10"/>
+    <text class="small" x="1026" y="297">tensor hand-off</text>
+  </g>
+</svg>

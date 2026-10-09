@@ -1,0 +1,18 @@
+{
+  "name": "wrong_expect_tx_sum",
+  "reference": "design §8.3",
+  "description": "Both root endpoints omit the leaf contribution from the declared expect-tx sum.",
+  "base": "shared_completion",
+  "phase": "protocol.expand",
+  "channel": "root",
+  "expected_clause": "L-PROTO",
+  "expected_path": "channels.root.protocol.full.tx_bytes.sum",
+  "expected_message": "root sum must name exactly the root and all direct members",
+  "mutation": {
+    "paths": [
+      ["stages", 0, "endpoints", 0, "protocol", "full", "tx_bytes"],
+      ["stages", 1, "endpoints", 0, "protocol", "full", "tx_bytes"]
+    ],
+    "value": {"sum": ["root", "member"]}
+  }
+}

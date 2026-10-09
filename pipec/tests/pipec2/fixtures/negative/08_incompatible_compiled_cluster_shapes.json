@@ -1,0 +1,14 @@
+{
+  "name": "incompatible_compiled_cluster_shapes",
+  "reference": "design §8.3",
+  "description": "The two independently valid stage manifests have different fixed compiled cluster shapes.",
+  "base": "topology",
+  "phase": "solve",
+  "expected_clause": "L-TOPO",
+  "expected_path": "stages.topology.cluster.compiled",
+  "expected_message": "compiled cluster shapes disagree",
+  "mutation": {
+    "path": ["stages", 1, "topology", "cluster", "compiled"],
+    "value": [2, 1, 1]
+  }
+}

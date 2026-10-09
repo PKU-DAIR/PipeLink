@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-parity-pair-v6",
+  "title": "M3 ex-ante solo-bound gap-row attempted pair",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "case_id", "attempt", "order", "device", "protocol", "protocol_variant", "selection_classifier", "stream_map_sha256", "stream_classes", "inputs", "arguments", "correctness", "outputs", "strict_classification", "superseded_same_branch_classification", "gap_classification", "eligibility_ledger_sha256", "opening_solo_block_id", "opening_solo_sha256", "mid_series_solo_refresh_count", "identity_gating", "policy_sha256", "ratio_linked_over_reference", "result_wording", "clock_normalized_efficiency_claimed"],
+  "properties": {
+    "schema_version": {"const": "m3-parity-pair-v6"},
+    "case_id": {"enum": ["A-specialization-0", "A-specialization-1", "A-specialization-2", "A-solver-D4", "A-solver-D2", "A-solver-R-id", "A-solver-R-rev"]},
+    "attempt": {"type": "integer", "minimum": 0},
+    "order": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"enum": ["reference", "linked"]}},
+    "device": {"type": "object", "required": ["physical_index", "uuid", "pci_bus_id"]},
+    "protocol": {"type": "object", "required": ["pair_valid_target", "selection_classifier", "gap_row_allowlist"]},
+    "protocol_variant": {"enum": ["gap-fast-v1", "gap-original-v1"]},
+    "selection_classifier": {"const": "gap-ex-ante-solo-v2"},
+    "stream_map_sha256": {"$ref": "#/$defs/sha256"},
+    "stream_classes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+    "inputs": {"type": "object"},
+    "arguments": {"type": "object"},
+    "correctness": {"type": "object", "required": ["reference", "linked"]},
+    "outputs": {"type": "object", "required": ["reference", "linked"]},
+    "strict_classification": {"type": "object", "required": ["original_valid", "amended_valid", "pair_valid", "traces"]},
+    "superseded_same_branch_classification": {"type": "object", "required": ["gap_pair_valid", "halves"]},
+    "gap_classification": {
+      "type": "object",
+      "required": ["gap_pair_valid", "reasons", "halves", "cross_branch", "clock_median_delta_linked_minus_reference_mhz"],
+      "properties": {
+        "gap_pair_valid": {"type": "boolean"},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+        "halves": {
+          "type": "object", "additionalProperties": false,
+          "required": ["reference", "linked"],
+          "properties": {"reference": {"$ref": "#/$defs/half"}, "linked": {"$ref": "#/$defs/half"}}
+        },
+        "cross_branch": {"type": "boolean"},
+        "clock_median_delta_linked_minus_reference_mhz": {"oneOf": [{"type": "number"}, {"type": "null"}]}
+      }
+    },
+    "eligibility_ledger_sha256": {"$ref": "#/$defs/sha256"},
+    "opening_solo_block_id": {"type": "string", "minLength": 1},
+    "opening_solo_sha256": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reference", "linked"],
+      "properties": {"reference": {"$ref": "#/$defs/sha256"}, "linked": {"$ref": "#/$defs/sha256"}}
+    },
+    "mid_series_solo_refresh_count": {"const": 0},
+    "identity_gating": {"type": "boolean"},
+    "policy_sha256": {"$ref": "#/$defs/sha256"},
+    "ratio_linked_over_reference": {"oneOf": [{"type": "number", "exclusiveMinimum": 0}, {"type": "null"}]},
+    "result_wording": {"const": "realized throughput ratio under the observed operating points"},
+    "clock_normalized_efficiency_claimed": {"const": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "half": {
+      "type": "object",
+      "required": ["valid", "reasons", "preassigned_branch", "observed_branch", "branch_valid", "clock_valid", "identity_valid", "identity_gating", "policy_valid", "timing_valid", "timestamp_coverage_identical", "solo_sha256", "policy_sha256", "policy_record_sha256", "solo_median_clock_mhz", "paired_median_clock_mhz", "identity_delta_fraction", "identity_delta_percent", "clock_min_mhz", "clock_max_mhz", "observed_masks", "power_draw_w", "configured_power_limit_w", "eligibility_window_start_ns", "eligibility_window_end_ns", "cuda_scoring_window_start_ns", "cuda_scoring_window_end_ns", "covering_sample_count"],
+      "properties": {
+        "valid": {"type": "boolean"},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+        "preassigned_branch": {"enum": ["original", "power-cap"]},
+        "observed_branch": {"enum": ["original", "power-cap", "invalid"]},
+        "branch_valid": {"type": "boolean"},
+        "clock_valid": {"type": "boolean"},
+        "identity_valid": {"type": "boolean"},
+        "identity_gating": {"type": "boolean"},
+        "policy_valid": {"type": "boolean"},
+        "timing_valid": {"type": "boolean"},
+        "timestamp_coverage_identical": {"type": "boolean"},
+        "solo_sha256": {"$ref": "#/$defs/sha256"},
+        "policy_sha256": {"$ref": "#/$defs/sha256"},
+        "policy_record_sha256": {"$ref": "#/$defs/sha256"},
+        "solo_median_clock_mhz": {"type": "number", "exclusiveMinimum": 0},
+        "paired_median_clock_mhz": {"oneOf": [{"type": "number", "exclusiveMinimum": 0}, {"type": "null"}]},
+        "identity_delta_fraction": {"oneOf": [{"type": "number"}, {"type": "null"}]},
+        "identity_delta_percent": {"oneOf": [{"type": "number"}, {"type": "null"}]},
+        "clock_min_mhz": {"oneOf": [{"type": "number"}, {"type": "null"}]},
+        "clock_max_mhz": {"oneOf": [{"type": "number"}, {"type": "null"}]},
+        "observed_masks": {"type": "array", "items": {"type": "integer"}},
+        "power_draw_w": {"type": "object", "required": ["sample_count", "p10", "median", "p90"]},
+        "configured_power_limit_w": {"type": "number", "exclusiveMinimum": 0},
+        "eligibility_window_start_ns": {"type": "integer"},
+        "eligibility_window_end_ns": {"type": "integer"},
+        "cuda_scoring_window_start_ns": {"type": "integer"},
+        "cuda_scoring_window_end_ns": {"type": "integer"},
+        "covering_sample_count": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

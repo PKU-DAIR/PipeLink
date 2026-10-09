@@ -1,0 +1,338 @@
+{
+  "pipeline": {
+    "depth_priority": [],
+    "domains": {
+      "opcode": {
+        "capacity": 16
+      }
+    },
+    "exclusive": [
+      [
+        "instr_*",
+        "instr_*"
+      ]
+    ],
+    "forced_bindings": {
+      "pipelink_megakernel_opcode_slot0": 0,
+      "pipelink_megakernel_opcode_slot1": 1,
+      "pipelink_megakernel_opcode_slot2": 2,
+      "pipelink_megakernel_opcode_slot3": 3,
+      "pipelink_megakernel_opcode_slot4": 4,
+      "pipelink_megakernel_opcode_slot5": 5,
+      "pipelink_megakernel_opcode_slot6": 6,
+      "pipelink_megakernel_opcode_slot7": 7
+    },
+    "handles": {
+      "pipelink_launch_regs": {
+        "binding": "bind",
+        "class": "regs",
+        "domain": "regs",
+        "owner": "reg_group:launch"
+      },
+      "pipelink_megakernel_attn_partial_pages": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_page",
+        "owner": "claim:mk_attn_partial_pages"
+      },
+      "pipelink_megakernel_attn_partial_semaphores": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_semaphore",
+        "owner": "claim:mk_attn_partial_semaphores"
+      },
+      "pipelink_megakernel_attn_reduction_pages": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_page",
+        "owner": "claim:mk_attn_reduction_pages"
+      },
+      "pipelink_megakernel_attn_reduction_semaphores": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_semaphore",
+        "owner": "claim:mk_attn_reduction_semaphores"
+      },
+      "pipelink_megakernel_bar_3": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "named_barrier",
+        "owner": "claim:mk_bar_3"
+      },
+      "pipelink_megakernel_bar_4": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "named_barrier",
+        "owner": "claim:mk_bar_4"
+      },
+      "pipelink_megakernel_bar_vm": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "named_barrier",
+        "owner": "claim:mk_bar_vm"
+      },
+      "pipelink_megakernel_down_proj_pages": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_page",
+        "owner": "claim:mk_down_proj_pages"
+      },
+      "pipelink_megakernel_down_proj_scratch": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_scratch",
+        "owner": "claim:mk_down_proj_scratch"
+      },
+      "pipelink_megakernel_down_proj_semaphores": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_semaphore",
+        "owner": "claim:mk_down_proj_semaphores"
+      },
+      "pipelink_megakernel_lm_head_pages": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_page",
+        "owner": "claim:mk_lm_head_pages"
+      },
+      "pipelink_megakernel_lm_head_scratch": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_scratch",
+        "owner": "claim:mk_lm_head_scratch"
+      },
+      "pipelink_megakernel_lm_head_semaphores": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_semaphore",
+        "owner": "claim:mk_lm_head_semaphores"
+      },
+      "pipelink_megakernel_o_proj_pages": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_page",
+        "owner": "claim:mk_o_proj_pages"
+      },
+      "pipelink_megakernel_o_proj_scratch": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_scratch",
+        "owner": "claim:mk_o_proj_scratch"
+      },
+      "pipelink_megakernel_o_proj_semaphores": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_semaphore",
+        "owner": "claim:mk_o_proj_semaphores"
+      },
+      "pipelink_megakernel_opcode_slot0": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "opcode",
+        "owner": "claim:mk_opcode_slot0"
+      },
+      "pipelink_megakernel_opcode_slot1": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "opcode",
+        "owner": "claim:mk_opcode_slot1"
+      },
+      "pipelink_megakernel_opcode_slot2": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "opcode",
+        "owner": "claim:mk_opcode_slot2"
+      },
+      "pipelink_megakernel_opcode_slot3": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "opcode",
+        "owner": "claim:mk_opcode_slot3"
+      },
+      "pipelink_megakernel_opcode_slot4": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "opcode",
+        "owner": "claim:mk_opcode_slot4"
+      },
+      "pipelink_megakernel_opcode_slot5": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "opcode",
+        "owner": "claim:mk_opcode_slot5"
+      },
+      "pipelink_megakernel_opcode_slot6": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "opcode",
+        "owner": "claim:mk_opcode_slot6"
+      },
+      "pipelink_megakernel_opcode_slot7": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "opcode",
+        "owner": "claim:mk_opcode_slot7"
+      },
+      "pipelink_megakernel_pages_base": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "smem",
+        "owner": "claim:mk_pages_base"
+      },
+      "pipelink_megakernel_qkv_pages": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_page",
+        "owner": "claim:mk_qkv_pages"
+      },
+      "pipelink_megakernel_qkv_scratch": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_scratch",
+        "owner": "claim:mk_qkv_scratch"
+      },
+      "pipelink_megakernel_qkv_semaphores": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_semaphore",
+        "owner": "claim:mk_qkv_semaphores"
+      },
+      "pipelink_megakernel_ring_base": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "smem",
+        "owner": "claim:mk_ring_base"
+      },
+      "pipelink_megakernel_tmem_base": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "tmem",
+        "owner": "claim:mk_tmem_base"
+      },
+      "pipelink_megakernel_upgate_pages": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_page",
+        "owner": "claim:mk_upgate_pages"
+      },
+      "pipelink_megakernel_upgate_scratch": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_scratch",
+        "owner": "claim:mk_upgate_scratch"
+      },
+      "pipelink_megakernel_upgate_semaphores": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "instr_semaphore",
+        "owner": "claim:mk_upgate_semaphores"
+      },
+      "pipelink_megakernel_vmbar_base": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "smem",
+        "owner": "claim:mk_vmbar_base"
+      },
+      "pipelink_megakernel_warp_consumer": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "warp",
+        "owner": "claim:mk_warp_consumer"
+      },
+      "pipelink_megakernel_warp_controller": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "warp",
+        "owner": "claim:mk_warp_controller"
+      },
+      "pipelink_megakernel_warp_launcher": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "warp",
+        "owner": "claim:mk_warp_launcher"
+      },
+      "pipelink_megakernel_warp_loader": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "warp",
+        "owner": "claim:mk_warp_loader"
+      },
+      "pipelink_megakernel_warp_storer": {
+        "binding": "bind",
+        "class": "base",
+        "domain": "warp",
+        "owner": "claim:mk_warp_storer"
+      },
+      "pipelink_regs_consumer_wg": {
+        "binding": "bind",
+        "class": "regs",
+        "domain": "regs",
+        "owner": "reg_group:consumer_wg"
+      },
+      "pipelink_regs_producer_wg": {
+        "binding": "bind",
+        "class": "regs",
+        "domain": "regs",
+        "owner": "reg_group:producer_wg"
+      }
+    },
+    "name": "pipelink.megakernel.rebind-smem",
+    "phases": [
+      "instr_org.pipelink.megakernel.noop",
+      "instr_org.pipelink.megakernel.qkv",
+      "instr_org.pipelink.megakernel.attn-partial",
+      "instr_org.pipelink.megakernel.attn-reduction",
+      "instr_org.pipelink.megakernel.o-proj",
+      "instr_org.pipelink.megakernel.upgate",
+      "instr_org.pipelink.megakernel.down-proj",
+      "instr_org.pipelink.megakernel.lm-head"
+    ],
+    "regs_priority": [
+      "pipelink_regs_consumer_wg",
+      "pipelink_regs_producer_wg",
+      "pipelink_launch_regs"
+    ],
+    "stages": [
+      {
+        "artifact_path": "../build/artifacts/interpreter.plink",
+        "stage_id": "org.pipelink.megakernel.interpreter"
+      },
+      {
+        "artifact_path": "../build/artifacts/op_noop.plink",
+        "stage_id": "org.pipelink.megakernel.noop"
+      },
+      {
+        "artifact_path": "../build/artifacts/op_qkv.plink",
+        "stage_id": "org.pipelink.megakernel.qkv"
+      },
+      {
+        "artifact_path": "../build/artifacts/op_attn_partial.plink",
+        "stage_id": "org.pipelink.megakernel.attn-partial"
+      },
+      {
+        "artifact_path": "../build/artifacts/op_attn_reduction.plink",
+        "stage_id": "org.pipelink.megakernel.attn-reduction"
+      },
+      {
+        "artifact_path": "../build/artifacts/op_o_proj.plink",
+        "stage_id": "org.pipelink.megakernel.o-proj"
+      },
+      {
+        "artifact_path": "../build/artifacts/op_upgate.plink",
+        "stage_id": "org.pipelink.megakernel.upgate"
+      },
+      {
+        "artifact_path": "../build/artifacts/op_down_proj.plink",
+        "stage_id": "org.pipelink.megakernel.down-proj"
+      },
+      {
+        "artifact_path": "../build/artifacts/op_lm_head.plink",
+        "stage_id": "org.pipelink.megakernel.lm-head"
+      }
+    ],
+    "topology": {
+      "persistent": true,
+      "scheduler": "static"
+    }
+  }
+}

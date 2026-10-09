@@ -1,0 +1,21 @@
+--- a/csrc/bindings.cu
++++ b/csrc/bindings.cu
+@@ -4,6 +4,18 @@
+ #include "utils.cuh"
+ 
+ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
++    m.def("zero_empty_routed_wgrads", [](at::Tensor gate, at::Tensor up,
++                                          at::Tensor down, at::Tensor counts) {
++        utils::zero_empty_routed_wgrads::globals g {
++            .d_w_routed_gate = reinterpret_cast<uint16_t *>(gate.data_ptr<at::BFloat16>()),
++            .d_w_routed_up = reinterpret_cast<uint16_t *>(up.data_ptr<at::BFloat16>()),
++            .d_w_routed_down = reinterpret_cast<uint16_t *>(down.data_ptr<at::BFloat16>()),
++            .tokens_per_expert = counts.data_ptr<int>(),
++            .elements_per_expert = gate.size(1) * gate.size(2),
++        };
++        utils::zero_empty_routed_wgrads::zero_empty_routed_wgrads_kernel
++            <<<dim3(128, gate.size(0)), 256, 0, at::cuda::getCurrentCUDAStream()>>>(g);
++    });
+     m.def("all_gather_top_experts", &utils::all_gather_top_experts::all_gather_top_experts_entrypoint, "",
+           pybind11::arg("top_experts"), pybind11::arg("all_gather_top_experts_buffer"),
+           pybind11::arg("all_gather_top_experts_buffer_multicast_ptr"), pybind11::arg("rank"), pybind11::arg("chunk_bytes"));

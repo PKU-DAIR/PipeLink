@@ -1,0 +1,19 @@
+{
+  "name": "non_warpgroup_aligned_regs_claim_roles",
+  "reference": "D-finding",
+  "description": "A two-warp role is changed from a complete explicit group to an implicit one-role group.",
+  "base": "implicit_register",
+  "phase": "solve",
+  "expected_clause": "L-REGS",
+  "expected_path": "solve",
+  "expected_message": "no feasible joint binding and placement exists",
+  "mutation": {
+    "path": ["stages", 0, "claims", 1],
+    "value": {
+      "domain": "regs",
+      "handle": "pipelink_regs_r0",
+      "roles": ["r0"],
+      "values": [64]
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-fast-leg-record-v1",
+  "oneOf": [
+    {"$ref": "#/$defs/fast"},
+    {"$ref": "#/$defs/original"}
+  ],
+  "$defs": {
+    "base": {"type": "object", "required": ["schema_version", "protocol_variant", "case_id", "gpu", "eligibility_ledger_sha256", "median_ratio_linked_over_reference", "result_path", "escalation_depth", "result_sha256"]},
+    "fast": {"allOf": [{"$ref": "#/$defs/base"}, {"properties": {"schema_version": {"const": "m3-fast-result-v1"}, "protocol_variant": {"enum": ["fast-strict-v1", "f2-fast-cross-source-v1", "gap-fast-v1"]}, "escalation_depth": {"const": 0}}}]},
+    "original": {"allOf": [{"$ref": "#/$defs/base"}, {"properties": {"schema_version": {"const": "m3-original-duration-result-v1"}, "protocol_variant": {"enum": ["original-escalation-strict-v1", "f2-original-cross-source-v1", "gap-original-v1"]}, "escalation_depth": {"const": 1}}}]}
+  }
+}

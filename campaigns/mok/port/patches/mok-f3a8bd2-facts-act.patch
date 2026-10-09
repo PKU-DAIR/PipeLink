@@ -1,0 +1,44 @@
+diff --git a/csrc/megakernel/swiglu.cuh b/csrc/megakernel/swiglu.cuh
+--- a/csrc/megakernel/swiglu.cuh
++++ b/csrc/megakernel/swiglu.cuh
+@@ -38,4 +38,5 @@
+ template <bool IS_SHARED, bool IS_CLAMPED>
+ static __device__ __forceinline__ void swiglu_fwd_kernel(
++    const void* view,
+     const epi_bf16_gl &gate_gmem,
+     const epi_bf16_gl &up_gmem,
+@@ -68,3 +69,3 @@
+ 
+-    const int intermediate_dim_col_blocks = hidden_gmem.cols() / config::MLP_Nb;
++    const int intermediate_dim_col_blocks = hidden_gmem.cols() / facts(view).MLP_Nb;
+     const int global_minibatch_idx = macrobatch_idx * (macrobatch_size / minibatch_size) + minibatch_idx;
+@@ -105,3 +106,3 @@
+ 
+-                const int parent_task_idx = (row / (config::MLP_Mb / config::SWIGLU_Mb)) * intermediate_dim_col_blocks + col / (config::MLP_Nb / config::SWIGLU_Nb);
++                const int parent_task_idx = (row / (facts(view).MLP_Mb / config::SWIGLU_Mb)) * intermediate_dim_col_blocks + col / (facts(view).MLP_Nb / config::SWIGLU_Nb);
+                 barrier_wait(gate_up_tile_ready, gate_up_tile_ready_base_index + parent_task_idx, 2 * config::CLUSTER_SIZE);
+@@ -202,3 +203,3 @@
+                     ++row;
+-                barrier_arrive(hidden_row_block_ready, hidden_row_block_ready_base_index + row / (config::MLP_Mb / config::SWIGLU_Mb));
++                barrier_arrive(hidden_row_block_ready, hidden_row_block_ready_base_index + row / (facts(view).MLP_Mb / config::SWIGLU_Mb));
+             }
+@@ -209,4 +210,5 @@
+ template <bool IS_SHARED, bool IS_CLAMPED>
+ static __device__ __forceinline__ void swiglu_bwd_kernel(
++    const void* view,
+     const epi_bf16_gl &d_hidden_gmem,
+     const std::conditional_t<IS_SHARED, swiglu_bf16_gl, routed_gate_up_gl> &gate_gmem,
+@@ -264,2 +266,2 @@
+-    const int intermediate_dim_col_blocks = gate_gmem.cols() / config::MLP_Nb;
++    const int intermediate_dim_col_blocks = gate_gmem.cols() / facts(view).MLP_Nb;
+     const int global_minibatch_idx = macrobatch_idx * (macrobatch_size / minibatch_size) + minibatch_idx;
+@@ -305,3 +307,3 @@
+ 
+-                const int parent_task_idx = (row / (config::MLP_Mb / config::SWIGLU_Mb)) * intermediate_dim_col_blocks + col / (config::MLP_Nb / config::SWIGLU_Nb);
++                const int parent_task_idx = (row / (facts(view).MLP_Mb / config::SWIGLU_Mb)) * intermediate_dim_col_blocks + col / (facts(view).MLP_Nb / config::SWIGLU_Nb);
+                 barrier_wait(d_hidden_tile_ready, d_hidden_tile_ready_base_index + parent_task_idx, config::CLUSTER_SIZE);
+@@ -559,3 +561,3 @@
+                     ++row;
+-                barrier_arrive(d_gate_up_row_block_ready, d_gate_up_row_block_ready_base_index + row / (config::MLP_Mb / config::SWIGLU_Mb));
++                barrier_arrive(d_gate_up_row_block_ready, d_gate_up_row_block_ready_base_index + row / (facts(view).MLP_Mb / config::SWIGLU_Mb));
+             }

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-fast-trigger-evaluation-v1",
+  "type": "object",
+  "required": ["schema_version", "case_id", "fast_result_sha256", "fast_median", "inclusive_interval", "triggered", "evaluated_once", "gpu", "trigger_evaluation_sha256"],
+  "properties": {
+    "schema_version": {"const": "m3-fast-trigger-evaluation-v1"},
+    "inclusive_interval": {"const": [0.96, 0.98]},
+    "triggered": {"type": "boolean"},
+    "evaluated_once": {"const": true},
+    "trigger_evaluation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

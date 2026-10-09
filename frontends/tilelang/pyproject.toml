@@ -1,0 +1,40 @@
+# Native prerequisites: Linux x86-64; a C++17 host compiler and standard-library
+# development headers for Torch/TVM-FFI; binutils (nm/readelf); CUDA 13.3
+# (nvcc, cuobjdump, nvJitLink, driver headers/stubs, compute-sanitizer).
+# GPU gates additionally require an SM103-capable NVIDIA driver and nvidia-smi.
+# Configure the toolkit through PIPELINK_CUDA_HOME; never relocate a virtualenv.
+[project]
+name = "pipelink-tilelang"
+version = "0.0.0"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "tilelang==0.1.14",
+  "torch==2.8.0+cpu",
+  "setuptools==80.9.0",
+  "ninja==1.11.1.4",
+  "pipec2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pipelink_tilelang"]
+
+[tool.uv]
+package = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+# Locally built from v0.1.14 and the patches documented in env/README.md.
+tilelang = { path = "env/wheels/tilelang-0.1.14-cp39-abi3-linux_x86_64.whl" }
+pipec2 = { path = "../../pipec", editable = true }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

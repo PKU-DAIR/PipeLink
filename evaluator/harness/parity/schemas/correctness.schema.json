@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-correctness-record-v2",
+  "title": "M3 correctness, subject tolerance, sanitizer, and barrier record",
+  "type": "object",
+  "required": ["schema_version", "utc_time", "subject_id", "case_id", "image_id", "stream_map_sha256", "stream_classes", "gate_a", "gate_b", "safety", "barrier_audit", "tolerance_policy", "all_true"],
+  "properties": {
+    "schema_version": {"const": "m3-correctness-record-v2"},
+    "utc_time": {"type": "string"},
+    "subject_id": {"enum": ["family1", "family2", "family3", "A-specialization", "A-solver", "A-authoring", "A-F1-continuity", "N-register-coupling", "N-tiny-jit"]},
+    "case_id": {"type": "string", "minLength": 1},
+    "image_id": {"type": "string", "minLength": 1},
+    "stream_map_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "stream_classes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+    "gate_a": {"type": "object", "required": ["bitwise_identical"], "properties": {"bitwise_identical": {"type": "boolean"}}},
+    "gate_b": {
+      "type": "object",
+      "required": ["passed", "tolerance", "nonfinite_policy"],
+      "properties": {
+        "passed": {"type": "boolean"},
+        "tolerance": {
+          "type": "object", "additionalProperties": false,
+          "required": ["rtol", "atol"],
+          "properties": {"rtol": {"type": "number"}, "atol": {"type": "number"}}
+        },
+        "nonfinite_policy": {
+          "const": {
+            "nan": "both-NaN-same-element-only",
+            "infinity": "same-sign-infinity-only",
+            "finite": "abs(actual-expected) <= atol + rtol*abs(expected)"
+          }
+        },
+        "reference_outputs_finite": {"type": "boolean"}
+      }
+    },
+    "safety": {
+      "type": "object", "required": ["racecheck_hazards", "synccheck_errors"],
+      "properties": {"racecheck_hazards": {"const": 0}, "synccheck_errors": {"const": 0}}
+    },
+    "barrier_audit": {"type": "object"},
+    "tolerance_policy": {"type": "object", "required": ["subject_id", "rtol", "atol", "plan_section"]},
+    "all_true": {"type": "boolean"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"subject_id": {"const": "family2"}}},
+      "then": {
+        "properties": {
+          "gate_b": {
+            "properties": {
+              "tolerance": {"const": {"rtol": 0.02, "atol": 0.02}},
+              "reference_outputs_finite": {"const": true}
+            },
+            "required": ["reference_outputs_finite"]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "gate_b": {
+            "properties": {
+              "tolerance": {"const": {"rtol": 0.01, "atol": 0.001}}
+            }
+          }
+        }
+      }
+    }
+  ]
+}

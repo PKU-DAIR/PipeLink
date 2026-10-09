@@ -1,0 +1,15 @@
+{
+  "name": "incomplete_variant_key_tuple",
+  "reference": "D-finding",
+  "description": "The second variant row omits one handle from the complete tuple established by the first row.",
+  "base": "schema",
+  "phase": "schema.stage",
+  "stage_index": 0,
+  "expected_clause": "L-HANDLE",
+  "expected_path": "$.stage.variants[1].key",
+  "expected_message": "variant key is incomplete",
+  "mutation": {
+    "path": ["stages", 0, "stage", "variants", 1, "key"],
+    "value": {"pipelink_depth": 4}
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-parity-gap-eligibility-ledger-v3",
+  "type": "object",
+  "required": ["schema_version", "case_id", "gpu_uuid", "pci_bus_id", "policy_sha256", "policy_record_sha256", "policy_before_record_sha256", "policy_after_record_sha256", "solo_block_sha256", "identity_gating", "target_pairs", "attempt_cap", "leading_discard_ns", "attempts", "selected_attempts", "target_met", "ratio_blind", "eligibility_ledger_sha256"],
+  "properties": {
+    "schema_version": {"const": "m3-parity-gap-eligibility-ledger-v3"},
+    "case_id": {"enum": ["A-specialization-0", "A-specialization-1", "A-specialization-2", "A-solver-D4", "A-solver-D2", "A-solver-R-id", "A-solver-R-rev"]},
+    "policy_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "solo_block_sha256": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["reference", "linked"],
+        "additionalProperties": false,
+        "properties": {
+          "reference": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "linked": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "identity_gating": {"type": "boolean"},
+    "leading_discard_ns": {"type": "integer", "minimum": 1},
+    "attempts": {"type": "array"},
+    "selected_attempts": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+    "target_met": {"type": "boolean"},
+    "ratio_blind": {"const": true},
+    "eligibility_ledger_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-parity-gap-solo-v1",
+  "type": "object",
+  "required": ["schema_version", "case_id", "series_id", "duration_leg", "session_id", "solo_block_id", "role", "image_id", "image_sha256", "gpu_uuid", "pci_bus_id", "policy_sha256", "policy_record_sha256", "assigned_branch", "slot_start_ns", "eligibility_window_start_ns", "eligibility_window_end_ns", "cuda_scoring_window_start_ns", "cuda_scoring_window_end_ns", "slot_end_ns", "leading_discard_ns", "timestamp_coverage_identical", "median_clock_mhz", "clock_min_mhz", "clock_max_mhz", "configured_power_limit_w", "power_draw_w", "covering_sample_count", "samples", "solo_sha256"],
+  "properties": {
+    "schema_version": {"const": "m3-parity-gap-solo-v1"},
+    "case_id": {"enum": ["A-specialization-0", "A-specialization-1", "A-specialization-2", "A-solver-D4", "A-solver-D2", "A-solver-R-id", "A-solver-R-rev"]},
+    "role": {"enum": ["reference", "linked"]},
+    "series_id": {"type": "string", "minLength": 1},
+    "duration_leg": {"type": "string", "minLength": 1},
+    "session_id": {"type": "string", "minLength": 1},
+    "solo_block_id": {"type": "string", "minLength": 1},
+    "image_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "policy_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "policy_record_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "assigned_branch": {"enum": ["original", "power-cap"]},
+    "leading_discard_ns": {"type": "integer", "minimum": 1},
+    "timestamp_coverage_identical": {"const": true},
+    "covering_sample_count": {"type": "integer", "minimum": 2},
+    "samples": {"type": "array", "minItems": 2},
+    "solo_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

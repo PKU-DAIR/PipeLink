@@ -1,0 +1,73 @@
+--- a/framework/interp_bwd.cu
++++ b/framework/interp_bwd.cu
+@@ -29,24 +29,24 @@
+ static __device__ __forceinline__ void mok_framework_run(const void* opaque, const MokFrameworkResidue &g) {
+     // Task counts and live targets: upstream backward.cuh:3-61,209; no host capacity substitution.
+     const int num_local_experts = g.num_local_experts;
+-    const int intermediate_dim_col_blocks = g.intermediate / g.MLP_Nb;
+-    const int hidden_dim_col_blocks = g.hidden / g.MLP_Nb;
++    const int intermediate_dim_col_blocks = g.intermediate / 256;
++    const int hidden_dim_col_blocks = g.hidden / 256;
+ 
+     int cluster_idx = clusterIdx().x;
+     const int cta_rank = cluster_ctarank();
+ 
+-    const int shared_row_blocks = g.num_local_tokens / g.MLP_Mb;
++    const int shared_row_blocks = g.num_local_tokens / 256;
+     const int shared_dgrad_down_tasks = shared_row_blocks * intermediate_dim_col_blocks;
+-    const int shared_swiglu_bwd_tiles = (g.num_local_tokens / g.SWIGLU_Mb) * (g.intermediate / g.SWIGLU_Nb);
+-    const int shared_swiglu_bwd_tasks = (shared_swiglu_bwd_tiles + 2 * g.SWIGLU_BWD_PIPE_DEPTH - 1) / (2 * g.SWIGLU_BWD_PIPE_DEPTH);
++    const int shared_swiglu_bwd_tiles = (g.num_local_tokens / 128) * (g.intermediate / 128);
++    const int shared_swiglu_bwd_tasks = (shared_swiglu_bwd_tiles + 2 * 2 - 1) / (2 * 2);
+     const int shared_dgrad_gate_up_tasks = shared_row_blocks * hidden_dim_col_blocks;
+     const int shared_wgrad_tasks = intermediate_dim_col_blocks * hidden_dim_col_blocks; // per weight matrix
+     const int shared_tasks = shared_dgrad_down_tasks + shared_swiglu_bwd_tasks + shared_dgrad_gate_up_tasks + 3 * shared_wgrad_tasks;
+ 
+-    const int minibatch_routed_row_blocks = g.minibatch_size / g.MLP_Mb;
++    const int minibatch_routed_row_blocks = g.minibatch_size / 256;
+     const int minibatch_routed_dgrad_down_tasks = minibatch_routed_row_blocks * intermediate_dim_col_blocks;
+-    const int minibatch_routed_swiglu_tiles = (g.minibatch_size / g.SWIGLU_Mb) * (g.intermediate / g.SWIGLU_Nb);
+-    const int minibatch_routed_swiglu_bwd_tasks = (minibatch_routed_swiglu_tiles + 2 * g.SWIGLU_BWD_PIPE_DEPTH - 1) / (2 * g.SWIGLU_BWD_PIPE_DEPTH);
++    const int minibatch_routed_swiglu_tiles = (g.minibatch_size / 128) * (g.intermediate / 128);
++    const int minibatch_routed_swiglu_bwd_tasks = (minibatch_routed_swiglu_tiles + 2 * 2 - 1) / (2 * 2);
+     const int minibatch_routed_dgrad_gate_up_tasks = minibatch_routed_row_blocks * hidden_dim_col_blocks;
+     const int minibatch_routed_bwd_tasks = minibatch_routed_dgrad_down_tasks + minibatch_routed_swiglu_bwd_tasks + minibatch_routed_dgrad_gate_up_tasks;
+ 
+@@ -54,7 +54,7 @@
+     const int wgrad_tasks = 3 * wgrad_matrix_tasks;
+ 
+     const int minibatch_routed_gate_up_tasks = minibatch_routed_row_blocks * intermediate_dim_col_blocks;
+-    const int minibatch_routed_swiglu_fwd_tasks = (minibatch_routed_swiglu_tiles + 2 * g.SWIGLU_FWD_PIPE_DEPTH - 1) / (2 * g.SWIGLU_FWD_PIPE_DEPTH);
++    const int minibatch_routed_swiglu_fwd_tasks = (minibatch_routed_swiglu_tiles + 2 * 3 - 1) / (2 * 3);
+     const int minibatch_routed_replay_tasks = 2 * minibatch_routed_gate_up_tasks + minibatch_routed_swiglu_fwd_tasks;
+ 
+     const int comm_clusters = g.num_comm_sms / 2;
+@@ -66,14 +66,14 @@
+     auto num_minibatches_of = [&](int macrobatch_idx) { return (min(num_tokens - macrobatch_idx * macrobatch_size, macrobatch_size) + g.minibatch_size - 1) / g.minibatch_size; };
+     auto num_dispatch_tasks_of = [&](int macrobatch_idx) {
+         const int macrobatch_tokens = min(macrobatch_size, num_tokens - macrobatch_idx * macrobatch_size);
+-        const int col_blocks = (g.hidden + g.DISPATCH_Nb - 1) / g.DISPATCH_Nb;
+-        return (macrobatch_tokens / g.DISPATCH_Mb) * col_blocks;
++        const int col_blocks = (g.hidden + 512 - 1) / 512;
++        return (macrobatch_tokens / 128) * col_blocks;
+     };
+     auto num_combine_tasks_of = [&](int macrobatch_idx) {
+         const int macrobatch_tokens = min(macrobatch_size, num_tokens - macrobatch_idx * macrobatch_size);
+-        const int col_blocks = (g.hidden + g.COMBINE_Nb - 1) / g.COMBINE_Nb;
+-        const int tiles = (macrobatch_tokens / g.COMBINE_Mb) * col_blocks;
+-        return (tiles + g.COMBINE_PIPE_DEPTH - 1) / g.COMBINE_PIPE_DEPTH;
++        const int col_blocks = (g.hidden + 1024 - 1) / 1024;
++        const int tiles = (macrobatch_tokens / 16) * col_blocks;
++        return (tiles + 7 - 1) / 7;
+     };
+     auto routed_buffers_done_required_count_of = [&](int macrobatch_idx) {
+         return 2 * (num_minibatches_of(macrobatch_idx) * minibatch_routed_bwd_tasks + wgrad_tasks) + num_combine_tasks_of(macrobatch_idx);
+@@ -188,7 +188,7 @@
+                minibatch_task_idx < minibatch_routed_dgrad_down_tasks + minibatch_routed_swiglu_bwd_tasks; // swiglu bwd
+     };
+ 
+-    const int d_gate_up_row_block_ready_required_count = (g.MLP_Mb / g.SWIGLU_Mb) * (g.intermediate / g.SWIGLU_Nb);
++    const int d_gate_up_row_block_ready_required_count = (256 / 128) * (g.intermediate / 128);
+     const uint32_t buffer_done_flag = num_macrobatches > 1 ? uint32_t(MOK_GEMM_BUFFER_DONE) : 0u;
+ 
+     for (int task_iter = 0; cluster_idx >= 0 && cluster_idx < true_num_clusters; ++task_iter) {

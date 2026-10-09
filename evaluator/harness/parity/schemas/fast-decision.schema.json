@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-fast-decision-v1",
+  "type": "object",
+  "required": ["schema_version", "case_id", "fast_protocol_variant", "original_protocol_variant", "fast_result_sha256", "original_result_sha256", "trigger_record_sha256", "fast_median_ratio_linked_over_reference", "original_median_ratio_linked_over_reference", "decision_source", "decision_median_ratio_linked_over_reference", "pairs_pooled", "escalation_count", "same_gpu", "direct_f2_audit_only", "decision_sha256"],
+  "properties": {
+    "schema_version": {"const": "m3-fast-decision-v1"},
+    "decision_source": {"enum": ["fast", "original-duration-escalation"]},
+    "decision_median_ratio_linked_over_reference": {"type": "number", "exclusiveMinimum": 0},
+    "pairs_pooled": {"const": false},
+    "escalation_count": {"enum": [0, 1]},
+    "same_gpu": {"const": true},
+    "decision_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-f2-fast-transition-result-v2",
+  "type": "object",
+  "required": ["schema_version", "classifier_version", "valid", "reasons", "preassigned_branch", "scored_median_clock_mhz", "scored_band_mhz", "scored_clock_valid", "scored_branch_valid", "clock_contact_valid", "first_clock_contact_index", "first_clock_contact_time_ns", "transition_in_band_count", "transition_out_of_band_count", "clock_exit_indices", "clock_exit_times_ns", "clock_reentry_indices", "clock_reentry_times_ns", "final_transition_clock_mhz", "final_transition_signed_distance_from_band_mhz", "mask_branch_entry_index", "mask_branch_entry_time_ns", "mask_irreversible_entry_valid", "timing_nonoverlap_valid", "transition_samples", "scored_samples", "result_sha256"],
+  "properties": {
+    "schema_version": {"const": "m3-f2-fast-transition-result-v2"},
+    "classifier_version": {"const": "f2-cross-source-fast-transition-v2"},
+    "clock_contact_valid": {"type": "boolean"},
+    "mask_irreversible_entry_valid": {"type": "boolean"},
+    "result_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "not": {"required": ["clock_irreversible_entry_valid"]}
+}

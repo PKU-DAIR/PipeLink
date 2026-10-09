@@ -1,0 +1,48 @@
+[project]
+name = "pipelink-attention-sm90-baseline"
+version = "0.1.0"
+description = "Pinned public sm90 bf16 attention implementations"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "torch==2.14.0",
+    "triton==3.8.0",
+    "einops",
+    "packaging",
+    "ninja",
+    "numpy",
+    "setuptools",
+    "wheel",
+    "flash-attn-4",
+    "nvidia-cutlass-dsl[cu13]==4.7.0",
+    "quack-kernels==0.6.5",
+    "flashinfer-python",
+    "flash-msa",
+]
+
+[tool.uv]
+package = false
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+# flash-msa 5834d91 declares torch 2.12.0; use the plan's torch pin for all paths.
+override-dependencies = ["torch==2.14.0"]
+
+[tool.uv.extra-build-variables]
+flashinfer-python = { BUILD_NVEP = "0" }
+
+[dependency-groups]
+dev = ["pytest"]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+# FA3 (build_fa3.sh) and FA4 share ce088ab9ce0fc0434dcd8afa0a791da9fcc3a820.
+flash-attn-4 = { path = "../../../third_party/flash-attention/flash_attn/cute" }
+flashinfer-python = { git = "https://github.com/flashinfer-ai/flashinfer.git", rev = "f89d15f2c5a5d0036e6b9cafb2b67496106b9ad6" }
+flash-msa = { git = "https://github.com/nanduruganesh/flash-msa.git", rev = "5834d91e43935209408c3a1e974bf0b36de76802" }
+
+# File-loaded, not installed: vLLM 3137ff07739f0cd19e06119506c6432a4a7e77ad;
+# microsoft/Phi-3-small-128k-instruct e95b185a59a58450c9b1dd7347a9dee78f18113e.
+# env_report.py --fetch-sources materializes these under PIPELINK_SCRATCH_ROOT/clones.

@@ -1,0 +1,178 @@
+diff --git a/src/cuda/transform/materialize_ws_schedule.cc b/src/cuda/transform/materialize_ws_schedule.cc
+index e41c79e..ed1cf52 100644
+--- a/src/cuda/transform/materialize_ws_schedule.cc
++++ b/src/cuda/transform/materialize_ws_schedule.cc
+@@ -333,2 +333,3 @@ struct BarrierSidePlan {
+   int64_t count = 0;                // resulting mbarrier.init arrival count
++  bool IsExternal() const { return count > 0 && signal_role_idx < 0; }
+ };
+@@ -338,2 +339,4 @@ struct PipelineSpec {
+   int depth = 1;
++  int64_t full_count = 0, empty_count = 0;
++  int64_t arrive_cta = -1, init_phase = 0;
+   std::vector<Buffer> buffers; // original buffers
+@@ -346,3 +349,3 @@ struct PipelineSpec {
+   }
+-  // Derived from the signaling ops' atoms (never user-specified).
++  // Derived from signaling ops unless the contract supplies the count.
+   BarrierSidePlan full_plan, empty_plan;
+@@ -500,2 +503,6 @@ private:
+       pipeline.depth = static_cast<int>(p->depth);
++      pipeline.full_count = p->full_count;
++      pipeline.empty_count = p->empty_count;
++      pipeline.arrive_cta = p->arrive_cta;
++      pipeline.init_phase = p->init_phase;
+       ICHECK_GE(pipeline.depth, 1);
+@@ -956,3 +963,3 @@ private:
+   // Fill each pipeline's two BarrierSidePlans: find the unique
+-  // signaling role of each side and derive the count from its uses.
++  // signaling role of each side and derive any unspecified count.
+   void PlanArriveCounts() {
+@@ -987,2 +994,8 @@ private:
+             producer_side ? pipeline.full_plan : pipeline.empty_plan;
++        int64_t given = producer_side ? pipeline.full_count : pipeline.empty_count;
++        if (given != 0) {
++          plan.count = given;
++          plan.has_thread_arrive = plan.signal_role_idx >= 0;
++          continue;
++        }
+         if (plan.signal_role_idx < 0)
+@@ -1021,6 +1034,8 @@ private:
+     for (PipelineSpec &pipeline : pipelines_) {
+-      ICHECK_GT(pipeline.full_plan.count, 0)
+-          << "ws_schedule: pipeline " << pipeline.name << " has no producer";
+-      ICHECK_GT(pipeline.empty_plan.count, 0)
+-          << "ws_schedule: pipeline " << pipeline.name << " has no consumer";
++      if (pipeline.full_count == 0)
++        ICHECK_GT(pipeline.full_plan.count, 0)
++            << "ws_schedule: pipeline " << pipeline.name << " has no producer";
++      if (pipeline.empty_count == 0)
++        ICHECK_GT(pipeline.empty_plan.count, 0)
++            << "ws_schedule: pipeline " << pipeline.name << " has no consumer";
+     }
+@@ -1123,2 +1138,5 @@ private:
+       for (const auto &[pipeline_idx, sides] : cycles) {
++        const PipelineSpec &pipeline = pipelines_[pipeline_idx];
++        if (pipeline.full_plan.IsExternal() || pipeline.empty_plan.IsExternal())
++          continue; // the absent partner supplies its own cycles
+         ICHECK_EQ(sides[1], sides[0])
+@@ -1184,2 +1202,6 @@ private:
+       const SyncEntry &e = events[r][cursors[r]];
++      const PipelineSpec &pipeline = pipelines_[e.pipeline_idx];
++      if ((e.kind.IsConsumerWait() && pipeline.full_plan.IsExternal()) ||
++          (e.kind.IsProducerAcquire() && pipeline.empty_plan.IsExternal()))
++        return true; // external signals are assumed to arrive eventually
+       if (e.kind.IsConsumerWait())
+@@ -1417,4 +1439,4 @@ private:
+ 
+-  // Arrivals for one commit/release entry — exactly plan.count arrivals
+-  // per phase.
++  // Arrivals for one commit/release entry; an external contract may count
++  // additional participants outside this schedule.
+   void MakeArrive(const PipelineSpec &pipeline, bool full, PrimExpr idx,
+@@ -1439,5 +1461,12 @@ private:
+     if (plan.has_thread_arrive) {
+-      out->push_back(
+-          Evaluate(Call(DataType::Void(), builtin::ptx_arrive_barrier(),
+-                        {BufferLoad(bar, {std::move(idx)})})));
++      if (pipeline.arrive_cta >= 0) {
++        out->push_back(Evaluate(Call(
++            DataType::Void(), ptx_arrive_cluster_barrier(),
++            {BufferLoad(bar, {std::move(idx)}),
++             IntImm(DataType::Int(32), pipeline.arrive_cta)})));
++      } else {
++        out->push_back(
++            Evaluate(Call(DataType::Void(), builtin::ptx_arrive_barrier(),
++                          {BufferLoad(bar, {std::move(idx)})})));
++      }
+     }
+@@ -1452,2 +1481,5 @@ private:
+         bitwise_and(floordiv(phase, depth), IntImm(DataType::Int(32), 1));
++    if (pipeline.init_phase != 0)
++      parity = bitwise_xor(std::move(parity),
++                           IntImm(DataType::Int(32), pipeline.init_phase));
+ 
+diff --git a/src/ir.cc b/src/ir.cc
+index 9279cb1..d066334 100644
+--- a/src/ir.cc
++++ b/src/ir.cc
+@@ -427,3 +427,4 @@ void WSRoleNode::RegisterReflection() {
+ WSPipeline::WSPipeline(String name, Array<tirx::Buffer> buffers,
+-                       int64_t depth) {
++                       int64_t depth, int64_t full_count, int64_t empty_count,
++                       int64_t arrive_cta, int64_t init_phase) {
+   auto n = make_object<WSPipelineNode>();
+@@ -432,2 +433,6 @@ WSPipeline::WSPipeline(String name, Array<tirx::Buffer> buffers,
+   n->depth = depth;
++  n->full_count = full_count;
++  n->empty_count = empty_count;
++  n->arrive_cta = arrive_cta;
++  n->init_phase = init_phase;
+   data_ = std::move(n);
+@@ -440,3 +445,7 @@ void WSPipelineNode::RegisterReflection() {
+       .def_ro("buffers", &WSPipelineNode::buffers)
+-      .def_ro("depth", &WSPipelineNode::depth);
++      .def_ro("depth", &WSPipelineNode::depth)
++      .def_ro("full_count", &WSPipelineNode::full_count)
++      .def_ro("empty_count", &WSPipelineNode::empty_count)
++      .def_ro("arrive_cta", &WSPipelineNode::arrive_cta)
++      .def_ro("init_phase", &WSPipelineNode::init_phase);
+ }
+@@ -539,4 +548,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
+       .def("tl.WSPipeline",
+-           [](String name, Array<tirx::Buffer> buffers, int64_t depth) {
+-             return WSPipeline(std::move(name), std::move(buffers), depth);
++           [](String name, Array<tirx::Buffer> buffers, int64_t depth,
++              int64_t full_count, int64_t empty_count, int64_t arrive_cta,
++              int64_t init_phase) {
++             return WSPipeline(std::move(name), std::move(buffers), depth,
++                               full_count, empty_count, arrive_cta, init_phase);
+            })
+diff --git a/src/transform/common/warp_specialize.h b/src/transform/common/warp_specialize.h
+index 47152ca..4c31e0d 100644
+--- a/src/transform/common/warp_specialize.h
++++ b/src/transform/common/warp_specialize.h
+@@ -95,2 +95,9 @@ public:
+   int64_t depth;
++  /*! \brief Explicit arrival counts; 0 derives the side from local ops. */
++  int64_t full_count;
++  int64_t empty_count;
++  /*! \brief Cluster arrival destination; -1 uses local arrivals. */
++  int64_t arrive_cta;
++  /*! \brief Initial wait parity origin (0 or 1). */
++  int64_t init_phase;
+ 
+@@ -104,3 +111,4 @@ public:
+   TVM_DLL WSPipeline(ffi::String name, ffi::Array<tirx::Buffer> buffers,
+-                     int64_t depth);
++                     int64_t depth, int64_t full_count, int64_t empty_count,
++                     int64_t arrive_cta, int64_t init_phase);
+   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(WSPipeline, ffi::ObjectRef,
+diff --git a/tilelang/language/ws_schedule.py b/tilelang/language/ws_schedule.py
+index d0e604c..175118f 100644
+--- a/tilelang/language/ws_schedule.py
++++ b/tilelang/language/ws_schedule.py
+@@ -84,6 +84,21 @@ class WSPipeline(Node):
+         The number of versions of each buffer.
++    full_count, empty_count : int
++        Explicit arrival counts (0 derives from local ops). An explicit side
++        uses per-thread arrivals when its signaling role is present, and may
++        otherwise be signaled externally.
++    arrive_cta : int
++        Cluster CTA rank for per-thread arrivals; -1 keeps local arrivals.
++    init_phase : int
++        Initial wait parity origin, 0 or 1.
+     """
+ 
+-    def __init__(self, name: str, buffers: list[tirx.Buffer], depth: int):
+-        self.__init_handle_by_constructor__(_ffi_api.WSPipeline, name, list(buffers), depth)
++    def __init__(
++        self, name: str, buffers: list[tirx.Buffer], depth: int, *,
++        full_count: int = 0, empty_count: int = 0,
++        arrive_cta: int = -1, init_phase: int = 0,
++    ):
++        self.__init_handle_by_constructor__(
++            _ffi_api.WSPipeline, name, list(buffers), depth,
++            full_count, empty_count, arrive_cta, init_phase,
++        )
+ 

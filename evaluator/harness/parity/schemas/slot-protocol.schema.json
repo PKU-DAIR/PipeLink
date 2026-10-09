@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-parity-slot-protocol-v1",
+  "title": "M3 slot plugin request/result union",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["schema_version", "action", "case_id", "image_role", "image", "physical_gpu", "cuda_visible_device", "case_config", "protocol"],
+      "properties": {
+        "schema_version": {"const": "m3-parity-slot-request-v1"},
+        "action": {"enum": ["warmup", "slot"]},
+        "case_id": {"type": "string", "minLength": 1},
+        "image_role": {"enum": ["reference", "linked"]},
+        "image": {"type": "object"},
+        "physical_gpu": {"type": "integer", "minimum": 1},
+        "cuda_visible_device": {"const": 0},
+        "case_config": {"type": "object"},
+        "protocol": {"$ref": "#/$defs/protocol"},
+        "attempt": {"type": "integer", "minimum": 0},
+        "order_position": {"enum": [0, 1]}
+      }
+    },
+    {
+      "type": "object",
+      "required": ["schema_version", "action", "case_id", "image_id", "image_role", "correctness"],
+      "properties": {
+        "schema_version": {"const": "m3-parity-slot-result-v1"},
+        "action": {"enum": ["warmup", "slot"]},
+        "case_id": {"type": "string", "minLength": 1},
+        "image_id": {"type": "string", "minLength": 1},
+        "image_role": {"enum": ["reference", "linked"]},
+        "correctness": {
+          "type": "object",
+          "required": ["all_true", "checked_before_warmup"],
+          "properties": {"all_true": {"const": true}, "checked_before_warmup": {"const": true}}
+        },
+        "timing": {"type": "boolean"},
+        "warmups_completed": {"type": "integer"},
+        "iterations": {"type": "integer", "minimum": 1},
+        "throughput": {"type": "number", "exclusiveMinimum": 0},
+        "throughput_unit": {"type": "string", "minLength": 1},
+        "steady_cuda_event_milliseconds": {"type": "number", "exclusiveMinimum": 0},
+        "slot_start_ns": {"type": "integer", "minimum": 1},
+        "sampling_window_start_ns": {"type": "integer", "minimum": 1},
+        "sampling_window_end_ns": {"type": "integer", "minimum": 1},
+        "cuda_scoring_window_start_ns": {"type": "integer", "minimum": 1},
+        "cuda_scoring_window_end_ns": {"type": "integer", "minimum": 1},
+        "slot_end_ns": {"type": "integer", "minimum": 1},
+        "slot_duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "leading_discard_seconds": {"type": "number", "minimum": 0},
+        "steady_duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "configured_batch_quantum_ms": {"type": "number", "exclusiveMinimum": 0, "maximum": 100},
+        "last_batch_start_before_nominal_end": {"const": true},
+        "declared_slot_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "observed_slot_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "declared_scored_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "observed_scored_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "timing_method": {"const": "cuda-events-repeated-batches"},
+        "steady_timing_excludes": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  ],
+  "$defs": {
+    "protocol": {
+      "type": "object",
+      "required": ["name", "protocol_variant", "pair_valid_target", "attempt_cap", "warmups_per_image", "slot_seconds", "leading_discard_seconds", "steady_seconds", "clock_sample_hz", "configured_batch_quantum_ms", "ratio_floor", "selection_classifier", "gap_row_allowlist"]
+    }
+  }
+}

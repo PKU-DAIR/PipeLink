@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-gpu-telemetry-qualification-result-v2",
+  "type": "object",
+  "required": ["schema_version", "qualifier_version", "epoch_id", "physical_index", "gpu_uuid", "pci_bus_id", "status", "reasons", "w1", "w2", "same_branch", "median_drift_fraction_w2_over_w1", "drift_within_1_percent", "soak_continuous", "attempt_count", "retry_permitted_same_epoch", "telemetry_only", "nominal_sustained_seconds", "policy_sha256", "baseline_dispatch_sha256", "jit_identity_sha256", "input_sha256", "stream_map_sha256", "qualification_result_sha256"],
+  "properties": {
+    "schema_version": {"const": "m3-gpu-telemetry-qualification-result-v2"},
+    "qualifier_version": {"const": "fa4-f2-00-telemetry-qualification-v2"},
+    "status": {"enum": ["PASS", "INELIGIBLE_TELEMETRY_STATE"]},
+    "drift_within_1_percent": {"type": "boolean"},
+    "soak_continuous": {"const": true},
+    "attempt_count": {"const": 1},
+    "retry_permitted_same_epoch": {"const": false},
+    "telemetry_only": {"const": true},
+    "nominal_sustained_seconds": {"const": 80},
+    "qualification_result_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

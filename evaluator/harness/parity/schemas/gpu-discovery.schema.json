@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-gpu-discovery-v2",
+  "type": "object",
+  "required": ["schema_version", "utc_time", "epoch_id", "eligibility", "initial_snapshot", "decisions", "qualified_before_numeric_order", "ordered_selected", "numeric_order", "locks_held"],
+  "properties": {
+    "schema_version": {"const": "m3-gpu-discovery-v2"},
+    "ordered_selected": {"type": "array", "minItems": 1, "maxItems": 4},
+    "numeric_order": {"const": true},
+    "qualified_before_numeric_order": {"type": "array"},
+    "locks_held": {"const": true}
+  }
+}

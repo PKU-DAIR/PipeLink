@@ -1,0 +1,19 @@
+[project]
+name = "pipec2"
+version = "0.1.0"
+description = "Deterministic PipeLink ABI-v2 artifact and nvJitLink driver"
+requires-python = ">=3.11"
+dependencies = ["numpy>=2", "z3-solver==4.15.4.0"]
+
+[project.scripts]
+pipec2 = "pipec2.cli:main"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pipec2"]

@@ -1,0 +1,14 @@
+{
+  "name": "warpgroup_straddling_reg_group",
+  "reference": "design §8.3",
+  "description": "An explicit group covers warps on both sides of a warpgroup boundary without covering either group.",
+  "base": "register",
+  "phase": "solve",
+  "expected_clause": "L-REGS",
+  "expected_path": "solve",
+  "expected_message": "no feasible joint binding and placement exists",
+  "mutation": {
+    "path": ["stages", 0, "claims", 1, "roles"],
+    "value": ["r1", "r2"]
+  }
+}

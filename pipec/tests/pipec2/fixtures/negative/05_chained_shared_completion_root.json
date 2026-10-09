@@ -1,0 +1,18 @@
+{
+  "name": "chained_shared_completion_root",
+  "reference": "design §8.3",
+  "description": "The leaf member targets another member instead of the root.",
+  "base": "shared_completion",
+  "phase": "protocol.expand",
+  "channel": "leaf",
+  "expected_clause": "L-PROTO",
+  "expected_path": "channels.member.protocol.full",
+  "expected_message": "member_of may only target a root barrier side",
+  "mutation": {
+    "paths": [
+      ["stages", 0, "endpoints", 2, "protocol", "full", "member_of"],
+      ["stages", 1, "endpoints", 2, "protocol", "full", "member_of"]
+    ],
+    "value": "member"
+  }
+}

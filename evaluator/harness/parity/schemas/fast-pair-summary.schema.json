@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-fast-strict-records-v1",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["schema_version", "protocol", "attempt", "original_valid", "amended_valid", "pair_valid", "ratio_linked_over_reference"],
+      "properties": {"schema_version": {"enum": ["m3-fast-pair-v1", "m3-original-duration-pair-v1", "m3-negative-launch-pair-v1"]}}
+    },
+    {
+      "type": "object",
+      "required": ["schema_version", "protocol_variant", "eligibility_ledger_sha256", "ratio_blind_eligibility", "median_ratio_linked_over_reference"],
+      "properties": {
+        "schema_version": {"enum": ["m3-fast-summary-v1", "m3-original-duration-summary-v1", "m3-negative-launch-summary-v1"]},
+        "eligibility_ledger_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "ratio_blind_eligibility": {"const": true}
+      }
+    }
+  ]
+}

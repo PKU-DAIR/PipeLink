@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-case-device-branch-qualification-result-v2",
+  "type": "object",
+  "required": ["schema_version", "qualifier_version", "case_id", "assignment_epoch_id", "physical_index", "gpu_uuid", "pci_bus_id", "policy_sha256", "role_order", "roles", "disposition", "sealed_before_pairs", "pair_attempt_directories", "telemetry_only", "compatibility_only", "may_supply_pair_branch_or_identity", "qualification_sha256"],
+  "properties": {
+    "schema_version": {"const": "m3-case-device-branch-qualification-result-v2"},
+    "qualifier_version": {"const": "f2-case-device-branch-qualification-v2"},
+    "case_id": {"pattern": "^F2-(0[0-9]|1[0-7])$"},
+    "roles": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"$ref": "#/$defs/role"}
+    },
+    "disposition": {"enum": ["PASS", "CASE_DEVICE_INELIGIBLE_TELEMETRY", "CASE_DEVICE_QUALIFICATION_FAIL"]},
+    "sealed_before_pairs": {"const": true},
+    "pair_attempt_directories": {"const": []},
+    "telemetry_only": {"const": true},
+    "compatibility_only": {"const": true},
+    "may_supply_pair_branch_or_identity": {"const": false},
+    "qualification_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "role": {
+      "type": "object",
+      "required": ["role_id", "classification", "reasons", "median_clock_mhz", "clock_min_mhz", "clock_max_mhz", "mask_set", "covering_sample_count", "strict_own_clock_valid_v1", "f2_solo_anchor_valid_v2", "strict_own_clock_v1", "f2_solo_anchor_v2"],
+      "properties": {
+        "classification": {"enum": ["stable-original", "stable-power-cap", "mixed-cap-boundary", "fatal"]},
+        "strict_own_clock_valid_v1": {"type": "boolean"},
+        "f2_solo_anchor_valid_v2": {"type": "boolean"},
+        "strict_own_clock_v1": {"$ref": "#/$defs/strictClock"},
+        "f2_solo_anchor_v2": {"$ref": "#/$defs/f2Anchor"}
+      }
+    },
+    "clockBase": {
+      "type": "object",
+      "required": ["schema_version", "classifier_version", "valid", "reasons", "n", "minimum_mhz", "q05_mhz", "median_mhz", "q95_mhz", "maximum_mhz", "count_outside_3_percent", "count_outside_5_percent", "result_sha256"],
+      "properties": {
+        "valid": {"type": "boolean"},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+        "n": {"type": "integer", "minimum": 0},
+        "count_outside_3_percent": {"type": "integer", "minimum": 0},
+        "count_outside_5_percent": {"type": "integer", "minimum": 0},
+        "result_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "strictClock": {
+      "allOf": [
+        {"$ref": "#/$defs/clockBase"},
+        {"properties": {
+          "schema_version": {"const": "m3-strict-own-clock-result-v1"},
+          "classifier_version": {"const": "strict-own-clock-all-samples-v1"}
+        }}
+      ]
+    },
+    "f2Anchor": {
+      "allOf": [
+        {"$ref": "#/$defs/clockBase"},
+        {"properties": {
+          "schema_version": {"const": "m3-f2-solo-anchor-result-v2"},
+          "classifier_version": {"const": "f2-solo-anchor-percentile-envelope-v2"}
+        }}
+      ]
+    }
+  }
+}

@@ -1,0 +1,11 @@
+diff --git a/csrc/megakernel/swiglu.cuh b/csrc/megakernel/swiglu.cuh
+--- a/csrc/megakernel/swiglu.cuh
++++ b/csrc/megakernel/swiglu.cuh
+@@ -355,6 +355,7 @@
+                 int gate_scale_word, up_scale_word;
+                 const int scale_word_offset = (tile_row % 32) * 16 + (tile_row / 32) * 4;
+                 move<int>::lds(gate_scale_word, static_cast<uint32_t>(__cvta_generic_to_shared(&gate_sc_smem[stage])) + scale_word_offset);
+                 move<int>::lds(up_scale_word, static_cast<uint32_t>(__cvta_generic_to_shared(&up_sc_smem[stage])) + scale_word_offset);
++                __syncthreads(); // Both row halves must read input scales before either overwrites them.
+ 
+                 const int k_block_pair = ((tile_row >> 1) & 1) ^ tile_col_half;

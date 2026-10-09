@@ -1,0 +1,14 @@
+diff --git a/ThunderKittens/include/types/tensor/tensor.cuh b/ThunderKittens/include/types/tensor/tensor.cuh
+--- a/ThunderKittens/include/types/tensor/tensor.cuh
++++ b/ThunderKittens/include/types/tensor/tensor.cuh
+@@ -64,7 +64,9 @@ template<int _nblocks, int _ncta> struct tensor_allocator {
+             }
+         }
+         asm volatile("tcgen05.fence::before_thread_sync;\n");
+-        asm volatile("bar.sync 0;\n");
++        // Warp-specialized callers can reach this CTA barrier through distinct
++        // role paths. bar.sync implies .aligned and is invalid in that case.
++        asm volatile("barrier.sync 0;\n" ::: "memory");
+         asm volatile("tcgen05.fence::after_thread_sync;\n");
+         addr = shared_addr;
+     }

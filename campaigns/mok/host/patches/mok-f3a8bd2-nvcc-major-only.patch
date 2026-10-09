@@ -1,0 +1,12 @@
+diff --git a/setup.py b/setup.py
+--- a/setup.py
++++ b/setup.py
+@@ -87,7 +87,7 @@ def check_nvcc() -> None:
+         )
+ 
+     torch_cuda_version = parse_major_minor_versions(str(torch.version.cuda), "PyTorch CUDA")
+-    if nvcc_version != torch_cuda_version:
++    if nvcc_version[0] != torch_cuda_version[0]:
+         raise RuntimeError(
+             f"NVCC {nvcc_version[0]}.{nvcc_version[1]} does not match PyTorch CUDA {torch.version.cuda}. "
+             "Install the matching CUDA toolkit or ensure PATH points to its bin directory."

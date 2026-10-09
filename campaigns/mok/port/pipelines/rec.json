@@ -1,0 +1,157 @@
+{
+  "pipeline": {
+    "name": "mok-rec-mxfp8-ep4-c0",
+    "stages": [],
+    "handles": {
+      "pipelink_mok_worker_warps": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "warp",
+        "owner": "claim:pipelink_mok_worker_warps"
+      },
+      "pipelink_mok_fw_clc": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "smem",
+        "owner": "claim:pipelink_mok_fw_clc"
+      },
+      "pipelink_mok_fw_sems": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "smem",
+        "owner": "claim:pipelink_mok_fw_sems"
+      },
+      "pipelink_mok_comm_arena": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "smem",
+        "owner": "claim:pipelink_mok_comm_arena"
+      },
+      "pipelink_mok_comm_sems": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "smem",
+        "owner": "claim:pipelink_mok_comm_sems"
+      },
+      "pipelink_mok_gemm_arena": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "smem",
+        "owner": "claim:pipelink_mok_gemm_arena"
+      },
+      "pipelink_mok_gemm_sems": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "smem",
+        "owner": "claim:pipelink_mok_gemm_sems"
+      },
+      "pipelink_mok_gemm_tmem": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "tmem",
+        "owner": "claim:pipelink_mok_gemm_tmem"
+      },
+      "pipelink_mok_act_arena": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "smem",
+        "owner": "claim:pipelink_mok_act_arena"
+      },
+      "pipelink_mok_act_sems": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "smem",
+        "owner": "claim:pipelink_mok_act_sems"
+      },
+      "pipelink_mok_cnt_x_routed_ready": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "gmem_counter",
+        "owner": "claim:pipelink_mok_cnt_x_routed_ready"
+      },
+      "pipelink_mok_cnt_gate_up_tile_ready": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "gmem_counter",
+        "owner": "claim:pipelink_mok_cnt_gate_up_tile_ready"
+      },
+      "pipelink_mok_cnt_hidden_row_block_ready": {
+        "class": "base",
+        "binding": "bind",
+        "domain": "gmem_counter",
+        "owner": "claim:pipelink_mok_cnt_hidden_row_block_ready"
+      },
+      "pipelink_mok_pass": {
+        "class": "variant",
+        "binding": "bind",
+        "values": [
+          2
+        ],
+        "owner": "stage:mok.interp.rec"
+      },
+      "pipelink_mok_precision": {
+        "class": "variant",
+        "binding": "bind",
+        "values": [
+          0,
+          1
+        ],
+        "owner": "stage:mok.interp.rec"
+      },
+      "pipelink_mok_clamp": {
+        "class": "variant",
+        "binding": "bind",
+        "values": [
+          0,
+          1
+        ],
+        "owner": "stage:mok.interp.rec"
+      },
+      "pipelink_mok_world": {
+        "class": "variant",
+        "binding": "bind",
+        "values": [
+          1,
+          4
+        ],
+        "owner": "stage:mok.comm"
+      }
+    },
+    "phases": [
+      "instr_comm",
+      "instr_gemm",
+      "instr_act"
+    ],
+    "exclusive": [
+      [
+        "instr_comm",
+        "instr_gemm"
+      ],
+      [
+        "instr_comm",
+        "instr_act"
+      ],
+      [
+        "instr_gemm",
+        "instr_act"
+      ]
+    ],
+    "domains": {
+      "gmem_counter": {
+        "capacity": 272384
+      }
+    },
+    "depth_priority": [],
+    "regs_priority": [],
+    "forced_bindings": {
+      "pipelink_mok_pass": 2,
+      "pipelink_mok_precision": 1,
+      "pipelink_mok_clamp": 0,
+      "pipelink_mok_world": 4
+    },
+    "topology": {
+      "persistent": true,
+      "scheduler": "clc"
+    }
+  }
+}

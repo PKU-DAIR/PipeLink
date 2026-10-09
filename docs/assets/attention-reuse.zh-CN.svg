@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 494" role="img" aria-labelledby="ar-title ar-desc">
+  <title id="ar-title">一个注意力核心，七种组合</title>
+  <desc id="ar-desc">七种 Hopper 注意力组合链接同一个未经修改的核心包。每一行只替换核心周围的少量小阶段：滑动窗口用一个 28 行的掩码，softcap 用一个 29 行的打分被调函数，Phi-3 块稀疏用一个块加载阶段和一个掩码，MiniMax-M3 稀疏注意力用一个选块加载阶段和一个部分结果 epilogue，多 GPU 注意力则用一个上下文并行加载阶段加上通信所有者的 KV-gather warp。</desc>
+  <defs>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", sans-serif; fill: #1f2328; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .head { font-size: 15px; font-weight: 600; fill: #59636e; letter-spacing: 0.02em; }
+      .name { font-size: 16.5px; font-weight: 600; }
+      .work { font-size: 14px; fill: #59636e; }
+      .pkg { font-size: 14.5px; }
+      .lines { font-size: 12.5px; fill: #59636e; }
+      .legend { font-size: 14px; fill: #59636e; }
+      .base { fill: #f6f8fa; stroke: #d1d9e0; stroke-width: 1.2; }
+      .new { fill: #e8effd; stroke: #2563eb; stroke-width: 1.6; }
+      .comm { fill: #f1eafd; stroke: #7c3aed; stroke-width: 1.6; }
+      .core { fill: #e6f6f4; stroke: #0f9488; stroke-width: 2; }
+      .coretext { fill: #0b6b62; font-weight: 700; font-size: 16px; }
+      .coresub { fill: #0b6b62; font-size: 13px; }
+      .newtext { fill: #1d4ed8; }
+      .commtext { fill: #6d28d9; }
+      .rule { stroke: #d1d9e0; stroke-width: 1; }
+      @media (prefers-color-scheme: dark) {
+        text { fill: #e6edf3; }
+        .head, .work, .lines, .legend { fill: #9198a1; }
+        .base { fill: #161b22; stroke: #3d444d; }
+        .new { fill: #102341; stroke: #60a5fa; }
+        .comm { fill: #221a3d; stroke: #a78bfa; }
+        .core { fill: #0f2a2a; stroke: #2dd4bf; }
+        .coretext, .coresub { fill: #5eead4; }
+        .newtext { fill: #93c5fd; }
+        .commtext { fill: #c4b5fd; }
+        .rule { stroke: #3d444d; }
+      }
+    </style>
+  </defs>
+  <text class="head" x="319" y="40" text-anchor="middle">加载</text>
+  <text class="head" x="469" y="40" text-anchor="middle">核心</text>
+  <text class="head" x="614" y="40" text-anchor="middle">掩码</text>
+  <text class="head" x="764" y="40" text-anchor="middle">打分</text>
+  <text class="head" x="924" y="40" text-anchor="middle">Epilogue</text>
+  <text class="head" x="1084" y="40" text-anchor="middle">额外 warp</text>
+  <line class="rule" x1="24" y1="50" x2="1154" y2="50"/>
+  <text class="name" x="24" y="79">因果 / 分块</text>
+  <text class="work" x="24" y="98">Qwen3-8B、Llama 4 Scout</text>
+  <rect class="base" x="244" y="62.0" width="150" height="42" rx="8"/>
+  <text class="mono pkg" x="319" y="88" text-anchor="middle">tma-load</text>
+  <rect class="base" x="544" y="62.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg" x="614" y="88" text-anchor="middle">mask-default</text>
+  <rect class="base" x="694" y="62.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg" x="764" y="88" text-anchor="middle">score-identity</text>
+  <rect class="base" x="844" y="62.0" width="160" height="42" rx="8"/>
+  <text class="mono pkg" x="924" y="88" text-anchor="middle">epilogue</text>
+  <rect class="base" x="1014" y="62.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg" x="1084" y="88" text-anchor="middle">empty</text>
+  <text class="name" x="24" y="133">滑动窗口</text>
+  <text class="work" x="24" y="152">Mistral-7B、Gemma 3</text>
+  <rect class="base" x="244" y="116.0" width="150" height="42" rx="8"/>
+  <text class="mono pkg" x="319" y="142" text-anchor="middle">tma-load</text>
+  <rect class="new" x="544" y="116.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg newtext" x="614" y="134.0" text-anchor="middle">mask-window</text>
+  <text class="lines" x="614" y="150.0" text-anchor="middle">28 行</text>
+  <rect class="base" x="694" y="116.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg" x="764" y="142" text-anchor="middle">score-identity</text>
+  <rect class="base" x="844" y="116.0" width="160" height="42" rx="8"/>
+  <text class="mono pkg" x="924" y="142" text-anchor="middle">epilogue</text>
+  <rect class="base" x="1014" y="116.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg" x="1084" y="142" text-anchor="middle">empty</text>
+  <text class="name" x="24" y="187">Softcap</text>
+  <text class="work" x="24" y="206">Grok-1</text>
+  <rect class="base" x="244" y="170.0" width="150" height="42" rx="8"/>
+  <text class="mono pkg" x="319" y="196" text-anchor="middle">tma-load</text>
+  <rect class="base" x="544" y="170.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg" x="614" y="196" text-anchor="middle">mask-default</text>
+  <rect class="new" x="694" y="170.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg newtext" x="764" y="188.0" text-anchor="middle">score-softcap</text>
+  <text class="lines" x="764" y="204.0" text-anchor="middle">29 行</text>
+  <rect class="base" x="844" y="170.0" width="160" height="42" rx="8"/>
+  <text class="mono pkg" x="924" y="196" text-anchor="middle">epilogue</text>
+  <rect class="base" x="1014" y="170.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg" x="1084" y="196" text-anchor="middle">empty</text>
+  <text class="name" x="24" y="241">滑动窗口 + softcap</text>
+  <text class="work" x="24" y="260">Gemma 2</text>
+  <rect class="base" x="244" y="224.0" width="150" height="42" rx="8"/>
+  <text class="mono pkg" x="319" y="250" text-anchor="middle">tma-load</text>
+  <rect class="new" x="544" y="224.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg newtext" x="614" y="242.0" text-anchor="middle">mask-window</text>
+  <text class="lines" x="614" y="258.0" text-anchor="middle">28 行</text>
+  <rect class="new" x="694" y="224.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg newtext" x="764" y="242.0" text-anchor="middle">score-softcap</text>
+  <text class="lines" x="764" y="258.0" text-anchor="middle">29 行</text>
+  <rect class="base" x="844" y="224.0" width="160" height="42" rx="8"/>
+  <text class="mono pkg" x="924" y="250" text-anchor="middle">epilogue</text>
+  <rect class="base" x="1014" y="224.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg" x="1084" y="250" text-anchor="middle">empty</text>
+  <text class="name" x="24" y="295">块稀疏</text>
+  <text class="work" x="24" y="314">Phi-3-small</text>
+  <rect class="new" x="244" y="278.0" width="150" height="42" rx="8"/>
+  <text class="mono pkg newtext" x="319" y="296.0" text-anchor="middle">block-load</text>
+  <text class="lines" x="319" y="312.0" text-anchor="middle">395 行</text>
+  <rect class="new" x="544" y="278.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg newtext" x="614" y="296.0" text-anchor="middle">mask-phi</text>
+  <text class="lines" x="614" y="312.0" text-anchor="middle">31 行</text>
+  <rect class="base" x="694" y="278.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg" x="764" y="304" text-anchor="middle">score-identity</text>
+  <rect class="base" x="844" y="278.0" width="160" height="42" rx="8"/>
+  <text class="mono pkg" x="924" y="304" text-anchor="middle">epilogue</text>
+  <rect class="base" x="1014" y="278.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg" x="1084" y="304" text-anchor="middle">empty</text>
+  <text class="name" x="24" y="349">选块稀疏</text>
+  <text class="work" x="24" y="368">MiniMax-M3（MSA）</text>
+  <rect class="new" x="244" y="332.0" width="150" height="42" rx="8"/>
+  <text class="mono pkg newtext" x="319" y="350.0" text-anchor="middle">msa-load</text>
+  <text class="lines" x="319" y="366.0" text-anchor="middle">351 行</text>
+  <rect class="base" x="544" y="332.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg" x="614" y="358" text-anchor="middle">mask-default</text>
+  <rect class="base" x="694" y="332.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg" x="764" y="358" text-anchor="middle">score-identity</text>
+  <rect class="new" x="844" y="332.0" width="160" height="42" rx="8"/>
+  <text class="mono pkg newtext" x="924" y="350.0" text-anchor="middle">epilogue-partial</text>
+  <text class="lines" x="924" y="366.0" text-anchor="middle">155 行</text>
+  <rect class="base" x="1014" y="332.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg" x="1084" y="358" text-anchor="middle">empty</text>
+  <text class="name" x="24" y="403">上下文并行</text>
+  <text class="work" x="24" y="422">因果，2–4 块 GPU</text>
+  <rect class="new" x="244" y="386.0" width="150" height="42" rx="8"/>
+  <text class="mono pkg newtext" x="319" y="404.0" text-anchor="middle">cp-load</text>
+  <text class="lines" x="319" y="420.0" text-anchor="middle">435 行</text>
+  <rect class="base" x="544" y="386.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg" x="614" y="412" text-anchor="middle">mask-default</text>
+  <rect class="base" x="694" y="386.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg" x="764" y="412" text-anchor="middle">score-identity</text>
+  <rect class="base" x="844" y="386.0" width="160" height="42" rx="8"/>
+  <text class="mono pkg" x="924" y="412" text-anchor="middle">epilogue</text>
+  <rect class="comm" x="1014" y="386.0" width="140" height="42" rx="8"/>
+  <text class="mono pkg commtext" x="1084" y="404.0" text-anchor="middle">kv-gather</text>
+  <text class="lines" x="1084" y="420.0" text-anchor="middle">279 行</text>
+  <rect class="core" x="404" y="62" width="130" height="366" rx="10"/>
+  <text class="mono coretext" x="469" y="231" text-anchor="middle">core</text>
+  <text class="coresub" x="469" y="253" text-anchor="middle">同一个包，</text>
+  <text class="coresub" x="469" y="271" text-anchor="middle">未经修改</text>
+  <rect class="base" x="244" y="447" width="28" height="18" rx="5"/>
+  <text class="legend" x="280" y="461">原样复用</text>
+  <rect class="new" x="384" y="447" width="28" height="18" rx="5"/>
+  <text class="legend" x="420" y="461">新阶段（源码行数）</text>
+  <rect class="comm" x="594" y="447" width="28" height="18" rx="5"/>
+  <text class="legend" x="630" y="461">通信所有者的阶段</text>
+</svg>

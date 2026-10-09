@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-parity-gap-policy-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "captured_utc", "policy", "policy_sha256", "policy_record_sha256"],
+  "properties": {
+    "schema_version": {"const": "m3-parity-gap-policy-v1"},
+    "captured_utc": {"type": "string"},
+    "policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["gpu_uuid", "pci_bus_id", "configured_power_limit_w", "enforced_power_limit_w", "application_graphics_clock_mhz", "application_memory_clock_mhz", "default_graphics_clock_mhz", "default_memory_clock_mhz", "persistence_mode", "compute_mode"]
+    },
+    "policy_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "policy_record_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

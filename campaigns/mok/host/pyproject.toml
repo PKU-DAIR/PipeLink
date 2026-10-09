@@ -1,0 +1,29 @@
+[project]
+name = "pipelink-mok-host"
+version = "0.1.0"
+description = "Pinned upstream MoK and PipeLink host harness"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "torch==2.14.0",
+    "pipec2",
+    "ninja",
+    "numpy",
+    "setuptools>=80",
+    "wheel",
+]
+
+[tool.uv]
+package = false
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[dependency-groups]
+dev = ["pytest>=9,<10"]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+pipec2 = { path = "../../../pipec", editable = true }

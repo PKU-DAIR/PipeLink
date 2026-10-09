@@ -1,0 +1,18 @@
+[submodule "third_party/cutlass"]
+	path = third_party/cutlass
+	url = https://github.com/NVIDIA/cutlass.git
+[submodule "third_party/Megakernels"]
+	path = third_party/Megakernels
+	url = https://github.com/HazyResearch/Megakernels.git
+[submodule "third_party/flash-attention"]
+	path = third_party/flash-attention
+	url = https://github.com/Dao-AILab/flash-attention.git
+[submodule "third_party/FlashMLA"]
+	path = third_party/FlashMLA
+	url = https://github.com/deepseek-ai/FlashMLA.git
+[submodule "third_party/vllm"]
+	path = third_party/vllm
+	url = https://github.com/vllm-project/vllm.git
+[submodule "third_party/mixture-of-kittens"]
+	path = third_party/mixture-of-kittens
+	url = https://github.com/cursor/mixture-of-kittens.git

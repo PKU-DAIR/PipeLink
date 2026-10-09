@@ -1,0 +1,13 @@
+{
+  "name": "unknown_tensor_guarantee",
+  "reference": "annotation-v2 C1",
+  "description": "A fifth token cannot extend the closed site-guarantee vocabulary.",
+  "base": "tensor",
+  "phase": "schema.stage",
+  "expected_clause": "T-CONTRACT",
+  "expected_path": "$.tensor.sites[0].guarantees[4]",
+  "mutation": {
+    "path": ["stages", 0, "tensor", "sites", 0, "guarantees"],
+    "value": ["enter_once", "converged", "full_warps", "no_early_return", "eventually_converged"]
+  }
+}

@@ -1,0 +1,12 @@
+diff --git a/demos/low-latency-llama/attention_partial.cu b/demos/low-latency-llama/attention_partial.cu
+--- a/demos/low-latency-llama/attention_partial.cu
++++ b/demos/low-latency-llama/attention_partial.cu
+@@ -584,7 +584,7 @@
+         store_o_no_skip(const globals &g, megakernel::state<config> &s,
+                         int q_head_start_idx, parsed_instruction &inst) {
+             // Store partial attention output to global memory
+-            if (laneid == 0) {
++            if (kittens::warp::laneid() == 0) {
+                 o_sv(&O_smem)[GQA_RATIO] = get_O_smem(s);
+                 kittens::wait(O_arrived(s), 0);
+                 s.record(megakernel::TEVENT_OUTPUT_READY);

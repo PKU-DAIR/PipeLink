@@ -1,0 +1,30 @@
+diff --git a/csrc/megakernel/dispatch_combine.cuh b/csrc/megakernel/dispatch_combine.cuh
+--- a/csrc/megakernel/dispatch_combine.cuh
++++ b/csrc/megakernel/dispatch_combine.cuh
+@@ -1,4 +1,5 @@
+ template <bool SCALE_ROWS = false>
+ static __device__ __forceinline__ void dispatch_kernel(
++    const void* view,
+     const activation_bf16_pgl &peer_buf,
+     const routed_activation_gl &x_gmem,
+@@ -59,3 +60,3 @@
+                 const int minibatch_rows = min(minibatch_size, num_tokens - global_minibatch_idx * minibatch_size);
+-                const int required_count = ((minibatch_rows + config::MLP_Mb - 1) / config::MLP_Mb) * (cols / config::MLP_Nb) * config::CLUSTER_SIZE;
++                const int required_count = ((minibatch_rows + facts(view).MLP_Mb - 1) / facts(view).MLP_Mb) * (cols / facts(view).MLP_Nb) * config::CLUSTER_SIZE;
+                 barrier_wait(*transfer_ready, global_minibatch_idx, required_count);
+@@ -152,4 +153,5 @@
+ template <bool ARRIVE_BY_ROW = false>
+ static __device__ __forceinline__ void combine_kernel(
++    const void* view,
+     const activation_bf16_pgl &peer_buf,
+     const epi_bf16_gl &local_buf,
+@@ -212,3 +214,3 @@
+             const int minibatch_rows = min(minibatch_size, num_tokens - global_minibatch_idx * minibatch_size);
+-            const int required_count = ((minibatch_rows + config::MLP_Mb - 1) / config::MLP_Mb) * (cols / config::MLP_Nb) * config::CLUSTER_SIZE;
++            const int required_count = ((minibatch_rows + facts(view).MLP_Mb - 1) / facts(view).MLP_Mb) * (cols / facts(view).MLP_Nb) * config::CLUSTER_SIZE;
+             barrier_wait(transfer_ready, global_minibatch_idx, required_count);
+@@ -253,3 +255,3 @@
+                 const int row = (first_tile_idx + stage) / col_blocks * config::COMBINE_Mb;
+-                barrier_arrive(*transfer_done, (macrobatch_offset + row) / (config::MLP_Mb / config::CLUSTER_SIZE));
++                barrier_arrive(*transfer_done, (macrobatch_offset + row) / (facts(view).MLP_Mb / config::CLUSTER_SIZE));
+             }

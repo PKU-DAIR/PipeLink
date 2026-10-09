@@ -1,0 +1,13 @@
+{
+  "name": "duplicate_lend_name",
+  "reference": "annotation-v2 C1",
+  "description": "Two distinct lends cannot publish the same stage-local name.",
+  "base": "tensor",
+  "phase": "schema.stage",
+  "expected_clause": "T-CONTRACT",
+  "expected_path": "$.tensor.imports[0].lends[1].name",
+  "mutation": {
+    "path": ["stages", 0, "tensor", "imports", 0, "lends", 1, "name"],
+    "value": "scratch"
+  }
+}

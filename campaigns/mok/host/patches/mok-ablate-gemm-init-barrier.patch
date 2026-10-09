@@ -1,0 +1,10 @@
+--- a/gemm/gemm.cu
++++ b/gemm/gemm.cu
+@@ -307,7 +307,6 @@ extern "C" __device__ __forceinline__ __attribute__((used)) void mok_gemm_init(const void* view) {
+   // tcgen05.alloc.cta_group::2 accesses the peer CTA's shared memory, and CUDA requires every CTA
+   // of the cluster to have started before that (distributed shared memory rules). Upstream omits
+   // this barrier; racecheck reports the cross-CTA access without it.
+-  asm volatile("barrier.cluster.arrive.relaxed.aligned;\nbarrier.cluster.wait.aligned;\n" ::: "memory");
+   if (warpid() == 0) allocator.provision(s.tmem_address);
+   asm volatile("tcgen05.fence::before_thread_sync;\n");
+   asm volatile("bar.sync 0;\n");

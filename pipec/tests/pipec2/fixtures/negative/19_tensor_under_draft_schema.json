@@ -1,0 +1,13 @@
+{
+  "name": "tensor_under_draft_schema",
+  "reference": "annotation-v2 C1",
+  "description": "The legacy 2.0-draft stage schema does not admit a tensor section.",
+  "base": "tensor",
+  "phase": "schema.stage",
+  "expected_clause": "T-CONTRACT",
+  "expected_path": "$.tensor",
+  "mutation": {
+    "path": ["stages", 0, "pipelink_abi", "schema"],
+    "value": "2.0-draft"
+  }
+}

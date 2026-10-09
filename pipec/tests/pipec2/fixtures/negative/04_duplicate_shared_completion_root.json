@@ -1,0 +1,18 @@
+{
+  "name": "duplicate_shared_completion_root",
+  "reference": "design §8.3",
+  "description": "The shared-completion sum lists its root twice.",
+  "base": "shared_completion",
+  "phase": "schema.stage",
+  "stage_index": 0,
+  "expected_clause": "L-PROTO",
+  "expected_path": "protocol.full.tx_bytes.sum",
+  "expected_message": "array entries must be unique",
+  "mutation": {
+    "paths": [
+      ["stages", 0, "endpoints", 0, "protocol", "full", "tx_bytes"],
+      ["stages", 1, "endpoints", 0, "protocol", "full", "tx_bytes"]
+    ],
+    "value": {"sum": ["root", "root", "member", "leaf"]}
+  }
+}

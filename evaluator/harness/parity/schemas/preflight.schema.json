@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m3-preflight-v1",
+  "title": "M3 complete can-implement/public-dispatcher preflight matrix",
+  "type": "object",
+  "required": ["schema_version", "completed_before_measurement_freeze", "fail_closed_no_timed_slot_ran_first", "utc_time", "device", "environment", "hashes", "entries", "summary"],
+  "properties": {
+    "schema_version": {"const": "m3-preflight-v1"},
+    "completed_before_measurement_freeze": {"const": true},
+    "fail_closed_no_timed_slot_ran_first": {"const": true},
+    "utc_time": {"type": "string"},
+    "device": {"type": "object", "required": ["physical_index", "uuid", "name"]},
+    "environment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["toolkit", "driver", "target"],
+      "properties": {"toolkit": {"type": "string"}, "driver": {"type": "string"}, "target": {"enum": ["sm90", "sm100", "sm103", "sm120"]}}
+    },
+    "hashes": {
+      "type": "object", "additionalProperties": false,
+      "required": ["inputs", "images", "catalogs", "configs"],
+      "properties": {
+        "inputs": {"$ref": "#/$defs/hashes"}, "images": {"$ref": "#/$defs/hashes"},
+        "catalogs": {"$ref": "#/$defs/hashes"}, "configs": {"$ref": "#/$defs/hashes"}
+      }
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["entry_id", "case_id", "image_id", "shape", "arguments", "eligibility", "hashes"],
+        "properties": {
+          "entry_id": {"type": "string"}, "case_id": {"type": "string"}, "image_id": {"type": "string"},
+          "shape": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+          "arguments": {"type": "object"}, "eligibility": {"type": "object"}, "hashes": {"$ref": "#/$defs/hashes"}
+        }
+      }
+    },
+    "summary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["expected_count", "observed_count", "all_true", "fail_closed_no_timed_slot_ran_first"],
+      "properties": {
+        "expected_count": {"type": "integer", "minimum": 0}, "observed_count": {"type": "integer", "minimum": 0},
+        "all_true": {"type": "boolean"}, "fail_closed_no_timed_slot_ran_first": {"const": true}
+      }
+    }
+  },
+  "$defs": {"hashes": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}
+}

@@ -1,0 +1,27 @@
+{
+ "name": "mismatched_call_declaration_hash",
+ "reference": "design \u00a78.3",
+ "description": "The consumer carries a self-consistent declaration/hash pair that differs from its own export.",
+ "base": "call",
+ "phase": "protocol.expand",
+ "channel": "invoke",
+ "expected_clause": "L-PROTO",
+ "expected_path": "channels.invoke.protocol",
+ "expected_message": "consumer export declaration bytes or hash disagree with the channel",
+ "mutation": {
+  "path": [
+   "stages",
+   1,
+   "endpoints",
+   0,
+   "protocol"
+  ],
+  "value": {
+   "kind": "call",
+   "export": "compute",
+   "signature": "int(int)",
+   "decl": "extern \"C\" int beta_stage_compute(long value);",
+   "decl_sha256": "61728d8dafdbfbfc7641e14117420c9e1b930904f889859b9dcb6b20807d1fdb"
+  }
+ }
+}

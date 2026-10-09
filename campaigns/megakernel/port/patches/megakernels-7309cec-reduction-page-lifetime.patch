@@ -1,0 +1,16 @@
+diff --git a/demos/low-latency-llama/attention_reduction.cu b/demos/low-latency-llama/attention_reduction.cu
+--- a/demos/low-latency-llama/attention_reduction.cu
++++ b/demos/low-latency-llama/attention_reduction.cu
+@@ -323,9 +323,11 @@ template <typename Config, typename Globals> struct attention_reduction {
+                 // atomicAdd(&g.Bar[{inst.layer_idx, opcode - 1,
+                 // inst.q_head_start_idx + q_head_local_idx}], 1);
+             }
++            // All four issuing lanes must finish reading the page for their
++            // TMA stores before lane 0 releases it to the next instruction.
++            kittens::warp::sync();
+             finish_shared_page(s);
+ 
+-            kittens::warp::sync();
+             if (kittens::warp::laneid() == 0) {
+                 s.record(megakernel::TEVENT_AT_GMEM_STORE);
+                 // asm volatile("fence.acq_rel.gpu;");
