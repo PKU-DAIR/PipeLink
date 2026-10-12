@@ -1,4 +1,4 @@
-<h1 align="center">PipeLink</h1>
+<h1 align="center"><img src="docs/assets/pipelink-logo.png" alt="" width="56" align="absmiddle">PipeLink</h1>
 
 <p align="center">
   English | <a href="README.zh-CN.md">简体中文</a>
