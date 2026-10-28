@@ -7,7 +7,6 @@ using mk_globals = ::llama_1b_globals;
 using mk_state = ::megakernel::state<mk_config>;
 
 PL_STAGE("org.pipelink.megakernel.interpreter", "7309cec+pipelink.megakernel");
-PL_NO_PARAMS();
 PL_HOST_GROUP("org.pipelink.megakernel", "org.pipelink.megakernel.params",
     "interpreter", MkProviderArgs, 1, true);
 PL_HOST_ABI_TYPE(1, MkProviderArgs, version, reserved0, bar, instructions, timings,
@@ -18,7 +17,6 @@ PL_HOST_ABI_TYPE(1, MkProviderArgs, version, reserved0, bar, instructions, timin
     num_instructions, max_seq_len, rope_rows, num_layers, bar_rows, vocab_size,
     pos_id, attn_scale, rms_norm_eps, skip_attn_reduction, reserved1);
 // The owner encodes gl descriptors; only their opaque storage layout is public.
-PL_HOST_ABI_EMPTY(2, mk_globals);
 PL_HOST_RESIDUE(8, "org.pipelink.megakernel.residue", mk_globals, 2, true,
     pl::host::roles({"org.pipelink.megakernel.interpreter:consumer",
                     "org.pipelink.megakernel.interpreter:loader",
@@ -27,7 +25,6 @@ PL_HOST_RESIDUE(8, "org.pipelink.megakernel.residue", mk_globals, 2, true,
                     "org.pipelink.megakernel.interpreter:controller"}));
 PL_HOST_SCHEDULER(pl::host::scheduler("org.pipelink.megakernel",
     "org.pipelink.megakernel.sm-grid.v1", pl::host::schema()));
-PL_HOST_TARGET();
 namespace mk_host {
 #define MK_REFLECT_ROLE_VIEW(id, T) PL_HOST_ABI_TYPE(id, T, residue, scalars);
 MK_HOST_ROLE_TYPES(MK_REFLECT_ROLE_VIEW)
@@ -47,25 +44,11 @@ PL_CLAIM("pipelink_megakernel_vmbar_base", "smem",
 PL_CLAIM_EX(pl::claim("pipelink_megakernel_tmem_base", "tmem")
     .extent(mk_state::tensor_allocator_t::cols).align(32).at(0));
 PL_CLAIM_EX(pl::claim("pipelink_megakernel_bar_vm", "named_barrier").extent(1).at(15));
-PL_HINT("named_barrier_0", "tensor_allocator ctor barrier.sync 0 (all threads, prologue only)");
-
-#define MK_CONFIG_HINT(NAME) PL_HINT("megakernel_config." #NAME, mk_config::NAME);
-MK_CONFIG_HINT(INSTRUCTION_PIPELINE_STAGES)
-MK_CONFIG_HINT(INSTRUCTION_PIPELINE_STAGES_BITS)
-MK_CONFIG_HINT(INSTRUCTION_WIDTH)
-MK_CONFIG_HINT(TIMING_WIDTH)
-MK_CONFIG_HINT(DYNAMIC_SEMAPHORES)
-MK_CONFIG_HINT(NUM_CONSUMER_WARPS)
-MK_CONFIG_HINT(NUM_WARPS)
-MK_CONFIG_HINT(NUM_THREADS)
-MK_CONFIG_HINT(NUM_PAGES)
-MK_CONFIG_HINT(PAGE_SIZE)
-MK_CONFIG_HINT(SCRATCH_BYTES)
-MK_CONFIG_HINT(CONSUMER_REGISTERS)
-MK_CONFIG_HINT(NON_CONSUMER_REGISTERS)
-MK_CONFIG_HINT(DYNAMIC_SHARED_MEMORY)
-MK_CONFIG_HINT(STATIC_SHARED_MEMORY)
-#undef MK_CONFIG_HINT
+// The tensor_allocator constructor runs barrier.sync 0 over all threads in the prologue only.
+// The instruction VM provides its page, semaphore and scratch pools to the ops.
+PL_DOMAIN_CAPACITY("instr_page", mk_config::NUM_PAGES);
+PL_DOMAIN_CAPACITY("instr_semaphore", mk_config::DYNAMIC_SEMAPHORES);
+PL_DOMAIN_CAPACITY("instr_scratch", mk_config::SCRATCH_BYTES);
 
 // The uniform register budget is the same warp-weighted budget as the default
 // split; it is the alternative setmaxnreg choice exercised by rebind-regs.
@@ -80,7 +63,7 @@ PL_CLAIM_REGS("pipelink_regs_consumer_wg", "consumer_wg",
 PL_CLAIM_REGS("pipelink_regs_producer_wg", "producer_wg",
     {mk_config::NON_CONSUMER_REGISTERS, mk_uniform_registers},
     "loader", "storer", "launcher", "controller");
-PL_HINT("launch_registers", mk_uniform_registers);
+PL_CLAIM_REGS("pipelink_launch_regs", "launch", {mk_uniform_registers});
 
 extern "C" __device__ int pipelink_megakernel_pages_base();
 extern "C" __device__ int pipelink_megakernel_ring_base();
@@ -296,6 +279,9 @@ __device__ __forceinline__ void controller_main_loop(const mk_globals& g,
 
     ::megakernel::controller::load_instructions<mk_config, mk_globals>(
         &kvms.instruction()[0], kvms.instruction_index, g);
+    // Lanes read instruction words and earlier pid_order entries written by
+    // other lanes of this warp.
+    __syncwarp();
 
     if (laneid == 0)
       kvms.record(::megakernel::TEVENT_IFETCH_DONE);
@@ -337,11 +323,10 @@ __device__ __forceinline__ void controller_main_loop(const mk_globals& g,
       num_semaphores[kvms.instruction_ring] = shfl_val;
     }
 
-    if (laneid == 0) {
+    if (laneid == 0)
       kvms.record(::megakernel::TEVENT_SEMS_SETUP);
-      ::kittens::arrive(
-          kvms.instruction_arrived[kvms.instruction_ring], 1);
-    }
+    // Every lane publishes its own instruction-word and pid_order stores.
+    ::kittens::arrive(kvms.instruction_arrived[kvms.instruction_ring]);
   }
 
   for (int i = 0; i < mk_config::INSTRUCTION_PIPELINE_STAGES; i++) {
@@ -448,13 +433,17 @@ __device__ __forceinline__ void run_role_with_prologue(const mk_globals& g) {
   }
 
   if (threadIdx.x < mk_config::INSTRUCTION_PIPELINE_STAGES) {
-    ::kittens::init_semaphore(instruction_arrived[threadIdx.x], 1);
+    // Thread arrivals: the controller warp publishes, every lane of every
+    // other warp retires.
+    ::kittens::init_semaphore(instruction_arrived[threadIdx.x],
+                              ::kittens::WARP_THREADS);
     ::kittens::init_semaphore(instruction_finished[threadIdx.x],
-                              mk_config::NUM_WARPS - 1);
+                              (mk_config::NUM_WARPS - 1) * ::kittens::WARP_THREADS);
   }
   if (threadIdx.x < mk_config::NUM_PAGES) {
     for (int i = 0; i < mk_config::INSTRUCTION_PIPELINE_STAGES_BITS; i++) {
-      auto count = mk_config::NUM_CONSUMER_WARPS * (1 << i);
+      auto count =
+          mk_config::NUM_CONSUMER_WARPS * (1 << i) * ::kittens::WARP_THREADS;
       ::kittens::init_semaphore(page_finished[threadIdx.x][i], count);
       ::kittens::arrive(page_finished[threadIdx.x][i], count);
     }

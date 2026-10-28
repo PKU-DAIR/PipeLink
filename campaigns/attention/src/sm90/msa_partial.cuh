@@ -24,7 +24,7 @@ CUTLASS_DEVICE void run_msa_partial(MsaPartialParams const& params, SplitContext
     int const base = work.split_idx * 128;
     if (lane == 0) {
       // The frozen O layout has two SW128 64-column planes. Both stores
-      // target one contiguous item-major tile; no query/rank scatter remains.
+      // target one contiguous item-major tile.
       SM90_TMA_STORE::copy(&params.tma_store_O, source, 0, base);
       SM90_TMA_STORE::copy(&params.tma_store_O, source + 8192, 64, base);
       tma_store_arrive();

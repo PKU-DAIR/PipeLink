@@ -1,4 +1,4 @@
-"""Pure telemetry-only load-soak qualification predicates and record reader."""
+"""Predicates and record reader for GPU qualification from load-soak telemetry; no GPU access."""
 from __future__ import annotations
 
 import hashlib

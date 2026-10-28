@@ -150,8 +150,8 @@ CUTLASS_DEVICE void run_load(
   Tensor tVsVt = group_modes<0, 3>(block_tma_V.partition_D(sVt));
 
   // Keep FA3's host scheduler Params and WorkTileInfo coordinate decoding,
-  // including causal LPT/L2 swizzling. Only load schedules: the upstream
-  // consumer SMEM broadcast and its two named barriers become work rings.
+  // including causal LPT/L2 swizzling. Only load runs the scheduler; work
+  // rings replace the upstream consumer SMEM broadcast and its two named barriers.
   cutlass::arch::wait_on_dependent_grids();
   typename Scheduler::WorkTileInfo tile{int(blockIdx.x)};
   while (tile.is_valid(params.scheduler)) {
@@ -167,9 +167,9 @@ CUTLASS_DEVICE void run_load(
     int const n_min = params.window_size > 0
         ? max(0, q_offset - params.window_size + 1) / Config::kBlockN : 0;
     int const steps = max(0, n_max - n_min);
-    // Unpacked FA3 schedules a Q head, not a packed-GQA KV head.
-    // kv_head carries that logical Q head; physical KV addressing divides it
-    // below. qhead_per_kvhead=1 preserves the WorkDesc row convention.
+    // Unpacked FA3 schedules one Q head per work item, so kv_head carries the
+    // logical Q head; physical KV addressing divides it below.
+    // qhead_per_kvhead=1 keeps the WorkDesc row convention.
     publish_load_work(c, WorkDesc{
         q_block, batch, q_head, steps, params.seqlen_q, params.seqlen_k,
         q_offset, 0,

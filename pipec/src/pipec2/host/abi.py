@@ -1,4 +1,4 @@
-"""The installed C v2 protocol and compiler-derived layout inventories."""
+"""ctypes mirror of the installed v2 C header, and compiler-measured layout inventories."""
 
 from __future__ import annotations
 
@@ -326,11 +326,11 @@ def _inventory(extra_types):
 
 
 def layout_probe_source(extra_headers=(), extra_types=None) -> str:
-    """Generate a C11/C++17 TU; every reported number is a compiler expression.
+    """Generate a C11/C++17 TU whose every reported number is a compiler expression.
 
-    Own nested records must be listed in extra_types along with args/residue/role
-    views. The complete neutral pointer-reachable inventory is always included.
-    Field declaration order is deliberately not the report order.
+    List the owner's nested records in extra_types alongside its args, residue and
+    role views; the full neutral inventory is always included. Fields are reported
+    in sorted order.
     """
     inventory = _inventory(extra_types)
     lines = ["#include <stdio.h>", "#include <stddef.h>"]
@@ -359,11 +359,11 @@ def layout_digest(name: str, size: int, align: int, members: dict) -> str:
 
 
 def probe_layouts(extra_headers=(), extra_types=None, compiler="g++", *, compile_flags=()) -> dict:
-    """Compile and execute one isolated layout probe, returning per-type digests.
+    """Compile and run one isolated layout probe; return per-type layouts and digests.
 
-    Canonical digest payload is UTF-8 compact sorted JSON with type name, bytes,
-    align and name-keyed members containing offset/bytes. No pointer value or
-    padding byte participates. Results are intentionally not cached across builds.
+    Each digest hashes compact, key-sorted UTF-8 JSON of the type name, bytes, align
+    and name-keyed members with offset and bytes, so pointer values and padding bytes
+    never enter it. Results are not cached across builds.
     """
     source = layout_probe_source(extra_headers, extra_types)
     executable_name = Path(compiler).name

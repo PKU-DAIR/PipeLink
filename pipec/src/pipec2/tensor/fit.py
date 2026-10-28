@@ -1,4 +1,4 @@
-"""Exact, deterministic finite-table fitting; fitting is not certification."""
+"""Exact, deterministic finite-table fitting. A fit proposes an expression; it certifies nothing."""
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -264,8 +264,8 @@ def fit_named(
 ) -> expr.Expr | None:
     """Fit a named map's zero-based output column, exactly over every row.
 
-    Rows contain input columns followed by output columns. Input roles, never
-    their spellings, determine reference namespaces. Templates use the supplied
+    Rows contain input columns followed by output columns. Input roles (not their
+    spellings) determine reference namespaces. Templates use the supplied
     row order and try integer-affine before GF(2)-linear. Nonmixing bit fields
     use integer operations; XOR mixing keeps bit operations. The returned carrier
     is sort-checked and bits-valued references are explicitly converted to integers.

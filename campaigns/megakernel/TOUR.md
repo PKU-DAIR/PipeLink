@@ -2,13 +2,14 @@
 
 ## One composition
 
-Pipeline `cute`, derived from [`a`](port/pipelines/a.json), links **nine packages**:
+Pipeline `cute`, derived from the [`a` template](port/README.md#host-abi-v3-packages)
+(`port/pipelines/a.json`), links **nine packages**:
 an interpreter plus NoOp, QKV/RoPE/cache append, attention partial, attention
 reduction, output projection, up-gate/SiLU, down projection and LM-head ops. An
 instruction stream runs the model's sixteen layers and LM head inside one persistent
 kernel. The interpreter's five roles call six public entrypoints per op.
-Instruction-phase-exclusive pages, semaphores and scratch let different ops reuse
-the resource pool.
+Pages, semaphores and scratch are exclusive per instruction phase, so different ops
+reuse the same resource pool.
 
 The partial-attention package is written with **CUTLASS/CuTe** layouts, asynchronous
 copies and warp MMA. Its four compute warps process disjoint KV tiles and merge their
@@ -20,13 +21,15 @@ intact. Pipeline `a` is the all-ThunderKittens reference. The code guide's
 build and numerical-verification commands.
 
 With the instruction schedule held fixed, the
-[mixed-library measurements](port/README.md#measured-composition) give **2.19×** the
-all-ThunderKittens throughput at context 4096 (**1.701 ms/token**) and **1.22×** at
-context 1024 with reduction, under the reference campaign's definitive protocol at a
-locked clock; the linked kernel matches its same-source build within 0.02%. The CuTe
-attention passes its double-precision oracle and isolated sanitizer runs, and the
-composition passes all five P2 numerical receipts. The full composition still has
-racecheck findings.
+[mixed-library measurements](port/README.md#measured-composition) give **2.158×**
+the all-ThunderKittens throughput at context 4096 (**1.630 ms/token**) and
+**1.225×** at context 1024 with reduction. At context 16 the ratio is **0.947×**:
+CuTe is slower there. These numbers describe this composition, not the libraries
+in general. Each comparison uses eight `paired-reload-v2` blocks at the qualified
+**1155 MHz** clock. All three CuTe linked/same-source-one-TU ratios are within
+**0.07%** of one, above the 0.97 floor. The numerical receipts and attention
+oracle cover these images; reload snapshots and
+[paired-path sanitizers](evidence/sanitizers.md#paired-path-sanitizers) pass.
 
 Start with the [port code guide](port/README.md),
 [`interpreter.cu`](port/src/interpreter.cu), the
@@ -34,12 +37,13 @@ Start with the [port code guide](port/README.md),
 [`mk_abi.cuh`](port/src/mk_abi.cuh) annotation wrapper. The CuTe math lives in
 [`cute_attention.cuh`](port/src/ops/cute_attention.cuh); its VM adapter is
 [`attn_partial_cute.cu`](port/src/ops/attn_partial_cute.cu). The ThunderKittens ops
-carry the four documented correctness patches to upstream Megakernels.
+carry the five documented correctness patches to upstream Megakernels.
 
 ## One command
 
-After [T0's toolkit/environment setup](../../docs/tutorials/T0-pack-link.md)
-and the code guide's host-only package build, run from the repository root:
+After `source tools/env.sh` (CUDA 13.3 at `PIPELINK_CUDA_HOME`, `uv`, and the
+`third_party/Megakernels` and `third_party/cutlass` submodules) and the code guide's
+host-only package build, run from the repository root:
 
 ```sh
 CASE=campaigns/megakernel
@@ -52,45 +56,58 @@ Use the **generated** `port/build/pipelines/cute.json`, which the build derives 
 the `a` template by substituting the CuTe attention package. Regenerate it after
 moving the checkout. Full model inputs and hardware reproduction are in the code guide.
 
-## ThunderKittens reference: parity is narrower than acceptance
+## ThunderKittens reference: parity and acceptance
 
 The all-ThunderKittens [seam-parity report](evidence/RESULT.md) records
-**MK-A-1024-red: 1.0001 linked/same-source-one-TU throughput**, **1.198 ms/token**
-linked, eight valid pairs at **1102 MHz** on Blackwell/sm103. This cell executes
-two attention partials per KV head followed by reductions in all sixteen layers.
-The same report records seam parity PASS for all five cells (floor 0.97),
-using current host-ABI-v3 images with fast math in both linked and control builds.
-The separate P2 numerical gate **passes all 20 receipts**, and P3 timing requires
-that; see the [code guide](port/README.md#current-gate-results) for its predicates.
+**MK-A-1024-red: 0.999591 linked/same-source-one-TU speedup**, **1.149 ms/token**
+linked, eight fixed-count blocks at **1155 MHz** on local Blackwell/sm103. This
+cell executes two attention partials per KV head followed by reductions in all
+sixteen layers. All five reference seam gates pass (floor 0.97): the
+linked/one-TU speedup (R1) spans **0.999549–1.000178**, with healthy, stopped
+clock locks and uncontended GPU windows. Timing also requires the 20 numerical
+receipts; the [code guide](port/README.md#gate-results) lists their predicates.
 
-**Do not read PASS as sanitizer-clean acceptance.** The actual sanitizer
-admission in [`run_parity.py`](evidence/parity/run_parity.py) requires memcheck
-success with zero errors. Racecheck **and synccheck** must have recorded integer
-counts, but their zero-count/strict verdicts are not admission gates. Receipts
-must cover the linked and one-TU images in the current build generation; numeric
-and parity gates remain separate. The final report records memcheck 0,
-synccheck 0 and **racecheck 34–47**. Logs cap reported hazards, so that range is
-not an exhaustive tally.
+Every timed image also has zero-count memcheck, racecheck and synccheck receipts, and
+all **21 paired sanitizer legs** pass on the runner/provider path; the
+[sanitizer report](evidence/sanitizers.md) lists each check. Seven reference legs
+record a return code derived from the controller's PASS line because their raw
+return codes were not retained. Numerical, sanitizer and seam-parity gates are
+independent checks.
 
 ## What you declared vs what was derived
 
 Counts expand local author wrappers for the active nine stages, including
 `MK_DEFINE_OP_EXPORTS`, the eight interpreter slot declarations and five role
 views. They exclude generated neutral host-ABI inventory and annotation-library
-internals. Interpreter **96**; ops **195** (NoOp 21, QKV 26, attention partial
-23, reduction 23, output projection 25, up-gate 26, down projection 25, LM head
-26): **291 annotation invocations** total.
+internals. Interpreter **80**; ops **112** (NoOp 11, QKV 15, attention partial
+13, reduction 13, output projection 15, up-gate 15, down projection 15, LM head
+15): **192 annotation invocations** total.
 
 | Declaration | Count | Author supplies → compiler/linker derives |
 |---|---:|---|
-| `PL_STAGE`; `PL_NO_PARAMS`; `PL_TOPOLOGY` | 9 each | Package identity, no ordinary stage blob, cluster contract → compatible package/launch contracts. |
+| `PL_STAGE`; `PL_TOPOLOGY` | 9 each | Package identity and cluster contract → compatible package/launch contracts. |
+| `PL_NO_PARAMS` | 8 | Ops carry no ordinary stage blob; the interpreter's host group implies its empty params. |
 | `PL_DESCRIPTOR` | 8 | Instruction type → compiler-measured descriptor size/alignment. |
 | `PL_ROLE` | 5 | Interpreter entrypoints and warp counts → dispatch for 640 threads. |
-| `PL_CLAIM*` | 44 | 12 interpreter + 32 op resource claims, opcode domains and instruction lifetimes → legal allocations and opcode bindings. |
-| `PL_EXPORT`; `PL_CALL` | 48; 96 | Six exports per op, with 48 consuming and 48 producing endpoints → callable dispatch bindings. |
-| `PL_HINT` | 52 | Configuration/advisory facts → reporting metadata, not proofs of safety. |
-| `PL_HOST_GROUP`, `PL_HOST_ABI_TYPE`, `PL_HOST_ABI_EMPTY`, `PL_HOST_RESIDUE`, `PL_HOST_SCHEDULER`, `PL_HOST_TARGET` | 1 + 6 + 1 + 1 + 1 + 1 | Host owner, measured types, opaque residue and launch authority → provider contract and generated role views. |
+| `PL_CLAIM*` | 45 | 13 interpreter (including the uniform launch-register cap) + 32 op resource claims, opcode domains and instruction lifetimes → legal allocations and opcode bindings. |
+| `PL_DOMAIN_CAPACITY` | 3 | Instruction page, semaphore and scratch pool sizes the interpreter compiles → linker domain capacities. |
+| `PL_CALL` | 96 | Six per op, with 48 consuming endpoints that also publish the exports and 48 producing endpoints → callable dispatch bindings. |
+| `PL_HOST_GROUP`, `PL_HOST_ABI_TYPE`, `PL_HOST_RESIDUE`, `PL_HOST_SCHEDULER` | 1 + 6 + 1 + 1 | Host owner, measured types, opaque residue and launch authority → provider contract, generated role views and the implied target section. |
 
-Continue with the [full evidence](evidence/RESULT.md),
-[sanitizer results](evidence/RESULT.md#sanitizers), or
-[T8's case-study index](../../docs/tutorials/T8-case-studies.md).
+## Reference results
+
+Linked and one-TU numerics are compared with a tolerance (each tensor within
+max(2 × repeat floor, 2 BF16 ULP)), and bitwise equality is recorded separately. In
+the authors' receipts the layer-1 fixtures are bitwise identical in every output
+except `hidden_states`; at full depth only the partition-0 attention outputs are, and
+on the reduction bundle none are. No configuration is bitwise identical in every
+output, because two runs of the same linked image already differ there; the
+[code guide](port/README.md#gate-results) has the details.
+
+The authors' reference results are in [RESULT.md](evidence/RESULT.md),
+[CUTE-RESULT.md](evidence/CUTE-RESULT.md), [sanitizers.md](evidence/sanitizers.md),
+[seam-sass.md](evidence/seam-sass.md) and the code guide's
+[placement table](port/README.md#placement-against-the-original-megakernel).
+
+Continue with the [full evidence](evidence/RESULT.md) or the
+[sanitizer results](evidence/sanitizers.md).

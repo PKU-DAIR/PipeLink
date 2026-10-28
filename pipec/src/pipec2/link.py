@@ -25,6 +25,7 @@ from .model import (
     NVCC_DEFAULT_MATH,
     ParamsLayout,
     Pipeline,
+    PipelineDomain,
     PipeLinkError,
     ProtocolExpansion,
     Solution,
@@ -35,6 +36,7 @@ from .model import (
 )
 from .profile import Profile, get_profile
 from .host.contracts import host_link, host_params_layout, resolve_host
+from .interfaces import check_calls, check_entry_rendezvous, launch_threads
 from .solve import solver_provenance
 from .symbols import _external_definitions, cuda_home
 
@@ -59,7 +61,7 @@ class _Artifact:
     stage: StageManifest
     object_bytes: bytes
     artifact_sha256: str
-    # Endpoints of this stage dropped with unreferenced exports (A4); `stage` is already pruned.
+    # Endpoints of this stage dropped with unreferenced exports; `stage` is already pruned.
     dropped_endpoints: tuple[dict[str, str], ...] = ()
 
 
@@ -119,24 +121,53 @@ def _load_assembly(pipeline_path: Path) -> tuple[Pipeline, list[_Artifact]]:
             )
         )
     artifacts.sort(key=lambda item: (item.stage.id, str(item.path)))
-    return pipeline, _assemble(pipeline, artifacts)
+    return _assemble(pipeline, artifacts)
 
 
-def _assemble(pipeline: Pipeline, artifacts: Sequence[_Artifact]) -> list[_Artifact]:
+def _assemble(pipeline: Pipeline, artifacts: Sequence[_Artifact]) -> tuple[Pipeline, list[_Artifact]]:
     """Prune unreferenced exports, then validate the pipeline against the pruned interface:
     endpoints that only unreferenced exports use (and the slot handles they name) are not part
-    of this assembly."""
+    of this assembly. Stage-provided domain capacities and implied slot allocations are
+    resolved first, so validation and solving see one assembly."""
     from .schema import validate_assembly
 
     stages, dropped = _prune_unreferenced_exports([item.stage for item in artifacts])
+    stages = _ring_slot_claims(stages)
+    pipeline = _stage_domain_capacities(pipeline, stages)
     failures = validate_assembly(pipeline, stages)
     if failures:
         raise LinkError(failures)
-    return [
+    return pipeline, [
         replace(item, stage=stage,
                 dropped_endpoints=tuple(record for record in dropped if record["stage"] == stage.id))
         for item, stage in zip(artifacts, stages)
     ]
+
+
+def _stage_domain_capacities(pipeline: Pipeline, stages: Sequence[StageManifest]) -> Pipeline:
+    """A domain's capacity is what its providing stage compiled; the pipeline may only agree."""
+    provided: dict[str, dict[int, list[str]]] = {}
+    for stage in stages:
+        for name, capacity in (stage.domain_capacities or {}).items():
+            provided.setdefault(name, {}).setdefault(capacity, []).append(stage.id)
+    failures = []
+    domains = dict(pipeline.domains)
+    for name, by_capacity in sorted(provided.items()):
+        path = f"pipeline.domains.{name}.capacity"
+        if len(by_capacity) != 1:
+            failures.append(ClauseFailure("L-HANDLE", path, "stages declare different capacities for one domain",
+                                          {"stages": {str(value): ids for value, ids in sorted(by_capacity.items())}}))
+            continue
+        (capacity, owners), = by_capacity.items()
+        declared = pipeline.domains.get(name)
+        if declared is not None and declared.capacity != capacity:
+            failures.append(ClauseFailure("L-HANDLE", path, "pipeline capacity contradicts the stage-provided capacity",
+                                          {"pipeline": declared.capacity, "stage": capacity, "stages": owners}))
+            continue
+        domains[name] = PipelineDomain(capacity, None)
+    if failures:
+        raise LinkError(failures)
+    return replace(pipeline, domains=domains) if domains != pipeline.domains else pipeline
 
 
 def _artifacts_in_pipeline_order(
@@ -205,6 +236,39 @@ def _check_symbols(artifacts: Sequence[_Artifact]) -> None:
         raise LinkError(failures)
 
 
+def _ring_slot_claims(stages: Sequence[StageManifest]) -> list[StageManifest]:
+    """Allocate mbarrier slot handles that live endpoints name and no stage claims.
+
+    A slot handle's allocation is implied by its ring: one kernel-lived mbarrier extent equal
+    to the depth. Any explicit claim in the assembly (a phase lifetime, alias or fixed base)
+    stays authoritative and suppresses synthesis. Runs after export pruning, so endpoints
+    that left the interface allocate nothing. Endpoints that disagree on the depth are not
+    judged here: the claim follows the producer's ring and the assembly's handle, channel
+    and slot-extent checks report the disagreement.
+    """
+    claimed = {claim.handle for stage in stages for claim in stage.claims}
+    depths: dict[str, tuple[Any, str]] = {}
+    for stage in sorted(stages, key=lambda item: item.id):
+        for endpoint in stage.endpoints:
+            protocol = endpoint.protocol
+            if protocol.kind != "mbarrier" or endpoint.ring is None:
+                continue
+            for side in (protocol.full, protocol.empty):
+                handle = getattr(side, "slots", None)
+                if handle is not None and handle not in claimed and (
+                        handle not in depths or endpoint.direction == "produce"):
+                    depths[handle] = (endpoint.ring.depth, stage.id)
+    if not depths:
+        return list(stages)
+    added: dict[str, list[Claim]] = {}
+    for handle, (depth, owner) in sorted(depths.items()):
+        extent = Extent(depth.fixed, {}, {}) if depth.handle is None else Extent(0, {depth.handle: 1}, {})
+        added.setdefault(owner, []).append(
+            Claim("mbarrier", handle, "kernel", extent, 1, None, None, None, None, None, None))
+    return [replace(stage, claims=[*stage.claims, *added[stage.id]]) if stage.id in added else stage
+            for stage in stages]
+
+
 def _prune_unreferenced_exports(
     stages: Sequence[StageManifest],
 ) -> tuple[list[StageManifest], list[dict[str, str]]]:
@@ -213,16 +277,32 @@ def _prune_unreferenced_exports(
 
     As in any linker, an unreferenced export is not an error. An export is live while any of
     its provided channels has a caller. An endpoint that declares the exports whose bodies use
-    it leaves the interface when all of them are unreferenced. Host transfers stay in the
-    owner's host inventory, so an endpoint one of them references cannot leave (L-PAIR).
+    it leaves the interface when all of them are unreferenced; a nested call site leaving with
+    its exports may leave its callee unreferenced in turn, so pruning repeats to a fixpoint.
+    Host transfers stay in the owner's host inventory, so an endpoint one of them references
+    cannot leave (L-PAIR).
     """
-    called = {
-        endpoint.name for stage in stages for endpoint in stage.endpoints
-        if endpoint.protocol.kind == "call" and endpoint.direction == "produce"
-    }
     transfer_endpoints = {
         (transfer["device_endpoint"]["stage"], transfer["device_endpoint"]["endpoint"])
         for stage in stages for transfer in (stage.host or {}).get("transfers", [])
+    }
+    pruned = list(stages)
+    dropped: list[dict[str, str]] = []
+    while True:
+        pruned, removed = _prune_once(pruned, transfer_endpoints)
+        if not removed:
+            break
+        dropped.extend(removed)
+    dropped.sort(key=lambda item: (item["stage"], item["endpoint"]))
+    return pruned, dropped
+
+
+def _prune_once(
+    stages: Sequence[StageManifest], transfer_endpoints: set[tuple[str, str]],
+) -> tuple[list[StageManifest], list[dict[str, str]]]:
+    called = {
+        endpoint.name for stage in stages for endpoint in stage.endpoints
+        if endpoint.protocol.kind == "call" and endpoint.direction == "produce"
     }
     pruned: list[StageManifest] = []
     dropped: list[dict[str, str]] = []
@@ -256,7 +336,6 @@ def _prune_unreferenced_exports(
         pruned.append(stage if len(kept) == len(stage.endpoints) else replace(stage, endpoints=kept))
     if failures:
         raise LinkError(failures)
-    dropped.sort(key=lambda item: (item["stage"], item["endpoint"]))
     return pruned, dropped
 
 
@@ -591,7 +670,7 @@ def _math_mode(stages: Sequence[StageManifest], override: MathMode | None) -> Ma
 
 
 class _NvJitLink:
-    """The final-link vehicle retained from the legacy implementation."""
+    """ctypes binding to nvJitLink for the final device link."""
 
     def __init__(self, library: Path) -> None:
         try:
@@ -982,6 +1061,8 @@ def _cluster_result(solution: Solution, stages: Sequence[StageManifest]) -> tupl
     x_multiple = 1
     maximum: list[int] | None = None
     for stage in sorted(stages, key=lambda item: item.id):
+        if stage.topology is None:
+            continue
         constraint = stage.topology.cluster_launch
         x_multiple = math.lcm(
             x_multiple, stage.topology.cta_group, constraint.x_multiple_of
@@ -1164,10 +1245,10 @@ def _check_tensor_resource_bindings(
 ) -> None:
     """Validate declaration-to-allocation refinement, reporting T-PLAN on failure.
 
-    MODEL_SAT is not an allocation certificate. Borrowed intervals are never
-    enlarged or relocated to make this check pass. Event lifetimes must contain
-    the lend on every resolved connection. Symbolic extents are checked on solved intervals.
-    Published runtime TMEM bindings and private cells are not ordinary allocations.
+    MODEL_SAT does not certify allocations, so this runs on solved intervals,
+    symbolic extents included. Borrowed intervals are checked as placed: never
+    enlarged or relocated. Event lifetimes must contain the lend on every resolved
+    connection. Published runtime TMEM bindings and private cells are excluded.
     """
     from .tensor.lifetimes import resolve_lifetimes
 
@@ -1669,6 +1750,8 @@ def link(pipeline_path: str | Path, out_dir: str | Path) -> LinkResult:
             raise _tensor_error(lifetimes.failures, tensor_records)
         try:
             pairs = _pair_channels(stages)
+            threads = launch_threads(stages)
+            check_entry_rendezvous(stages, threads)
             canon = _canonical_endpoints(stages, pipeline, profile)
             _unify_pairs(pairs, canon)
             expansions = [
@@ -1676,6 +1759,8 @@ def link(pipeline_path: str | Path, out_dir: str | Path) -> LinkResult:
                 for channel, producers, consumers in pairs
             ]
             expansions.sort(key=lambda item: item.channel)
+            # Call expansion has resolved every channel's export; interfaces are checked on top.
+            check_calls(pairs, threads, profile, stages)
 
             params = (
                 ParamsLayout(total_bytes=0, align=profile.caps.param_align, entries=[])

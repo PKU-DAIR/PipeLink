@@ -1,0 +1,14 @@
+{
+  "sources": ["campaigns/coda/producers/sm120/producer.cu"],
+  "includes": ["third_party/cutlass/include", "pipec/src/pipec2/pack/include", "pipec/src/pipec2/host/include"],
+  "defines": {},
+  "std": "c++17",
+  "compile_flags": [],
+  "profile": "sm_120a",
+  "host_group": "coda.sm120.params",
+  "provider": {
+    "build": ["uv", "run", "--project", "pipec", "python", "campaigns/coda/producers/sm120/build.py"],
+    "artifact": "campaigns/coda/producers/sm120/out/provider.so",
+    "header": "campaigns/coda/producers/sm120/provider.h"
+  }
+}

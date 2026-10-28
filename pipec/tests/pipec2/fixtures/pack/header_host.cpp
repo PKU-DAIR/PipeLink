@@ -6,12 +6,12 @@ struct HostResidue { uint64_t state; };
 struct HostEmpty {};
 
 PL_STAGE("fixture.host", "1");
-PL_NO_PARAMS();
-#if !defined(HOST_HOSTLESS)
-PL_HOST_TARGET();
-#endif
 
 #if defined(HOST_TARGET_ONLY) || defined(HOST_HOSTLESS)
+PL_NO_PARAMS();
+#if defined(HOST_TARGET_ONLY)
+PL_HOST_TARGET();
+#endif
 #elif defined(HOST_DECLARATIONS_ONLY)
 PL_HOST_DECLARATIONS("fixture.author");
 PL_HOST_FACT(pl::host::fact("fixture.width").u64(16)

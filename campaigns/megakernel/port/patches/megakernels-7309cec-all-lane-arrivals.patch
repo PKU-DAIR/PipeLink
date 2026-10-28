@@ -1,0 +1,390 @@
+diff --git a/demos/low-latency-llama/attention_partial.cu b/demos/low-latency-llama/attention_partial.cu
+--- a/demos/low-latency-llama/attention_partial.cu
++++ b/demos/low-latency-llama/attention_partial.cu
+@@ -82,10 +82,6 @@
+     }
+     __device__ static inline void wait_KV_page(megakernel::state<config> &s) {
+         s.wait_page_ready(s.pid(KV_PAGE));
+-    }
+-    __device__ static inline void finish_QOL_page(megakernel::state<config> &s) {
+-        if (kittens::warp::laneid() == 0)
+-            s.finish_page(s.pid(QOL_PAGE), config::NUM_CONSUMER_WARPS);
+     }
+     __device__ static inline void finish_KV_page(megakernel::state<config> &s) {
+         if (kittens::warp::laneid() == 0)
+@@ -282,14 +278,16 @@
+         }
+         static __device__ int init_semaphores(const globals &g,
+                                               megakernel::state<config> &s) {
++            // Q/K/V arrivals are TMA/cp.async transactions; the consumer and
++            // storer handoffs count thread arrivals of one warp.
+             init_semaphore(Q_arrived(s), 0, 1);
+-            init_semaphore(O_arrived(s), 0, 1);
+-            init_semaphore(L_arrived(s), 0, 1);
++            init_semaphore(O_arrived(s), kittens::WARP_THREADS);
++            init_semaphore(L_arrived(s), kittens::WARP_THREADS);
+             for (int i = 0; i < NUM_STAGES; i++) {
+                 init_semaphore(K_arrived(s, i), 0, 1);
+                 init_semaphore(V_arrived(s, i), 0, 1);
+-                init_semaphore(K_finished(s, i), 0, 1);
+-                init_semaphore(V_finished(s, i), 0, 1);
++                init_semaphore(K_finished(s, i), kittens::WARP_THREADS);
++                init_semaphore(V_finished(s, i), kittens::WARP_THREADS);
+             }
+             return 3 + 4 * NUM_STAGES;
+         }
+@@ -349,6 +347,9 @@
+ 
+                 // Wait for the KV page
+                 wait_KV_page(s);
++                // Order the page's earlier generic-proxy accesses before the
++                // TMA writes below.
++                asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
+ 
+                 if (start_blk_idx >= end_blk_idx)
+                     finish_KV_page(s);
+@@ -471,8 +472,7 @@
+ 
+                     kittens::warp::load(K_reg, K_smem);
+                     kittens::warp::mma_ABt(attn_fl_reg, Q_reg, K_reg, attn_fl_reg);
+-                    kittens::warp::sync();
+-                    kittens::warp::arrive(K_finished(s, stage));
++                    kittens::arrive(K_finished(s, stage));
+ 
+                     // Mask out invalid positions at the end
+                     if ((i + start_blk_idx + 1) * LLAMA_1B_KV_BLOCK_SIZE >
+@@ -507,8 +507,7 @@
+                     kittens::warp::copy(attn_bf_reg,
+                                attn_fl_reg); // Convert to bf16 to do matmul
+                     kittens::warp::mma_AB(O_reg, attn_bf_reg, V_reg, O_reg);
+-                    kittens::warp::sync();
+-                    kittens::warp::arrive(V_finished(s, stage));
++                    kittens::arrive(V_finished(s, stage));
+ 
+                     // Normalize and accumulate demoniator
+                     kittens::warp::mul(norm_vec_reg, norm_vec_reg,
+@@ -523,7 +522,8 @@
+                 kittens::warp::sync();
+ 
+                 if (start_blk_idx < end_blk_idx) {
+-                    finish_KV_page(s);
++                    // Every lane read K/V from the page.
++                    s.warp_finish_page(s.pid(KV_PAGE), config::NUM_CONSUMER_WARPS);
+                     kittens::warp::div_row(O_reg, O_reg, norm_vec_reg);
+                     kittens::warp::log2(L_reg, norm_vec_reg);
+                     kittens::warp::add(
+@@ -537,12 +537,9 @@
+ 
+                 // Store the results
+                 store_4_rows(O_smem, O_reg, q_head_local_idx);
+-                kittens::warp::sync();
+-
+-                kittens::warp::arrive(O_arrived(s));
++                kittens::arrive(O_arrived(s));
+                 kittens::warp::store(L_smem, L_reg);
+-                kittens::warp::sync();
+-                kittens::warp::arrive(L_arrived(s));
++                kittens::arrive(L_arrived(s));
+             }
+         }
+     };
+@@ -552,11 +549,10 @@
+         store_o_skip(const globals &g, megakernel::state<config> &s, int q_head_start_idx) {
+             auto O_smem = get_O_smem(s);
+ 
++            kittens::wait(O_arrived(s), 0);
+             if (kittens::laneid() == 0) {
+-                kittens::wait(O_arrived(s), 0);
+                 s.record(megakernel::TEVENT_OUTPUT_READY);
+             }
+-            kittens::warp::sync();
+ 
+             kittens::rv_bf<globals::head_dim> O_bf;
+             for (int head_offset = 0; head_offset < GQA_RATIO; head_offset++) {
+@@ -614,10 +610,13 @@
+                 store_o_no_skip(g, s, q_head_start_idx, inst);
+             }
+ 
++            // L_smem lives in the QOL page: every lane acquires the consumer's
++            // L stores before the page release below, on both paths.
++            kittens::wait(L_arrived(s), 0);
++
+             // Store LSE to global memory
+             if (laneid < GQA_RATIO && !skip_attn_reduction) {
+                 l_sv &L_smem = get_L_smem(s);
+-                kittens::wait(L_arrived(s), 0);
+ 
+                 // Can't do anything fancy with writing 4 spread-out values.
+                 // We can do this in the consumer if we want to (without using
+@@ -644,8 +643,9 @@
+             kittens::tma::store_async_wait();
+             if (laneid == 0) {
+                 s.record(123 + laneid);
+-                finish_QOL_page(s);
+-            }
++            }
++            // Every lane that read or wrote O/L releases the page itself.
++            s.warp_finish_page(s.pid(QOL_PAGE), config::NUM_CONSUMER_WARPS);
+ 
+             // Wait and finish
+             if (laneid < GQA_RATIO) {
+diff --git a/demos/low-latency-llama/attention_reduction.cu b/demos/low-latency-llama/attention_reduction.cu
+--- a/demos/low-latency-llama/attention_reduction.cu
++++ b/demos/low-latency-llama/attention_reduction.cu
+@@ -95,9 +95,8 @@
+         }
+     }
+     __device__ static inline void finish_shared_page(megakernel::state<Config> &s) {
+-        if (kittens::warp::laneid() == 0) {
+-            s.finish_page(s.pid(SHARED_DATA_PAGE), Config::NUM_CONSUMER_WARPS);
+-        }
++        // Executed by every storer lane.
++        s.warp_finish_page(s.pid(SHARED_DATA_PAGE), Config::NUM_CONSUMER_WARPS);
+     }
+ 
+     // --- Shared Memory Layout and Access Helpers (Single Page) ---
+@@ -142,15 +141,18 @@
+         }
+         static __device__ int init_semaphores(const Globals &g,
+                                               megakernel::state<Config> &s) {
++            // TMA arrivals keep one expected transaction; consumer handoffs
++            // count the thread arrivals of one warp.
+             for (int q_head = 0; q_head < Q_HEADS_PER_INSTRUCTION; ++q_head) {
+                 for (int stage = 0; stage < NUM_STAGES; stage++) {
+                     init_semaphore(O_partial_arrived(s, q_head, stage), 0, 1);
+-                    init_semaphore(O_partial_finished(s, q_head, stage), 0, 1);
++                    init_semaphore(O_partial_finished(s, q_head, stage),
++                                   kittens::WARP_THREADS);
+                 }
+                 init_semaphore(L_partial_all_arrived(s, q_head), 0, 1);
+-                init_semaphore(L_partial_all_finished(s, q_head), 0, 1);
+-
+-                init_semaphore(final_O_ready(s, q_head), 0, 1);
++                init_semaphore(L_partial_all_finished(s, q_head), kittens::WARP_THREADS);
++
++                init_semaphore(final_O_ready(s, q_head), kittens::WARP_THREADS);
+             }
+             return 4 * ((NUM_STAGES * 2) + 3);
+         }
+@@ -197,6 +199,12 @@
+                 }
+                 s.record(megakernel::TEVENT_DONE_GMEM_WAIT);
+ 
++                // The TMA loads below and the consumers' O_final stores use the
++                // shared page: acquire it here, where the expect-tx arrivals
++                // the consumers acquire are issued.
++                s.wait_page_ready(s.pid(SHARED_DATA_PAGE));
++                asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
++
+                 for (int i = 0; i < 4; ++i) {
+                     l_partial_sv &L_smem = get_L_partial_smem(s, i);
+                     kittens::tma::expect(L_partial_all_arrived(s, i), L_smem);
+@@ -285,17 +293,15 @@
+                     // Update LSE accumulator:
+                     accumulated_lse = max_lse + log2f(new_denom);
+ 
+-                    kittens::warp::arrive(
++                    kittens::arrive(
+                         O_partial_finished(s, q_head_local_idx, stage));
+                 }
+-                kittens::warp::arrive(L_partial_all_finished(s, q_head_local_idx));
++                kittens::arrive(L_partial_all_finished(s, q_head_local_idx));
+ 
+                 o_final_sv &O_final_smem =
+                     get_O_final_smem(s, q_head_local_idx);
+                 kittens::warp::store(O_final_smem, accumulated_out);
+-                kittens::warp::sync();
+-
+-                kittens::warp::arrive(final_O_ready(s, q_head_local_idx));
++                kittens::arrive(final_O_ready(s, q_head_local_idx));
+             }
+         }
+     };
+@@ -323,9 +329,8 @@
+                 // atomicAdd(&g.Bar[{inst.layer_idx, opcode - 1,
+                 // inst.q_head_start_idx + q_head_local_idx}], 1);
+             }
+-            // All four issuing lanes must finish reading the page for their
+-            // TMA stores before lane 0 releases it to the next instruction.
+-            kittens::warp::sync();
++            // Each issuing lane has finished reading the page for its TMA
++            // store (store_async_wait above); every lane releases the page.
+             finish_shared_page(s);
+ 
+             if (kittens::warp::laneid() == 0) {
+diff --git a/demos/low-latency-llama/matvec_pipeline.cuh b/demos/low-latency-llama/matvec_pipeline.cuh
+--- a/demos/low-latency-llama/matvec_pipeline.cuh
++++ b/demos/low-latency-llama/matvec_pipeline.cuh
+@@ -102,14 +102,17 @@
+     }
+ 
+     __device__ static inline int init_semaphores(megakernel::state<Config> &s) {
++        // Consumer and storer handoffs count thread arrivals: every lane that
++        // touched the scratch or weight page arrives itself.
++        constexpr int warp_arrivals = Config::NUM_CONSUMER_WARPS * kittens::WARP_THREADS;
+         init_semaphore(activations_arrived(s), 1);
+         for (int i = 0; i < INPUT_PIPELINE_STAGES; i++) {
+             init_semaphore(weights_arrived(s, i), 1);
+-            init_semaphore(weights_finished(s, i), Config::NUM_CONSUMER_WARPS);
++            init_semaphore(weights_finished(s, i), warp_arrivals);
+         }
+         for (int i = 0; i < OUTPUT_PIPELINE_STAGES; i++) {
+-            init_semaphore(outputs_arrived(s, i), Config::NUM_CONSUMER_WARPS);
+-            init_semaphore(outputs_finished(s, i), 1);
++            init_semaphore(outputs_arrived(s, i), warp_arrivals);
++            init_semaphore(outputs_finished(s, i), kittens::WARP_THREADS);
+         }
+         return SEM_COUNT;
+     }
+@@ -130,13 +133,20 @@
+                          INPUT_PIPELINE_STAGES);
+ 
+                 auto &sem = weights_arrived(s, input_stage);
++                if (iter < INPUT_PIPELINE_STAGES) {
++                    // Acquire the stage's pages before the expect-tx arrive
++                    // that consumers acquire, and order earlier generic-proxy
++                    // accesses to them before the TMA writes.
++#pragma unroll
++                    for (int i = 0; i < 4; i++) {
++                        s.wait_page_ready(get_weight_page(s, input_stage, i));
++                    }
++                    asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
++                }
+                 kittens::tma::expect_bytes(sem, sizeof(kittens::bf16) * 2048 * 16);
+ #pragma unroll
+                 for (int i = 0; i < 4; i++) {
+                     int weight_page = get_weight_page(s, input_stage, i);
+-                    if (iter < INPUT_PIPELINE_STAGES) {
+-                        s.wait_page_ready(weight_page);
+-                    }
+                     auto &weight_chunk = reinterpret_cast<kittens::st_bf<16, 512> &>(
+                         s.pages[weight_page]);
+ 
+@@ -194,9 +204,8 @@
+ 
+             matvec(out_smem, weights, activations_vec);
+ 
+-            kittens::warp::sync();
+-            kittens::warp::arrive(outputs_arrived(s, output_stage));
+-            kittens::warp::arrive(weights_finished(s, input_stage));
++            kittens::arrive(outputs_arrived(s, output_stage));
++            kittens::arrive(weights_finished(s, input_stage));
+ 
+             if (i >= inst.iters - INPUT_PIPELINE_STAGES) {
+ // Release pages.
+@@ -235,7 +244,7 @@
+             if ((i + 1) % iter_scale == 0) {
+                 for (int j = 0; j < iter_scale; j++) {
+                     auto stage_to_arrive = (i - j) % OUTPUT_PIPELINE_STAGES;
+-                    kittens::warp::arrive(outputs_finished(s, stage_to_arrive));
++                    kittens::arrive(outputs_finished(s, stage_to_arrive));
+                 }
+             }
+             output_stage = (output_stage + 1) % OUTPUT_PIPELINE_STAGES;
+@@ -278,6 +287,9 @@
+         if (kittens::laneid() == 0) {
+             int activation_page = get_activation_page(s);
+             s.wait_page_ready(activation_page);
++            // Order the page's earlier generic-proxy accesses before the TMA
++            // write below.
++            asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
+ 
+             auto &rms_scale = get_rms_scale(s);
+             auto &sem = rms_scale_arrived(s);
+diff --git a/include/controller/controller.cuh b/include/controller/controller.cuh
+--- a/include/controller/controller.cuh
++++ b/include/controller/controller.cuh
+@@ -66,6 +66,9 @@
+         // Step 1. Load instructions (no semaphores used)
+         load_instructions<config, globals>(&kvms.instruction()[0],
+                                            kvms.instruction_index, g);
++        // Lanes read instruction words and earlier pid_order entries written
++        // by other lanes of this warp.
++        __syncwarp();
+ 
+         if (laneid == 0) {
+             kvms.record(TEVENT_IFETCH_DONE);
+@@ -125,10 +128,10 @@
+ 
+         if (laneid == 0) {
+             kvms.record(TEVENT_SEMS_SETUP);
+-            // Step 4. Let the rest of the world know that next instruction is
+-            // ready to roll!
+-            arrive(kvms.instruction_arrived[kvms.instruction_ring], 1);
+         }
++        // Step 4. Let the rest of the world know that next instruction is
++        // ready to roll! Every lane publishes its own stores.
++        arrive(kvms.instruction_arrived[kvms.instruction_ring]);
+     }
+ 
+     // invalidate remaining semaphores and write out remaining timings
+diff --git a/include/megakernel.cuh b/include/megakernel.cuh
+--- a/include/megakernel.cuh
++++ b/include/megakernel.cuh
+@@ -80,13 +80,15 @@
+     }
+ 
+     if (threadIdx.x < config::INSTRUCTION_PIPELINE_STAGES) {
+-        init_semaphore(instruction_arrived[threadIdx.x], 1);
++        // Thread arrivals: the controller warp publishes, every lane of every
++        // other warp retires.
++        init_semaphore(instruction_arrived[threadIdx.x], kittens::WARP_THREADS);
+         init_semaphore(instruction_finished[threadIdx.x],
+-                       config::NUM_WARPS - 1);
++                       (config::NUM_WARPS - 1) * kittens::WARP_THREADS);
+     }
+     if (threadIdx.x < config::NUM_PAGES) {
+         for (int i = 0; i < config::INSTRUCTION_PIPELINE_STAGES_BITS; i++) {
+-            auto count = config::NUM_CONSUMER_WARPS * (1 << i);
++            auto count = config::NUM_CONSUMER_WARPS * (1 << i) * kittens::WARP_THREADS;
+             init_semaphore(page_finished[threadIdx.x][i], count);
+             arrive(page_finished[threadIdx.x][i], count);
+         }
+diff --git a/include/util.cuh b/include/util.cuh
+--- a/include/util.cuh
++++ b/include/util.cuh
+@@ -127,13 +127,13 @@
+     }
+     __device__ inline void next_instruction() {
+         __syncwarp();
+-        if (kittens::laneid() == 0) {
+ #ifdef MK_DEBUG
++        if (kittens::laneid() == 0)
+             printf("Thread %d: arriving at instruction finished %d\n",
+                    threadIdx.x, instruction_ring);
+ #endif
+-            kittens::arrive(instruction_finished[instruction_ring]);
+-        }
++        // Every lane retires its own reads of this ring slot.
++        kittens::arrive(instruction_finished[instruction_ring]);
+         instruction_index++;
+         instruction_ring =
+             ring_advance<config::INSTRUCTION_PIPELINE_STAGES>(instruction_ring);
+@@ -160,16 +160,21 @@
+         }
+     }
+ 
++    // page_finished counts thread arrivals: a release of `count` units is
++    // count * WARP_THREADS arrivals, either from one thread that made no
++    // generic shared-memory accesses to the page (finish_page) or from every
++    // lane of a warp that did (warp_finish_page, executed by all lanes).
+     __device__ inline void finish_page(int pid, int count) {
+ #pragma unroll
+         for (int i = 0; i < config::INSTRUCTION_PIPELINE_STAGES_BITS; i++) {
++            arrive(page_finished[pid][i], count * kittens::WARP_THREADS);
++        }
++    }
++
++    __device__ inline void warp_finish_page(int pid, int count) {
++#pragma unroll
++        for (int i = 0; i < config::INSTRUCTION_PIPELINE_STAGES_BITS; i++) {
+             arrive(page_finished[pid][i], count);
+-        }
+-    }
+-
+-    __device__ inline void warp_finish_page(int pid, int count) {
+-        if (kittens::warp::laneid() == 0) {
+-            finish_page(pid, count);
+         }
+     }
+ 

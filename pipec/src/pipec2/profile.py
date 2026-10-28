@@ -151,11 +151,8 @@ SM_103A = Profile(
 )
 
 
-# Hopper (CC 9.0): no TMEM, no CLC, no 2-SM cta_group. Same dynamic smem, register
-# and cluster limits as sm103. CuTe's Layout_K_SW128_Atom<bf16> / MN_SW64 are the same
-# Swizzle<3,3,3> / Swizzle<2,3,3> element-unit atoms on Hopper, so the shared
-# _SW_BF16_ATOMS entries are referenced (not copied) under the wgmma-neutral
-# sm90 atoms.
+# Hopper (CC 9.0): no TMEM, no CLC, no 2-SM cta_group. Dynamic smem, register and
+# cluster limits match sm103. The atoms reuse the shared _SW_BF16_ATOMS entries (see above).
 SM_90A = Profile(
     name="sm_90a",
     lto_arch="lto_90",
@@ -189,7 +186,7 @@ SM_90A = Profile(
 # Consumer Blackwell (CC 12.0): no TMEM/tcgen05, no wgmma (warp-level mma.sync), no 2-SM
 # cta_group; 101376 B opt-in dynamic smem per block, shared by the smem and mbarrier domains.
 # Thread block clusters are a CC 12.x feature (CUDA Programming Guide, compute capabilities
-# table); the portable limit is 8, as on sm90. CLC stays unadmitted: ptxas accepts it, but the
+# table); the portable limit is 8, as on sm90. No CLC scheduler: ptxas accepts CLC, but the
 # only CLC strategy is an sm100 host schema.
 _SM120_SMEM = 101376
 SM_120A = Profile(
@@ -226,7 +223,7 @@ SM_120A = Profile(
 
 # Siblings within a family. CC 10.0 and 12.1 share their sibling's limits (CUDA Programming Guide,
 # compute-capabilities tables) and instruction vocabulary; an `a` image runs only on its exact CC,
-# so each needs its own profile. Registered for pack/link, not evidenced on hardware.
+# so each needs its own profile. Registered for pack and link; untested on hardware.
 def _sibling(profile: Profile, number: str) -> Profile:
     return replace(profile, name=f"sm_{number}a", lto_arch=f"lto_{number}", adapter_compile=replace(
         profile.adapter_compile, gencode=(f"compute_{number}a", f"lto_{number}a")))

@@ -51,7 +51,7 @@ def main() -> None:
         pipeline_stages.append({"stage_id": manifest["stage"]["id"], "artifact_path": package.name})
         stages.append({"source": source, "includes": [REPO / "pipec/src/pipec2/pack/include"], "defines": {}})
 
-    # The packed ABI carries the profile/toolkit/schema; do not restate these facts.
+    # Reuse the packed ABI's profile/toolkit/schema stamp.
     pipeline = {
         "pipelink_abi": manifest["pipelink_abi"],
         "pipeline": {

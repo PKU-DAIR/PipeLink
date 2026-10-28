@@ -524,8 +524,8 @@ def parse_host(value: Any, stage_id: str, roles: dict, target: Any) -> dict:
         source = _obj(channel["source"], path, "kind name")
         _enum(source["kind"], {"caller", "workspace"}, path)
         _str(source["name"], path, qualified=source["kind"] == "workspace")
-        # A domain channel is one caller-lent allocation symmetric over a caller-named domain
-        # (decision 32, option A); views are the remote addresses build receives.
+        # A domain channel is one caller-lent allocation, symmetric over a caller-named domain.
+        # Its views name the remote addresses build receives.
         views = _names(channel["views"], path)
         if views != sorted(set(views)) or set(views) - {"multicast", "peer"}:
             _fail(path, "channel views must be a sorted subset of multicast, peer", "domain", actual=views)
@@ -632,7 +632,7 @@ def _walk(value: Any):
             yield from _walk(child)
 
 def host_link(stages: Iterable[StageManifest]) -> bool:
-    """Host declarations select the host link path independently of schema version."""
+    """Whether any stage declares a host section; that alone selects the host link path."""
     return any(stage.host is not None for stage in stages)
 
 
@@ -779,8 +779,9 @@ def _validate_assembly(pipeline: Any, stages: list) -> None:
                 if first[key] != channel[key]:
                     _fail(f"host.channels.{name}.{key}", "cross-owner channel declarations disagree", "dtype" if "dtype" in key else "domain" if key == "views" else key, owner=owner)
         if first["source"]["kind"] == "caller":
-            # Same-source channels may overlap; a lender is one local or one domain-symmetric allocation.
-            # Views may differ per channel: the caller's one Resource carries their union.
+            # Channels sharing a caller source may overlap. Each source is one local or one
+            # domain-symmetric allocation; its channels may declare different views, and the
+            # caller's single Resource carries their union.
             other, domain = lender_domains.setdefault(first["source"]["name"], (name, first["domain"]))
             if domain != first["domain"]:
                 _fail(f"host.channels.{name}.domain", "channels sharing a caller source disagree on domain", "domain", channel=other)

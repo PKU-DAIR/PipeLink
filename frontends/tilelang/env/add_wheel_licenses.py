@@ -16,9 +16,9 @@ import zipfile
 DIST_INFO = "tilelang-0.1.14.dist-info"
 TVM = "3rdparty/tvm"
 FFI = f"{TVM}/3rdparty/tvm-ffi"
-# Audited against v0.1.14's CMake targets and wheel.packages mapping. These
-# components contribute bundled binaries or headers; this is not a recursive
-# collection of every submodule's license (most optional TVM backends are off).
+# Components that contribute bundled binaries or headers, per v0.1.14's CMake
+# targets and wheel.packages mapping. Submodules that ship nothing (most optional
+# TVM backends are off) are left out.
 LICENSE_FILES = {
     "tvm/LICENSE": f"{TVM}/LICENSE",
     "tvm/NOTICE": f"{TVM}/NOTICE",
@@ -30,9 +30,9 @@ LICENSE_FILES = {
     "nvbench/LICENSE.l2_cache_flush.txt": f"{TVM}/licenses/LICENSE.l2_cache_flush.txt",
     "vllm/LICENSE.vllm.txt": f"{TVM}/licenses/LICENSE.vllm.txt",
 }
-# These two headers are compiled into TVM but are not included in the wheel.
-# Preserve their actual copyright/permission comments as well as the full
-# upstream license texts, without adding executable source to licenses/.
+# Headers compiled into TVM but absent from the wheel. Their leading copyright
+# comment is copied into licenses/ (next to the full license texts above);
+# the code itself is left out.
 HEADER_NOTICES = {
     "compiler-rt/NOTICE": f"{TVM}/3rdparty/compiler-rt/builtin_fp16.h",
     "nvbench/NOTICE": f"{TVM}/3rdparty/nvbench/l2_cache_flush.h",

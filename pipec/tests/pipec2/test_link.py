@@ -213,6 +213,58 @@ def _importing_stage(stage_id: str, imports: tuple[str, ...]) -> StageManifest:
     return replace(_stage(stage_id), endpoints=endpoints)
 
 
+def test_ring_implies_slot_claims_unless_a_stage_claims_the_handle() -> None:
+    from pipec2.model import Arrive, BarrierSide, Depth, Init, PipelineDomain, Ring
+
+    smem = load_layout({"encoding": "pl-layout-v2", "elem_bits": 16, "shape": [64], "stride": [1]}, "smem", "$.layout")
+
+    def ring(name: str, direction: str, depth: Depth, full: str = "slots_full") -> Endpoint:
+        protocol = Protocol("mbarrier", BarrierSide(full, Arrive(1, "load"), 128),
+                            BarrierSide("slots_empty", Arrive(1, "use"), 0),
+                            Init("load", 0, "stage"), "once-per-acquire", None, None, None)
+        return Endpoint(name, direction, "load" if direction == "produce" else "use", "smem", "cta", "async",
+                        Tile("bf16", (64,)), smem, Ring(depth, 128), protocol, {})
+
+    producer = replace(_stage("org.producer"), endpoints=[ring("x", "produce", Depth(None, "pipelink_depth"))])
+    consumer = replace(_stage("org.consumer"), endpoints=[ring("x", "consume", Depth(None, "pipelink_depth"))])
+    stages = link_module._ring_slot_claims([producer, consumer])
+    # One owner allocates each handle once, sized by the shared depth handle.
+    assert [(claim.handle, claim.lifetime, claim.extent.const, claim.extent.per, claim.align)
+            for claim in stages[0].claims] == [
+        ("slots_empty", "kernel", 0, {"pipelink_depth": 1}, 1), ("slots_full", "kernel", 0, {"pipelink_depth": 1}, 1)]
+    assert stages[1].claims == []
+    # An explicit claim anywhere in the assembly is authoritative for its handle.
+    placed = Claim("mbarrier", "slots_full", "phase:load", Extent(2, {}, {}), 1, None, None, None, None, None, None)
+    stages = link_module._ring_slot_claims([replace(producer, claims=[placed]), consumer])
+    assert [(claim.handle, claim.lifetime) for claim in stages[0].claims] == [
+        ("slots_full", "phase:load"), ("slots_empty", "kernel")]
+    assert stages[1].claims == []
+    # A disagreeing consumer depth does not resize the producer's slots; slot-extent and
+    # channel checks report it.
+    fixed = replace(consumer, endpoints=[ring("x", "consume", Depth(2, None))])
+    stages = link_module._ring_slot_claims([fixed, producer])
+    assert {claim.handle: claim.extent.per for claim in stages[1].claims} == {
+        "slots_full": {"pipelink_depth": 1}, "slots_empty": {"pipelink_depth": 1}}
+
+
+def test_stage_domain_capacity_fills_and_must_agree_with_the_pipeline() -> None:
+    from pipec2.model import PipelineDomain
+
+    provider = replace(_stage("org.provider"), domain_capacities={"instr_page": 13})
+    pipeline = link_module._stage_domain_capacities(_pipeline(), [provider, _stage("org.user")])
+    assert pipeline.domains["instr_page"] == PipelineDomain(13, None)
+    agreeing = replace(_pipeline(), domains={"instr_page": PipelineDomain(13, None)})
+    assert link_module._stage_domain_capacities(agreeing, [provider]) is agreeing
+    for pipeline, stages in (
+        (replace(_pipeline(), domains={"instr_page": PipelineDomain(12, None)}), [provider]),
+        (_pipeline(), [provider, replace(_stage("org.other"), domain_capacities={"instr_page": 12})]),
+    ):
+        with pytest.raises(LinkError) as caught:
+            link_module._stage_domain_capacities(pipeline, stages)
+        assert [(item.clause_id, item.path) for item in caught.value.failures] == [
+            ("L-HANDLE", "pipeline.domains.instr_page.capacity")]
+
+
 def test_unreferenced_exports_drop_out_with_the_endpoints_they_own() -> None:
     from pipec2.model import CounterDecl
 
@@ -287,7 +339,7 @@ def test_assembly_validates_the_pruned_interface() -> None:
     stage = load_stage_manifest(raw)
     pipeline = load_pipeline(_valid_pipeline())
     assert [failure.clause_id for failure in validate_assembly(pipeline, [stage])] == ["L-HANDLE"]
-    [artifact] = link_module._assemble(pipeline, [link_module._Artifact(Path("stage.plink"), stage, b"", "a" * 64)])
+    _, [artifact] = link_module._assemble(pipeline, [link_module._Artifact(Path("stage.plink"), stage, b"", "a" * 64)])
     assert "dead_counter" not in {endpoint.name for endpoint in artifact.stage.endpoints}
     assert artifact.dropped_endpoints == (
         {"stage": "producer.stage", "endpoint": "dead_call", "reason": "uncalled export channel"},
@@ -830,8 +882,12 @@ def test_two_stage_warp_profile_pack_and_link_produces_profile_cubin(
         pack_cu(FIXTURES / f"sm90_{name}.cu", tmp_path / f"{name}.plink", profile=profile_name)
         manifest, _payload = container.read(tmp_path / f"{name}.plink")
         assert manifest["pipelink_abi"]["target"] == {**target, "math": NVCC_DEFAULT_MATH.to_json_obj()}
-        assert manifest["topology"]["cta_group"] == {"fixed": 1}
-        assert manifest["topology"]["scheduler"] == "static"
+        # The role-less provider declares no topology; the caller's is the default.
+        if name == "provider":
+            assert "topology" not in manifest
+        else:
+            assert manifest["topology"]["cta_group"] == {"fixed": 1}
+            assert manifest["topology"]["scheduler"] == "static"
         schemas.add(manifest["pipelink_abi"]["schema"])
     (schema,) = schemas
     (tmp_path / "pipeline.json").write_bytes(canonical_bytes({
@@ -919,9 +975,8 @@ def test_two_stage_sm90_signal_pack_and_link(
         assert endpoint["scope"] == scope
         assert endpoint["binds"] == {"full": full}
         assert "tile" not in endpoint and "layout" not in endpoint
-        (claim,) = [claim for claim in manifest["claims"] if claim["domain"] == "mbarrier"]
-        assert claim["handle"] == full
-        assert claim["extent"] == {"const": 1, "per": {}}
+        # The depth-one signal ring implies its slot; the linker allocates it.
+        assert not [claim for claim in manifest["claims"] if claim["domain"] == "mbarrier"]
     (schema,) = schemas
     (tmp_path / "pipeline.json").write_bytes(canonical_bytes({
         "pipelink_abi": {"schema": schema, "target": target},
@@ -995,3 +1050,51 @@ def test_two_stage_sm90_signal_pack_and_link(
     header = next(line for line in elf.splitlines() if line.startswith("64-bit ELF:"))
     assert "sm=90a," in header
     assert f"-maxrregcount {result.regs_cap} -arch sm_90a" in elf
+
+
+def _nested_pipeline(tmp_path: Path, schema: str, target: dict[str, str]) -> Path:
+    path = tmp_path / "pipeline.json"
+    path.write_bytes(canonical_bytes({
+        "pipelink_abi": {"schema": schema, "target": target},
+        "pipeline": {
+            "name": "nested-call",
+            "stages": [{"stage_id": f"org.nested.{name}", "artifact_path": f"{name}.plink"}
+                       for name in ("outer", "middle", "inner")],
+            "handles": {"pipelink_work_warps": {
+                "class": "base", "binding": "bind", "domain": "warp", "owner": "claim:work"}},
+            "phases": ["work"], "exclusive": [], "domains": {}, "depth_priority": [], "regs_priority": [],
+            "forced_bindings": {}, "topology": {"persistent": False, "scheduler": "static"},
+        },
+    }))
+    return path
+
+
+def test_nested_call_pack_and_link(tmp_path: Path, cuda_toolchain: Path) -> None:
+    """Role `work` of A calls export E1 of B, whose body nested-calls export E2 of C; B and C
+    are role-less and declare no topology. GPU-free pack and link."""
+    from pipec2 import container
+    from pipec2.pack import pack_cu
+
+    if not (cuda_toolchain / "lib64" / "libnvJitLink.so.13").is_file() or shutil.which("nm") is None:
+        pytest.skip("configured CUDA link tools are unavailable")
+    target = {"profile": "sm_90a", "lto_arch": "lto_90a", "toolkit": "cuda-13.3.0"}
+    schemas = set()
+    for name in ("outer", "middle", "inner"):
+        pack_cu(FIXTURES / f"nested_{name}.cu", tmp_path / f"{name}.plink", profile="sm_90a")
+        manifest, _payload = container.read(tmp_path / f"{name}.plink")
+        schemas.add(manifest["pipelink_abi"]["schema"])
+        assert ("topology" in manifest) == (name == "outer")
+    middle = load_stage_manifest(container.read(tmp_path / "middle.plink")[0])
+    (nested,) = [endpoint for endpoint in middle.endpoints if endpoint.direction == "produce"]
+    assert (nested.owner_role, nested.exports, nested.protocol.call.site.cohort.threads) == (None, ["accumulate"], 32)
+    assert middle.exports["accumulate"].interface.cohort.threads == 128
+    outer = load_stage_manifest(container.read(tmp_path / "outer.plink")[0])
+    assert outer.entry_rendezvous.to_json_obj() == {"barrier": 0, "threads": 128}
+    (schema,) = schemas
+
+    result = link_module.link(_nested_pipeline(tmp_path, schema, target), tmp_path / "out")
+
+    assert sorted(expansion.channel for expansion in result.protocol_expansions) == ["accumulate", "reduce"]
+    stub = (tmp_path / "out" / "generated" / "binding_stub.cu").read_text(encoding="utf-8")
+    assert "pipelink_call_reduce(" in stub and "nested_inner_reduce(" in stub
+    assert (tmp_path / "out" / "pipeline.cubin").read_bytes().startswith(b"\x7fELF")

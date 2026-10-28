@@ -664,86 +664,14 @@ def _assert_negative_fixture(name: str) -> None:
     ), [(failure.path, failure.message) for failure in failures]
 
 
-def test_arrive_count_mismatch_fixture() -> None:
-    """Paired arrival counts reject under L-PROTO."""
-    _assert_negative_fixture("01_arrive_count_mismatch.json")
+NEGATIVE_FIXTURES = sorted(path.name for path in FIXTURE_DIR.glob("*.json"))
 
 
-def test_wrong_expect_tx_sum_fixture() -> None:
-    """A root expect-tx sum must name the exact shared group."""
-    _assert_negative_fixture("02_wrong_expect_tx_sum.json")
+def test_negative_fixture_directory_is_populated() -> None:
+    assert NEGATIVE_FIXTURES
 
 
-def test_duplicate_init_materializer_fixture() -> None:
-    """One physical barrier ring has one init materializer."""
-    _assert_negative_fixture("03_duplicate_init_materializer.json")
-
-
-def test_duplicate_shared_completion_root_fixture() -> None:
-    """Duplicate shared-completion root names reject."""
-    _assert_negative_fixture("04_duplicate_shared_completion_root.json")
-
-
-def test_chained_shared_completion_root_fixture() -> None:
-    """member_of may not target another member."""
-    _assert_negative_fixture("05_chained_shared_completion_root.json")
-
-
-def test_mismatched_call_declaration_hash_fixture() -> None:
-    """Call declaration hashes bind normalized declaration text."""
-    _assert_negative_fixture("06_mismatched_call_declaration_hash.json")
-
-
-def test_mixed_cta_group_fixture() -> None:
-    """Stages must agree on their compiled CTA group."""
-    _assert_negative_fixture("07_mixed_cta_group.json")
-
-
-def test_incompatible_compiled_cluster_shapes_fixture() -> None:
-    """Fixed compiled cluster shapes must intersect."""
-    _assert_negative_fixture("08_incompatible_compiled_cluster_shapes.json")
-
-
-def test_duplicate_strong_entry_symbol_fixture() -> None:
-    """Strong entry/export symbols are unique across artifacts."""
-    _assert_negative_fixture("09_duplicate_strong_entry_symbol.json")
-
-
-def test_incomplete_reg_group_fixture() -> None:
-    """An explicit register group covers its whole warpgroup."""
-    _assert_negative_fixture("10_incomplete_reg_group.json")
-
-
-def test_warpgroup_straddling_reg_group_fixture() -> None:
-    """An explicit register group cannot straddle boundaries."""
-    _assert_negative_fixture("11_warpgroup_straddling_reg_group.json")
-
-
-def test_non_warpgroup_aligned_regs_claim_roles_fixture() -> None:
-    """D-finding: an implicit one-role regs claim is warpgroup-aligned."""
-    _assert_negative_fixture("12_non_warpgroup_aligned_regs_claim_roles.json")
-
-
-def test_unknown_phase_pair_fixture() -> None:
-    """D-finding: every exclusive pair names declared finite phases."""
-    _assert_negative_fixture("13_unknown_phase_pair.json")
-
-
-def test_incomplete_variant_key_tuple_fixture() -> None:
-    """D-finding: all variant rows carry one complete handle-key tuple."""
-    _assert_negative_fixture("14_incomplete_variant_key_tuple.json")
-
-
-def test_params_overflow_fixture() -> None:
-    """D-finding: a stage parameter blob cannot exceed the profile cap."""
-    _assert_negative_fixture("15_params_overflow.json")
-
-
-@pytest.mark.parametrize("name", [
-    "16_unknown_tensor_guarantee.json",
-    "17_duplicate_lend_name.json",
-    "18_relocatable_lend_without_handle.json",
-    "19_tensor_under_draft_schema.json",
-])
-def test_tensor_v2_negative_fixture(name: str) -> None:
+@pytest.mark.parametrize("name", NEGATIVE_FIXTURES)
+def test_negative_fixture(name: str) -> None:
+    """Each fixture's mutation rejects with exactly its expected clause and path."""
     _assert_negative_fixture(name)

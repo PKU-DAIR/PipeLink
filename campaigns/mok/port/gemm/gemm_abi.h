@@ -12,11 +12,7 @@ typedef struct MokGemmTask {
   uint32_t flags;
 } MokGemmTask;
 #endif
-#define MOK_GEMM_TASK_PL_TYPE PL_TYPE(MokGemmTask, \
-  int32_t op, num_tokens, macrobatch_size, minibatch_size, macrobatch_idx, \
-      minibatch_idx, task_idx, cta_rank, input_minibatch_ready_num_cols, \
-      input_row_block_ready_base_index, input_row_block_ready_required_count, \
-      output_tile_ready_base_index, buffer_done_index; uint32_t flags;)
+#define MOK_GEMM_TASK_PL_TYPE PL_TYPE(MokGemmTask, op, num_tokens, macrobatch_size, minibatch_size, macrobatch_idx, minibatch_idx, task_idx, cta_rank, input_minibatch_ready_num_cols, input_row_block_ready_base_index, input_row_block_ready_required_count, output_tile_ready_base_index, buffer_done_index, flags)
 
 enum {
   MOK_GEMM_FWD_SHARED_GATE,

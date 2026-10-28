@@ -1,8 +1,8 @@
 """Checked Access IR to borrowed TileLang device adapters.
 
-TileLang is isolated in the configured interpreter. Unsupported recipes, effects,
-control flow and tooling are deployment outcomes: this module never changes the
-semantic status of its input plan. The restricted backend does not own storage.
+TileLang runs isolated in the configured interpreter. Unsupported recipes, effects,
+control flow and tooling are reported as deployment outcomes; the input plan's
+semantic status stays as it is. The restricted backend does not own storage.
 """
 from __future__ import annotations
 
@@ -18,13 +18,13 @@ from typing import Any, Mapping
 from pipec2.canonjson import canonical_bytes, sha256_hex
 from pipec2.decls import declaration_digest, normalize_declaration
 from pipec2.model import Solution
-from . import expr, ir, machine, tables
+from . import expr, fit, ir, machine, tables
 from .contracts import TensorImport
 from .plan import TensorPlan
 
 
 class LoweringUnsupported(RuntimeError):
-    """A backend rejection, not a semantic rejection of a MODEL_SAT plan."""
+    """The backend cannot lower a MODEL_SAT plan; the plan itself stays valid."""
 
     status = "LOWERING_UNSUPPORTED"
 
@@ -62,8 +62,8 @@ class Recipe:
 
 
 # IDs belong to the target catalogue; recipe names identify the evidenced route.
-# There is no generic "copy anything" fallback. Scalar shared operations remain
-# separate steps: this recipe cannot invent a publication/reuse rendezvous.
+# There is no generic "copy anything" fallback. Scalar shared operations stay
+# separate steps, so a recipe cannot introduce a publication/reuse rendezvous.
 RECIPES = MappingProxyType({
     "tilelang.tcgen05.packet": Recipe("tcgen05_natural_receipt", ("tmem_packet_receipt",), "warp",
                                      (("handles", 1), ("outstanding", 1)), ("reg",), "adjacent_completion_wait"),
@@ -93,7 +93,7 @@ _TARGETS = MappingProxyType({"sm_103a": _TCGEN05_TARGET, "sm_100a": _TCGEN05_TAR
 _CACHE: dict[tuple[str, str], dict] = {}
 _IDENTIFIER = re.compile(r"[A-Za-z_]\w*\Z")
 
-# Sixteen-bit floating payloads are transported as bits, never converted.
+# Sixteen-bit floating payloads are transported as raw bits.
 _PAYLOAD_DTYPES = MappingProxyType({
     name: (dtype, elem_bytes, ctype)
     for names, dtype, elem_bytes, ctype in (
@@ -114,8 +114,8 @@ def _declaration(imp: TensorImport) -> str:
     callable = imp.callable
     if not _IDENTIFIER.fullmatch(callable.symbol) or any(not _IDENTIFIER.fullmatch(p.name) for p in callable.params):
         _reject("callable", "declaration_mismatch", "callable identifiers are not C identifiers")
-    # The packed declaration is printed from the callable's type: parameter names are not part of it.
-    # The generated definition names its parameters from the contract's params.
+    # The packed declaration is printed from the callable's type, without parameter names;
+    # the generated definition takes its parameter names from the contract's params.
     typed = f'extern "C" __device__ void {callable.symbol}(' + ", ".join(
         param.ctype for param in callable.params) + ");"
     if normalize_declaration(typed) != normalize_declaration(callable.declaration):
@@ -211,7 +211,7 @@ def _resource_bindings(plan, imp, solved, used):
 
 
 def _receipt_address(packet, metadata, context, members, source_param):
-    """Decode at a declared base, then relocate in columns, never packet indices."""
+    """Decode at a declared base, then relocate in columns (packet indices are not used)."""
     domains = {name: expr.Domain.from_json_obj(value)
                for name, value in context["binding_domains"].items()}
     domains["participant"] = expr.Domain("participant", "int", values=tuple(members))
@@ -236,6 +236,8 @@ def _receipt_address(packet, metadata, context, members, source_param):
     points = tables.coordinate_points(domains)
     names = sorted(domains)
     selected, checked = set(), 0
+    local_names = [name for name in names if name != base]
+    offsets = {}
     packets = context["packets"]
     for point in points:
         environment = dict(zip(names, point))
@@ -248,17 +250,28 @@ def _receipt_address(packet, metadata, context, members, source_param):
             _reject("tmem_packet_receipt", "refinement", "packet selection is not a source-base relocation",
                     bindings=environment)
         selected.add(anchor)
+        offsets[tuple(environment[name] for name in local_names)] = (
+            (relative["dp"] << 16) + relative["column"] - reference)
         checked += 1
-    constant = (["cbits", int(domains[base].sort[5:-1]), reference]
-                if base in domains and domains[base].sort.startswith("bits[") else ["const", reference])
-    anchored_selector = expand(selector.to_json_obj(), {base: constant} if base else {})
-    indices = sorted(selected)
-    def offset(index):
-        entry = packets[index]
-        return ["const", (entry["dp"] << 16) + entry["column"] - reference]
-    address = offset(indices[-1])
-    for index in reversed(indices[:-1]):
-        address = ["select", ["eq", anchored_selector, ["const", index]], offset(index), address]
+    # Fit decoded native offsets. Packet IDs follow the model's enumeration order
+    # and would turn a simple physical map into a selector tree.
+    fitted = fit.fit_named(
+        [(*point, value) for point, value in offsets.items()],
+        [(domains[name], "coord" if name == "participant" else "bind") for name in local_names],
+        0, sort_env=domains)
+    if fitted is not None:
+        address = fitted.to_json_obj()
+    else:
+        constant = (["cbits", int(domains[base].sort[5:-1]), reference]
+                    if base in domains and domains[base].sort.startswith("bits[") else ["const", reference])
+        anchored_selector = expand(selector.to_json_obj(), {base: constant} if base else {})
+        indices = sorted(selected)
+        def offset(index):
+            entry = packets[index]
+            return ["const", (entry["dp"] << 16) + entry["column"] - reference]
+        address = offset(indices[-1])
+        for index in reversed(indices[:-1]):
+            address = ["select", ["eq", anchored_selector, ["const", index]], offset(index), address]
     address = ["add", ["toint", ["bind", source_param]], address]
     return address, {
         "source_base_binding": base, "source_param": source_param, "reference": reference,
@@ -266,6 +279,7 @@ def _receipt_address(packet, metadata, context, members, source_param):
                                   else range(domains[base].lo, domains[base].hi)) if base in domains else [reference],
         "binding_domains": context["binding_domains"], "participants": members,
         "equality_rows": checked,
+        "offset_encoding": "exact_fit" if fitted is not None else "packet_selection",
         "outside_declared_worlds": "full column-base relocation; not model-certified",
     }
 
@@ -384,10 +398,12 @@ def _prepare(plan: TensorPlan, imp: TensorImport, solved: Solution, profile) -> 
                     _reject(f"{site}:{index}", "effect_mismatch", "native rendezvous requires full physical warps")
                 if bound[node.operands["resource"]]["base"] == 0 and set(members) != set(range(solved.launch.threads)):
                     _reject(f"{site}:{index}", "effect_mismatch", "reserved barrier zero requires every solved launch participant")
-    # A readiness event is not a callable runtime flag. Only an observation
-    # guaranteed before entry permits folding it in the frozen call.
+    # The frozen call has no runtime readiness flag; readiness can be folded in
+    # only when the observation is guaranteed before entry.
     ready = context["ready_at_entry"]
     graphs = {}
+    binding_domains = {name: expr.Domain.from_json_obj(domain)
+                       for name, domain in context["binding_domains"].items()}
     for site, graph in sorted(plan.program.graphs.items()):
         active = set()
         def walk(index, metadata):
@@ -402,8 +418,9 @@ def _prepare(plan: TensorPlan, imp: TensorImport, solved: Solution, profile) -> 
                     if node.observation in {"ready", context.get("readiness")} and ready:
                         return walk(node.next_true, metadata)
                     predicate = metadata.get(node.observation)
-                    if predicate is not None and machine.is_static_expression(predicate):
-                        parsed = expr.parse(predicate, {"participant": expr.Domain("participant", "int", values=tuple(sites[site]))})
+                    if predicate is not None and machine.is_static_expression(predicate, binding_domains):
+                        parsed = expr.parse(predicate, {**binding_domains,
+                            "participant": expr.Domain("participant", "int", values=tuple(sites[site]))})
                         if parsed.sort != "pred":
                             integer = ["toint", predicate] if parsed.sort.startswith("bits[") else predicate
                             predicate = ["not", ["eq", integer, ["const", 0]]]
@@ -571,7 +588,9 @@ def _legalize(source: str, request: dict) -> tuple[str, str]:
     if len(re.findall(shuffle_pattern, body)) != sum(step["primitive"] == "shfl_xor" for step in steps):
         _reject("entry", "refinement", "backend shuffle realization differs from the planned exchange count")
     barriers = sum(step["primitive"] == "cta_rendezvous" for step in steps)
-    sync_pattern = r"\b(?:__syncthreads|tl::syncthreads)\s*\(|bar\.sync"
+    # The pinned backend realizes barrier 0 as __syncthreads and a named barrier as
+    # tl::__sync_thread_partial(id, count).
+    sync_pattern = r"\b(?:__syncthreads|tl::syncthreads|tl::__sync_thread_partial)\s*\(|bar\.sync"
     sync = list(re.finditer(sync_pattern, body))
     fences = target["rendezvous_fences"]
     if fences:
@@ -680,8 +699,8 @@ def emit_adapter(plan: TensorPlan, imp: TensorImport, solved: Solution, profile,
                  *, witness_events: frozenset[str] = frozenset()) -> AdapterSource:
     """Emit one exact frozen callable using solved bindings, or raise LoweringUnsupported.
 
-    resources is JSON-able deployment evidence, not a native register estimate.
-    Trusted premises explicitly retain unperformed identity/native checks.
+    ``resources`` is JSON-able deployment evidence; it does not estimate native
+    registers. Trusted premises record the identity/native checks left unperformed.
     """
     request = _prepare(plan, imp, solved, profile)
     view_shell = request.get("view_shell")

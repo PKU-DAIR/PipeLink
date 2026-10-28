@@ -345,7 +345,7 @@ def _reg_groups(solution: Solution, pipeline: Pipeline) -> list[tuple[str, RegGr
 def replace_declarator_identifier(decl: str, identifier: str, placeholder: str) -> str:
     """Replace only the expected function declarator, preserving all other text.
 
-    Declaration identity normalization is owned by pipec2.decls, not this parser.
+    pipec2.decls owns declaration identity normalization.
     """
     _, match = _declarator(decl, identifier)
     return decl[: match.start()] + placeholder + decl[match.end() :]
@@ -366,6 +366,11 @@ def generate_stub(
     if any(item.callable is not None and re.search(r"\bpipelink_tensor_source\b", item.callable[1])
            for item in ordered_expansions):
         lines.append("#include <pipelink/tensor_source.h>")
+    # stage.hpp prints CUDA's half-precision types by name into call declarations.
+    for type_name, header in (("__half", "cuda_fp16.h"), ("__nv_bfloat16", "cuda_bf16.h")):
+        if any(item.callable is not None and re.search(rf"\b{type_name}\b", item.callable[1])
+               for item in ordered_expansions):
+            lines.append(f"#include <{header}>")
     if view_calls:
         lines.append("#include <pipelink/host_view.h>")
 

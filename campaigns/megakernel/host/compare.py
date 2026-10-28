@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """Apply the numerical portions of the Megakernels host Gate P2.
 
-The fixed 2e-2 strict tolerances are retained where the computation is stable.
-Full-depth comparisons use a 2x repeat floor because random-weight bf16 layers
-amplify reduction-order noise.  When two upstream mono runs are available, the
-effective floor is the larger linked or mono repeat floor: a port must not fail
-merely because upstream's own launch-to-launch noise exceeds the linked floor.
-Full-depth distance to the PyVM reference is gated on mean relative difference
-only; its per-element maximum is an extreme-value statistic and is reported.
+Stable computations use fixed 2e-2 strict tolerances. Full-depth comparisons
+use a 2x repeat floor because random-weight bf16 layers amplify reduction-order
+noise. When two upstream mono runs are available, the effective floor is the
+larger of the linked and mono repeat floors, so upstream's own launch-to-launch
+noise cannot fail the port. Full-depth distance to the PyVM reference is gated
+on mean relative difference; the per-element maximum is an extreme-value
+statistic and is only reported.
 
-Only PipeLink-built images (linked, linked2, one-TU, and extras with
---gate-extra) are gated.  The upstream mono runs are the baseline: their
-reference metrics are reported, and they define the repeat floor and the
-upstream-equivalence target, but they are not themselves held to a predicate.
+Gates apply to PipeLink-built images (linked, linked2, one-TU, and extras with
+--gate-extra). The upstream mono runs are the baseline: they define the repeat
+floor and the upstream-equivalence target, and their reference metrics are
+reported without a predicate.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-# Gate constants. These are deliberately fixed rather than inferred from a run.
+# Fixed gate constants; none is derived from a run.
 RTOL = 2.0e-2
 ATOL_RMS_FACTOR = 2.0e-2
 FLOOR_FACTOR = 2.0
@@ -555,12 +555,11 @@ def main() -> None:
             bf16_ulp = (
                 ulp_at_scale(ref_scale, "bf16") if ref_scale is not None else None
             )
-            # Floor = the linked repeat floor of this tensor aggregated over all
-            # tokens (max), not the single-token value: one pair of repeats at
-            # one token is a noisy estimator of a chaotic tensor's floor (p1024/a
-            # after the dispatch fix: tok3 logits 0.2676 vs 2x per-token 0.1328,
-            # while other tokens' repeat floors reached 0.24). The aggregate is
-            # the same statistic gate (iii) already uses.
+            # Floor = this tensor's linked repeat floor, maximized over all
+            # tokens. One repeat pair at one token underestimates a chaotic
+            # tensor's floor (p1024/a: tok3 logits 0.2676 vs 2x per-token
+            # 0.1328, while other tokens' floors reached 0.24). Gate (iii) uses
+            # the same statistic.
             floor = linked_floor_aggregate[name]["max_abs"]
             allowed = (
                 max(FLOOR_FACTOR * floor, ULP_FACTOR * bf16_ulp)
@@ -827,11 +826,10 @@ def main() -> None:
                     }
                     continue
 
-                # Gate on the mean relative difference only.  The per-element
-                # maximum of a chaotic full-depth tensor is an extreme-value
-                # statistic: against a floor estimated from one repeat pair it
-                # passes or fails by chance (one element of 2048 decided
-                # p1024-n8-red).  max_abs stays reported.
+                # Gate on mean relative difference. Against a floor estimated
+                # from one repeat pair, the per-element maximum of a chaotic
+                # full-depth tensor passes or fails by chance (one element of
+                # 2048 decided p1024-n8-red). max_abs is still reported.
                 allowed_mean_rdiff = (
                     FLOOR_FACTOR * effective_floor["mean_rdiff"]
                     if effective_floor["mean_rdiff"] is not None
@@ -938,11 +936,9 @@ def main() -> None:
                         if ref_scale is not None
                         else None
                     )
-                    # Same aggregate-over-tokens floor statistic as gate (ii):
-                    # a single token's repeat pair under-estimates a chaotic
-                    # tensor's floor (p10/rebind-regs: tok5 attn_out one-TU vs
-                    # mono 0.104 with a per-token floor 0.049 but token-aggregate
-                    # floor 0.077).
+                    # Token-aggregate floor, as in gate (ii) (p10/rebind-regs:
+                    # tok5 attn_out one-TU vs mono 0.104; per-token floor 0.049,
+                    # token-aggregate floor 0.077).
                     effective_floor = effective_floor_aggregate[name]["max_abs"]
                     allowed = (
                         max(

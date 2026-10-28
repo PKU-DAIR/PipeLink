@@ -1,6 +1,6 @@
 #pragma once
-// GEMM owner, AllGather host group: the original owner residue (read unchanged by
-// the repacked MMA) followed by load_ag's readiness inputs.
+// GEMM owner, AllGather host group: the hopper-gemm-split owner residue (which the
+// repacked MMA reads as is) followed by load_ag's readiness inputs.
 #include "host/owner/abi.h"
 #include <stdint.h>
 

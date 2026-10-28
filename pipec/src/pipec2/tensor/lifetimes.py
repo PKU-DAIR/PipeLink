@@ -105,7 +105,7 @@ class _Witness:
 
 
 class LifetimeResolution:
-    """A fresh composition's ordering permission, validation, and selected overlaps."""
+    """One composition's ordering permission, validation, and selected overlaps."""
 
     def __init__(self, pipeline: Pipeline, stages: Sequence[StageManifest]) -> None:
         by_id = {stage.id: stage for stage in stages}

@@ -5,7 +5,7 @@
 #include <ostream>
 #include "request.cuh"
 
-// CUDA_CHECK is supplied by the slot, as in the original timing loop.
+// CUDA_CHECK is supplied by the including slot.
 namespace pipelink::attention::slot {
 struct Timing {
   double configured_batch_quantum_ms;
@@ -194,8 +194,8 @@ AbsoluteTiming time_absolute(Launch&& launch) {
   uint64_t n = 1;
   std::vector<float> samples;
   samples.reserve(10);
-  // Size to 25 ms for margin. If any measured repetition falls below 20 ms,
-  // resize and restart the set: every retained interval meets the contract.
+  // Size to 25 ms for margin. If any repetition falls below 20 ms, resize and
+  // restart the set, so every retained interval is at least 20 ms.
   while (samples.size() < 10) {
     float ms = interval.run(n, launch);
     if (ms < 20.0f) {

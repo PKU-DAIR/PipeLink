@@ -1,10 +1,10 @@
 """Pinned FA3 native, virtual-chunk, and stock-slot equivalence products.
 
-The public APIs allocate O/LSE and scheduler storage themselves; they expose no
-output/workspace arguments. Keep their complete per-call sequence (including
-scheduler resets and varlen preparation) inside run. Input chunking is only a
-zero-copy layout view plus untimed cu_seqlens construction. FA3 is AOT-built;
-prepare also pays its first launch/module-loading cost, not a Python kernel JIT.
+The public APIs allocate O/LSE and scheduler storage themselves and take no
+output or workspace arguments, so run keeps their complete per-call sequence,
+including scheduler resets and varlen preparation. Input chunking is a zero-copy
+view plus untimed cu_seqlens construction. FA3 is built ahead of time; prepare
+pays only its first launch and module-loading cost.
 """
 from __future__ import annotations
 
@@ -47,8 +47,8 @@ class _Prepared:
     def outputs(self):
         out, lse = self.result
         if self.varlen:
-            # Native varlen O is [total_q,Hq,D], LSE is [Hq,total_q],
-            # not [virtual_batch,Hq,max_seqlen]. Tokens remain in original order.
+            # Native varlen O is [total_q,Hq,D] and LSE is [Hq,total_q], with
+            # tokens in their original order.
             return out.unsqueeze(0), lse.unsqueeze(0)
         return out, lse
 

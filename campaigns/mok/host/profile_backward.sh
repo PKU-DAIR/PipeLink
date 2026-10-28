@@ -15,8 +15,8 @@ if [[ "${1:-}" == --rank ]]; then
   if [[ "$kind" == source ]]; then
     sections=(--set source --section SourceCounters)
   elif [[ "$kind" == residual ]]; then
-    # A short source/counter panel avoids repeating the broad exploratory
-    # collection's dozens of application passes on a shared machine.
+    # A short source/counter panel: the full set needs dozens of application
+    # passes on a shared machine.
     sections=(--section LaunchStats --section SourceCounters --metrics
       gpu__time_duration.sum,sm__cycles_active.avg,sm__cycles_active.min,sm__cycles_active.max,sm__warps_active.avg.pct_of_peak_sustained_active,smsp__inst_executed.sum,smsp__issue_active.avg.pct_of_peak_sustained_active,sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed,dram__bytes_read.sum,dram__bytes_write.sum,l1tex__t_sector_hit_rate.pct,lts__t_sector_hit_rate.pct,smsp__sass_inst_executed_op_global_ld.sum,smsp__sass_inst_executed_op_local_ld.sum,smsp__sass_inst_executed_op_local_st.sum,smsp__sass_inst_executed_op_shared_ld.sum,smsp__sass_inst_executed_op_shared_st.sum)
   fi
@@ -33,8 +33,8 @@ if [[ "${1:-}" == --rank ]]; then
 fi
 if [[ -z "${PIPELINK_GPU_WINDOW:-}" ]]; then
   if [[ "${MOK_NCU_SUDO:-0}" == 1 ]]; then
-    # The window monitor must be able to read its own elevated children's
-    # environment tokens; otherwise /proc permissions falsely flag contention.
+    # The window monitor runs elevated so it can read the environment tokens of
+    # its elevated children; /proc permissions would otherwise flag false contention.
     exec sudo -n -E "$ROOT/tools/gpu_window.sh" bash "$0" "$@"
   fi
   exec "$ROOT/tools/gpu_window.sh" bash "$0" "$@"

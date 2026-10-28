@@ -1,7 +1,7 @@
 """Records handed from contract helpers to externalization: what a role borrows from the link.
 
-Every address a role uses for a partner-owned resource comes from a solved handle, never
-from partner source. Barrier addressing is either the linker's 16-byte mbarrier slot
+Every address a role uses for a partner-owned resource comes from a solved handle.
+Barrier addressing is either the linker's 16-byte mbarrier slot
 convention (``native is None``) or the partner's declared physical storage
 (``protocol.<side>.native``): ``dyn_smem + solved(base) * unit(base.domain) + offset_bytes
 + slot * stride_bytes``.
@@ -36,7 +36,8 @@ class ExternalBarrier:
 class ExternalStorage:
     """A ring/plane/scalar buffer whose base is a solved partner handle.
 
-    smem: ``buffer`` lives at ``dyn_smem + solved(handle)``.
+    smem: ``buffer`` lives at ``dyn_smem + solved(handle) + offset_bytes``; the offset is the
+    plane's ``layout.origin_bits / 8`` within the partner's storage base.
     tmem: ``handle`` is the smem scalar endpoint publishing the runtime TMEM base pointer
     (e.g. the partner's ``tmem_base`` endpoint) and ``column_handle`` the solved tmem-domain
     column base (the accumulator endpoint's ``binds.base``); the arena word becomes
@@ -46,10 +47,11 @@ class ExternalStorage:
     handle: str
     space: Literal["smem", "tmem"]
     column_handle: str | None = None
+    offset_bytes: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class ExternalThreadBase:
-    """The role's first warp is a solved handle rather than warp 0."""
+    """The role's first warp, as a solved handle."""
     handle: str
     warps: int

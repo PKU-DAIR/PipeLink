@@ -9,5 +9,4 @@ extern "C" __device__ float sm90_provider_scale(float value) { return value * 2.
 
 PL_STAGE("org.sm90.provider", "1.0.0");
 PL_NO_PARAMS();
-PL_EXPORT(scale, sm90_provider_scale);
 PL_CALL(scale, sm90_provider_scale, pl::consume, "scale");

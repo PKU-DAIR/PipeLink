@@ -22,9 +22,9 @@ def _check(status, operation):
 class Cublas:
     """cuBLAS on borrowed allocations in the caller's current context.
 
-    The caller exposes addresses and synchronize(). Synchronize before using
-    the null stream, then time it with public CUDA driver events. This helper
-    owns neither a CUDA context nor any device allocation.
+    The caller exposes addresses and synchronize(). cuBLAS runs on the null
+    stream after a synchronize and is timed with CUDA driver events. The caller
+    owns the CUDA context and every device allocation.
     """
 
     def __init__(self, session, shape, cuda_home):

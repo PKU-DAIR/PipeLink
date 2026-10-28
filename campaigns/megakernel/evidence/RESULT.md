@@ -1,45 +1,75 @@
-# Megakernel llama-1b port — seam-parity evidence
+# Megakernel llama-1b port — paired-reload seam parity
 
-Rendered by `parity/run_parity.py` from `results.json` (campaign generated 2026-10-06T14:03:04.908960+00:00).
+Local Blackwell/sm103 run: **2026-10-17T03:34:27.939859+00:00**,
+qualified clock **1155 MHz**.
 
 ## Verdict
 
-**Seam-parity gate PASS** — all 5 linked / same-source one-TU cases meet the median ratio floor of 0.97.
+**All five reference seam gates PASS**: the linked/same-source-one-TU speedup (R1)
+spans **0.999549104–1.000177969** (floor 0.97), and all five executions are admitted.
+Admission requires the 20 numerical receipts, which PASS, plus paired-path
+snapshot and [sanitizer](sanitizers.md) checks, which also PASS.
 
-**P2 numerical gate PASS:** all 20 receipts (five bundles × four pipelines) pass; P3 admission requires it.
-
-| case | linked / reference | median ratio | pair-valid count | reference median ms/token | linked median ms/token | batch tokens | clock validity | 0.97 seam gate |
-|---|---|---:|---:|---:|---:|---:|---|---|
-| MK-A-16 | linked / onetu | 1.0000273605241015 | 8 | 0.793798891010552 | 0.7937921890016234 | 32 | 8/8 pair-valid; original-only | PASS |
-| MK-A-1024 | linked / onetu | 0.9998976414152987 | 8 | 1.5234617337890626 | 1.5236424577303687 | 32 | 8/8 pair-valid; original-only | PASS |
-| MK-A-4096 | linked / onetu | 0.9999089657417459 | 8 | 3.73403075204142 | 3.7339184392948717 | 13 | 8/8 pair-valid; original-only | PASS |
-| MK-REGS-1024 | linked / onetu | 1.0000765702628434 | 8 | 1.5236690804296873 | 1.5235938891015628 | 31,32 | 8/8 pair-valid; original-only | PASS |
-| MK-A-1024-red | linked / onetu | 1.000125572120941 | 8 | 1.1980254942708335 | 1.1978731165747547 | 32 | 8/8 pair-valid; original-only | PASS |
-
-Each slot calibrated a one-token probe and selected an integer batch at a 50 ms target, capped at 32 tokens. The per-case batch sizes are in the table. Across every slot, observed CUDA-event batch time ranged from 25.3385601 ms to 48.8534737 ms, below the 100 ms harness quantum. gpulockd held the selected GPU at 1102 MHz; its pre-case, per-case, and post-case status checks were healthy with zero recorded violations.
-
-## Sanitizers
-
-Counts on the timed images, linked / one-TU. Admission requires memcheck zero; racecheck and synccheck counts are recorded, not admission predicates. Logs cap reported hazards, so racecheck counts are not exhaustive tallies.
-
-| case | memcheck | racecheck | synccheck |
-|---|---:|---:|---:|
-| MK-A-16 | 0 / 0 | 39 / 40 | 0 / 0 |
-| MK-A-1024 | 0 / 0 | 46 / 37 | 0 / 0 |
-| MK-A-4096 | 0 / 0 | 37 / 47 | 0 / 0 |
-| MK-REGS-1024 | 0 / 0 | 38 / 46 | 0 / 0 |
-| MK-A-1024-red | 0 / 0 | 34 / 36 | 0 / 0 |
-
-## Images
-
-`port/build.sh` builds the host-ABI-v3 linked, same-source one-TU and monolithic images with fast math (FTZ and FMA enabled, precise division and square root disabled) from upstream Megakernels `7309cec` plus the minimal correctness patches in `port/patches/` (partial-store `laneid`, partial KV stage index, tensor-allocator barrier, reduction page lifetime); without them the multi-partition attention path is dead or racy upstream. The reference is therefore patched upstream, not stock upstream.
-
-## Interpretation
-
-Each PipeLink-linked cubin is compared with its same-source one-TU build, isolating the ABI/link seam. MK-A-1024-red additionally executes two attention partials per KV head followed by terminal attention reductions in all sixteen layers. No upstream performance comparisons are part of this campaign.
+| case | physical composition A / B | R1 speedup B/A | reference ms/token | linked ms/token | blocks | seam gate |
+|---|---|---:|---:|---:|---:|---|
+| MK-A-16 | a:linked / a:onetu | 0.999549104 | 0.713650 | 0.713563 | 8 | PASS |
+| MK-A-1024 | a:linked / a:onetu | 0.999699572 | 1.411531 | 1.411899 | 8 | PASS |
+| MK-A-4096 | a:linked / a:onetu | 1.000135447 | 3.517378 | 3.514914 | 8 | PASS |
+| MK-REGS-1024 | rebind-regs:linked / rebind-regs:onetu | 1.000177969 | 1.423287 | 1.423045 | 8 | PASS |
+| MK-A-1024-red | a:linked / a:onetu | 0.999591308 | 1.148988 | 1.149081 | 8 | PASS |
 
 ## Method
 
-Each case was executed by `evaluator.harness.parity.run_case` with `Protocol.definitive`: five untimed single-token check-mode warmups per image, 3 s nominal slots, 1 s leading discard, first eight chronological primary-valid pairs, and the shared ±3% clock predicate. Before every warmup request and every timed slot request, the adapter ran a separate single-token Gate P2 recheck: all nine outputs finite and layer-0 `k_row`/`v_row` within `rtol=2e-2`, `atol=2e-2*RMS(reference)`. Throughput is complete steady-window tokens divided by summed CUDA-event batch time. Pair orientation is always linked/reference; no ratios were imputed.
+Each case runs once in one local CUDA context under `paired-reload-v2` at the
+qualified **1155 MHz** clock. An execution is admitted when its exclusive GPU window
+is uncontended and its clock lock is healthy and stopped; all of them are.
 
-Running the campaign also writes machine-readable results (`results.json`) and sanitizer receipts (`sanitize.json`) next to this report; they are not published. Harness-owned requests, slot outputs, telemetry, pair decisions, and summaries are written to the git-ignored `archive/submission-2026-09-17/<case-id>/`.
+The schedule is `ABBA, BAAB, BAAB, ABBA | BAAB, ABBA, ABBA, BAAB`, where A is the
+candidate and B the explicitly identified reference. Each block has four batches of
+exactly ten complete fixed-position decodes, so each case has **8 blocks, 32 raw
+event totals and 320 scored calls**. The common helper adds 32 discarded warmup
+calls; eight single-call numerical snapshots are checked outside scored timing.
+There is no calibration, duration floor, three-second slot, per-arm
+telemetry-coverage gate or retry on a ratio MISS.
+
+For block i, `s_i = sum(two B batch times) / sum(two A batch times)`. The reported
+speedup is `sqrt(median(s_0..s_3) * median(s_4..s_7))`. Only same-source seam
+comparisons use the **0.97** floor. The ms/token columns are the median across the
+eight blocks of that arm's two summed batch times divided by 20; they are for
+reference and do not enter the paired speedup.
+
+Both modules load candidate-first, unload at the midpoint, and reload
+reference-first with refreshed function attributes. The context, stream,
+RuntimeBuffers/weights/KV/input/output state, immutable pinned embedding rows and
+each arm's opaque params persist across the reload. Each arm runs one provider
+query/build before all batches; both provider sessions survive the reload and are
+released after the final drain. Each scored call's CUDA-event interval covers Bar
+reset, embedding HtoD and the complete megakernel, with fixed pos_id and embedding
+row `token % scalar_ntok` restarting at zero each batch.
+
+Initial, before-reload, after-reload and final snapshots of both arms pass the
+finite-nine and strict layer-zero KV predicates. These single-token snapshots are
+spot checks; the full advancing-token numerical predicates (repeat floor, one-TU,
+upstream) come from the image-generation receipts. The receipt behind this report
+retains raw blocks, epoch windows, admission, clock operations, manifest/image
+identities, numerical metrics and provider/reload provenance. Weights, bundles, binaries and tensor-dump
+bytes stay in local scratch/data and are not published.
+
+## Sanitizers
+
+Every timed linked and one-TU image has zero memcheck, racecheck and synccheck
+findings. The paired path, bound to the host runner and provider, passes **9
+reference + 12 CuTe/cross-library legs**, all with zero findings. The bounded reload
+probe executes 16 calls, including queued copies on both sides of the reload; the
+320-call scoring protocol does not run under the sanitizer. Seven reference legs
+record a return code derived from the controller's PASS line because their raw
+return codes were not retained. The [sanitizer report](sanitizers.md) lists every
+per-image and paired-path check.
+
+## Publication scope
+
+The JSON receipts behind this report stay with the authors; repository paths in
+them are relative, and external locations use `$PIPELINK_SCRATCH_ROOT`,
+`$MK_BUNDLE_ROOT` and `$PIPELINK_CUDA_HOME`. The upstream placement benchmark has
+its own measurement protocol. These are composition and seam measurements; cross-library
+comparisons describe this composition and do not rank the libraries.

@@ -1,0 +1,9 @@
+{
+  "host_group": "coda.epilogue.params",
+  "includes": ["pipec/src/pipec2/host/include", "campaigns/coda/consumer"],
+  "provider": {
+    "build": ["uv", "run", "--project", "pipec", "python", "campaigns/coda/consumer/build.py", "--profile", "{profile}", "--package", "{package}", "--out", "campaigns/coda/consumer/out/{profile}/{consumer}"],
+    "artifact": "campaigns/coda/consumer/out/{profile}/{consumer}/provider.so",
+    "header": "campaigns/coda/consumer/params.h"
+  }
+}

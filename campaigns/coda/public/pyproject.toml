@@ -1,0 +1,14 @@
+[project]
+name = "coda-public-baselines"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = ["torch==2.14.1", "liger-kernel==0.8.4", "numpy==2.2.6", "ml-dtypes==0.6.0", "packaging==26.3", "pipec2==0.1.0"]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+pipec2 = { path = "../../../pipec", editable = true }

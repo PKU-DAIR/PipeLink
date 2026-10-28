@@ -21,7 +21,7 @@ sys.path.insert(0, str(REPO))
 from pipec2.profile import PROFILES
 from tools.pipelink_env import load
 
-# Read clause tokens from the CLI's structured diagnostic prefix, never its prose.
+# Read clause IDs from the CLI's structured diagnostic prefix; its prose may change.
 CLAUSE = re.compile(r"(?:^pipec2: |; )\[([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)\] ", re.MULTILINE)
 CASES = (
     ("baseline", RING / "src/consumer.cu", "link", None),
@@ -63,7 +63,7 @@ def main() -> int:
 
     def pack(source: Path, name: str) -> subprocess.CompletedProcess:
         package = out / f"{name}.plink"
-        # A stale package must not make a rejected pack appear to produce output.
+        # Delete any earlier package so a rejected pack leaves no output behind.
         package.unlink(missing_ok=True)
         return command(["pack", str(source), "--profile", args.profile, "-o", str(package)], f"{name}.pack")
 

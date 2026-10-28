@@ -1,6 +1,5 @@
 {
   "name": "arrive_count_mismatch",
-  "reference": "design §8.3",
   "description": "The consumer declares two full-barrier arrivals while the producer declares one.",
   "base": "barrier",
   "phase": "protocol.expand",

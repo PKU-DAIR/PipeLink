@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Hold CUDA primary contexts while enforcing configured SM clock locks.
+"""Lock configured GPU SM clocks and hold CUDA primary contexts while they are locked.
+
+When ``PIPELINK_LOCK_SM_MHZ`` is unset, empty or 0 (and no ``--sm-mhz`` is given), every
+command is a successful no-op that prints ``"locked": false`` and never runs sudo or nvidia-smi.
 
 Exit codes:
-  0  The requested operation succeeded (and ``status`` is healthy).
-  1  Any other operational failure, unhealthy status, or interruption.
-  3  A requested SM clock lock was not honored within the allowed tolerance.
+  0  The requested operation succeeded (for ``status``: all GPUs healthy).
+  1  Any other failure, unhealthy status, or interruption.
+  3  A requested SM clock lock read back outside the allowed tolerance.
 """
 
 from __future__ import annotations
@@ -30,7 +33,6 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
 
 
-CLOCK_TOLERANCE_MHZ = 15
 MONITOR_INTERVAL_SECONDS = 5.0
 COMMAND_TIMEOUT_SECONDS = 15.0
 QUERY_TIMEOUT_SECONDS = 10.0
@@ -39,16 +41,14 @@ STOP_TIMEOUT_SECONDS = 10.0
 EXIT_SUCCESS = 0
 EXIT_ERROR = 1
 EXIT_LOCK_NOT_HONORED = 3
-SLOWDOWN_REASON_MASK = 0x4 | 0x8 | 0x40 | 0x80
-# SW power cap. Some parts (e.g. consumer Blackwell) assert it permanently, even idle at P8;
-# there it carries no throttling signal and is exempted per GPU at start (with a warning).
+SLOWDOWN_REASON_MASK = 0x8 | 0x40 | 0x80
+# SW power cap samples are only counted; real power throttling shows up as clock deviation
+# under load.
 SW_POWER_CAP_REASON = 0x4
-IDLE_WAIT_SECONDS = 10.0
-IDLE_POLL_SECONDS = 0.5
 
 
 class GpuLockError(RuntimeError):
-    """An expected gpulockd operational failure."""
+    """A gpulockd failure reported to the user without a traceback."""
 
 
 class LockNotHonoredError(GpuLockError):
@@ -100,11 +100,11 @@ class HeldGpu:
     policy_token: str
     started_at: str
     violations: int = 0
-    exempt_reasons: int = 0
+    sw_power_cap_samples: int = 0
 
 
 class CudaDriver:
-    """Minimal CUDA Driver API binding needed to retain primary contexts."""
+    """The few CUDA Driver API calls needed to retain primary contexts."""
 
     class _Uuid(ctypes.Structure):
         _fields_ = [("bytes", ctypes.c_ubyte * 16)]
@@ -263,6 +263,12 @@ def _positive_frequency(value: str, *, label: str) -> int:
     return frequency
 
 
+def _nonnegative_frequency(value: str, *, label: str) -> int:
+    if value.strip() == "0":
+        return 0
+    return _positive_frequency(value, label=label)
+
+
 def _uuid_bytes(uuid: str) -> bytes:
     value = uuid.strip()
     if value[:4].lower() != "gpu-":
@@ -330,18 +336,22 @@ def _read_clock(gpu: int) -> int:
     return _parse_numeric_field(rows[0], label=f"GPU {gpu} clocks.sm")
 
 
-def _verify_clock(gpu: int, target_mhz: int) -> int:
+def _clock_tolerance(config: dict[str, str]) -> int:
+    return _positive_frequency(config["PIPELINK_LOCK_TOLERANCE_MHZ"], label="PIPELINK_LOCK_TOLERANCE_MHZ")
+
+
+def _verify_clock(gpu: int, target_mhz: int, tolerance_mhz: int) -> int:
     last_error: GpuLockError | None = None
     for attempt in range(3):
         try:
             actual_mhz = _read_clock(gpu)
-            if abs(actual_mhz - target_mhz) <= CLOCK_TOLERANCE_MHZ:
+            if abs(actual_mhz - target_mhz) <= tolerance_mhz:
                 return actual_mhz
             last_error = LockNotHonoredError(
                 gpu,
                 target_mhz,
                 actual_mhz,
-                CLOCK_TOLERANCE_MHZ,
+                tolerance_mhz,
             )
         except GpuLockError as exc:
             last_error = exc
@@ -410,7 +420,7 @@ def _marker_payload(held: HeldGpu, pid: int) -> dict[str, Any]:
         "driver_version": held.identity.driver_version,
         "policy_token": held.policy_token,
         "violations": held.violations,
-        "exempt_reasons": held.exempt_reasons,
+        "sw_power_cap_samples": held.sw_power_cap_samples,
     }
 
 
@@ -425,7 +435,7 @@ def _load_marker(path: Path) -> dict[str, Any]:
     if not isinstance(marker, dict):
         raise GpuLockError(f"marker {path} is not a JSON object")
 
-    integer_fields = ("gpu", "sm_mhz", "pid", "violations", "exempt_reasons")
+    integer_fields = ("gpu", "sm_mhz", "pid", "violations", "sw_power_cap_samples")
     string_fields = ("uuid", "started_at", "driver_version", "policy_token")
     for field in integer_fields:
         if not isinstance(marker.get(field), int) or isinstance(marker.get(field), bool):
@@ -435,8 +445,8 @@ def _load_marker(path: Path) -> dict[str, Any]:
             raise GpuLockError(f"marker {path} has invalid {field!r}")
     if marker["gpu"] < 0 or marker["sm_mhz"] <= 0 or marker["pid"] <= 0:
         raise GpuLockError(f"marker {path} contains an out-of-range numeric field")
-    if marker["violations"] < 0 or marker["exempt_reasons"] < 0:
-        raise GpuLockError(f"marker {path} has a negative violations or exempt_reasons field")
+    if marker["violations"] < 0 or marker["sw_power_cap_samples"] < 0:
+        raise GpuLockError(f"marker {path} has a negative sample counter")
     _uuid_bytes(marker["uuid"])
     if not re.fullmatch(r"[0-9a-f]{64}", marker["policy_token"]):
         raise GpuLockError(f"marker {path} has an invalid policy_token")
@@ -501,11 +511,11 @@ class _StateOperationLock:
 
 class LockManager:
     def __init__(self, state_dir: Path, identities: dict[int, GpuIdentity], sm_mhz: int,
-                 exempt_reasons: dict[int, int] | None = None) -> None:
+                 tolerance_mhz: int) -> None:
         self.state_dir = state_dir
         self.identities = identities
         self.sm_mhz = sm_mhz
-        self.exempt_reasons = exempt_reasons or {}
+        self.tolerance_mhz = tolerance_mhz
         self.cuda: CudaDriver | None = None
         self.held: list[HeldGpu] = []
         self.stop_event = threading.Event()
@@ -532,7 +542,7 @@ class LockManager:
             retained_device, context = cuda.retain(identity)
             clock_touched = True
             _set_clock(identity.index, self.sm_mhz)
-            _verify_clock(identity.index, self.sm_mhz)
+            _verify_clock(identity.index, self.sm_mhz, self.tolerance_mhz)
             held = HeldGpu(
                 identity=identity,
                 sm_mhz=self.sm_mhz,
@@ -540,7 +550,6 @@ class LockManager:
                 context=context,
                 policy_token=_policy_token(identity, self.sm_mhz),
                 started_at=datetime.now(timezone.utc).isoformat(),
-                exempt_reasons=self.exempt_reasons.get(identity.index, 0),
             )
             _atomic_write_json(
                 _marker_path(self.state_dir, identity.index),
@@ -623,18 +632,22 @@ class LockManager:
         deviating = [
             gpu
             for gpu, (clock_mhz, _reason_mask) in samples.items()
-            if abs(clock_mhz - held_by_gpu[gpu].sm_mhz) > CLOCK_TOLERANCE_MHZ
+            if abs(clock_mhz - held_by_gpu[gpu].sm_mhz) > self.tolerance_mhz
         ]
         loaded = self._query_loaded_gpus(deviating) if deviating else set()
         for gpu, (clock_mhz, reason_mask) in samples.items():
             held = held_by_gpu[gpu]
-            reason_violation = bool(reason_mask & SLOWDOWN_REASON_MASK & ~held.exempt_reasons)
+            reason_violation = bool(reason_mask & SLOWDOWN_REASON_MASK)
             clock_violation = (
                 gpu in loaded
-                and abs(clock_mhz - held.sm_mhz) > CLOCK_TOLERANCE_MHZ
+                and abs(clock_mhz - held.sm_mhz) > self.tolerance_mhz
             )
+            sw_power_cap = bool(reason_mask & SW_POWER_CAP_REASON)
+            if sw_power_cap:
+                held.sw_power_cap_samples += 1
             if reason_violation or clock_violation:
                 held.violations += 1
+            if reason_violation or clock_violation or sw_power_cap:
                 _atomic_write_json(
                     _marker_path(self.state_dir, gpu),
                     _marker_payload(held, self.owner_pid),
@@ -866,71 +879,43 @@ def _daemonize(manager: LockManager, gpus: Sequence[int]) -> bool:
     return False
 
 
-def _idle_reason_exemptions(gpus: Sequence[int]) -> dict[int, int]:
-    """Exempt SW power cap on GPUs that assert it while idle, before their clocks are locked.
+def _requested_frequency(config: dict[str, str], cli_mhz: int | None) -> int | None:
+    """Return the SM lock frequency, or None in unlocked mode.
 
-    A just-finished workload settles to P8 within seconds, so each GPU gets up to IDLE_WAIT_SECONDS to read idle;
-    a GPU that never does keeps the full violation mask.
+    An explicit CLI value wins over ``PIPELINK_LOCK_SM_MHZ``; 0, or an unset/empty
+    environment value without a CLI value, selects unlocked mode.
     """
-    exemptions: dict[int, int] = {}
-    pending = list(gpus)
-    deadline = time.monotonic() + IDLE_WAIT_SECONDS
-    while pending:
-        output = _nvidia_smi(
-            [
-                "-i",
-                ",".join(str(gpu) for gpu in pending),
-                "--query-gpu=index,utilization.gpu,pstate,clocks_event_reasons.active",
-                "--format=csv,noheader,nounits",
-            ],
-            operation="sample idle clock event reasons",
-        )
-        for raw_line in output.splitlines():
-            if not raw_line.strip():
-                continue
-            fields = [field.strip() for field in raw_line.split(",")]
-            if len(fields) != 4:
-                raise GpuLockError(f"sample idle clock event reasons: malformed row {raw_line!r}")
-            gpu = int(fields[0], 10)
-            # Idle means no work and the lowest performance state; right after a workload the
-            # GPU reads 0% at P0/P5 for a few seconds before settling.
-            if _parse_numeric_field(fields[1], label=f"GPU {gpu} utilization.gpu") or fields[2] != "P8":
-                continue
-            pending.remove(gpu)
-            if int(fields[3], 0) & SW_POWER_CAP_REASON:
-                exemptions[gpu] = SW_POWER_CAP_REASON
-                print(
-                    f"gpulockd warning: GPU {gpu} asserts SW power cap (0x4) while idle; it is not "
-                    "counted as a lock violation (clock deviation under load still is)",
-                    file=sys.stderr,
-                )
-        if not pending or time.monotonic() >= deadline:
-            break
-        time.sleep(IDLE_POLL_SECONDS)
-    return exemptions
+    if cli_mhz is not None:
+        return cli_mhz or None
+    configured = config.get("PIPELINK_LOCK_SM_MHZ", "").strip()
+    if not configured or configured == "0":
+        return None
+    return _positive_frequency(configured, label="PIPELINK_LOCK_SM_MHZ")
+
+
+def _report_unlocked(command: str, gpus: Sequence[int] | None) -> int:
+    """Unlocked mode: never call sudo or nvidia-smi; report and succeed."""
+    payload: dict[str, Any] = {"command": command, "locked": False, "sm_mhz": None}
+    if gpus is not None:
+        payload["gpus"] = list(gpus)
+    print(json.dumps(payload, separators=(",", ":")))
+    return EXIT_SUCCESS
 
 
 def _start(args: argparse.Namespace) -> int:
     config = _load_config()
     allowed, state_dir = _configured_state(config)
     gpus = _select_gpus(args.gpus, allowed)
-    configured_frequency = config.get("PIPELINK_LOCK_SM_MHZ", "").strip()
-    if args.sm_mhz is None and not configured_frequency:
-        raise GpuLockError(
-            "SM lock frequency is required: pass --sm-mhz or set PIPELINK_LOCK_SM_MHZ"
-        )
-    sm_mhz = (
-        args.sm_mhz
-        if args.sm_mhz is not None
-        else _positive_frequency(configured_frequency, label="PIPELINK_LOCK_SM_MHZ")
-    )
+    sm_mhz = _requested_frequency(config, args.sm_mhz)
+    if sm_mhz is None:
+        return _report_unlocked("start", gpus)
 
     identities = _query_identities()
     missing = [gpu for gpu in gpus if gpu not in identities]
     if missing:
         raise GpuLockError(f"configured GPU indices are not visible to nvidia-smi: {missing}")
 
-    manager = LockManager(state_dir, identities, sm_mhz, _idle_reason_exemptions(gpus))
+    manager = LockManager(state_dir, identities, sm_mhz, _clock_tolerance(config))
     atexit.register(_atexit_cleanup, manager)
     previous_handlers = {
         sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)
@@ -970,7 +955,7 @@ def _start(args: argparse.Namespace) -> int:
 
 
 def _probe_one(
-    cuda: CudaDriver, identity: GpuIdentity, sm_mhz: int
+    cuda: CudaDriver, identity: GpuIdentity, sm_mhz: int, tolerance_mhz: int
 ) -> dict[str, Any]:
     retained_device: int | None = None
     clock_touched = False
@@ -981,7 +966,7 @@ def _probe_one(
         clock_touched = True
         _set_clock(identity.index, sm_mhz)
         try:
-            observed_mhz = _verify_clock(identity.index, sm_mhz)
+            observed_mhz = _verify_clock(identity.index, sm_mhz, tolerance_mhz)
             honored = True
         except LockNotHonoredError as exc:
             observed_mhz = exc.observed_mhz
@@ -990,7 +975,7 @@ def _probe_one(
             "gpu": identity.index,
             "requested_mhz": sm_mhz,
             "observed_mhz": observed_mhz,
-            "tolerance_mhz": CLOCK_TOLERANCE_MHZ,
+            "tolerance_mhz": tolerance_mhz,
             "honored": honored,
         }
     except BaseException as exc:
@@ -1025,6 +1010,9 @@ def _probe(args: argparse.Namespace) -> int:
     config = _load_config()
     allowed, state_dir = _configured_state(config)
     gpus = _select_gpus(args.gpus, allowed)
+    sm_mhz = _requested_frequency(config, args.sm_mhz)
+    if sm_mhz is None:
+        return _report_unlocked("probe", gpus)
     identities = _query_identities()
     missing = [gpu for gpu in gpus if gpu not in identities]
     if missing:
@@ -1033,7 +1021,8 @@ def _probe(args: argparse.Namespace) -> int:
     with _StateOperationLock(state_dir):
         _ensure_startable(state_dir, gpus)
         cuda = CudaDriver()
-        results = [_probe_one(cuda, identities[gpu], args.sm_mhz) for gpu in gpus]
+        results = [_probe_one(cuda, identities[gpu], sm_mhz, _clock_tolerance(config))
+                   for gpu in gpus]
     print(json.dumps({"gpus": results}, separators=(",", ":")))
     return EXIT_SUCCESS
 
@@ -1080,6 +1069,8 @@ def _read_authorized_markers(
 def _stop(args: argparse.Namespace) -> int:
     config = _load_config()
     allowed, state_dir = _configured_state(config)
+    if _requested_frequency(config, None) is None:
+        return _report_unlocked("stop", _select_gpus(args.gpus, allowed) if args.gpus else None)
     with _StateOperationLock(state_dir):
         paths = _selected_marker_paths(state_dir, args.gpus, allowed)
         if not paths:
@@ -1129,10 +1120,12 @@ def _stop(args: argparse.Namespace) -> int:
 def _status(args: argparse.Namespace) -> int:
     config = _load_config()
     allowed, state_dir = _configured_state(config)
+    if _requested_frequency(config, None) is None:
+        return _report_unlocked("status", _select_gpus(args.gpus, allowed) if args.gpus else None)
     paths = _selected_marker_paths(state_dir, args.gpus, allowed)
-    print("gpu  sm_mhz  pid       alive  clocks.sm  violations  healthy")
+    print("gpu  sm_mhz  pid       alive  clocks.sm  violations  sw_power_cap  healthy")
     if not paths:
-        print("-    -       -         no     -          -           no")
+        print("-    -       -         no     -          -           -             no")
         return 1
 
     healthy = True
@@ -1154,17 +1147,15 @@ def _status(args: argparse.Namespace) -> int:
         row_healthy = (
             alive
             and current_clock is not None
-            and abs(current_clock - marker["sm_mhz"]) <= CLOCK_TOLERANCE_MHZ
+            and abs(current_clock - marker["sm_mhz"]) <= _clock_tolerance(config)
             and marker["violations"] == 0
         )
         healthy = healthy and row_healthy
-        if marker["exempt_reasons"]:
-            print(f"gpulockd warning: GPU {gpu} clock event reasons {marker['exempt_reasons']:#x} "
-                  "were asserted while idle and are not counted as violations", file=sys.stderr)
         print(
             f"{gpu:<4} {marker['sm_mhz']:<7} {marker['pid']:<9} "
             f"{'yes' if alive else 'no':<6} {clock_text:<10} "
-            f"{marker['violations']:<11} {'yes' if row_healthy else 'no'}"
+            f"{marker['violations']:<11} {marker['sw_power_cap_samples']:<13} "
+            f"{'yes' if row_healthy else 'no'}"
         )
     return 0 if healthy else 1
 
@@ -1172,21 +1163,21 @@ def _status(args: argparse.Namespace) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Lock configured GPU SM clocks while retaining CUDA primary contexts. "
-            "Machine-specific policy is loaded from the PipeLink environment."
+            "Lock configured GPU SM clocks while holding CUDA primary contexts. "
+            "Machine-specific policy comes from the PipeLink environment."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Exit codes:\n"
-            "  0  requested operation succeeded (and status is healthy)\n"
+            "  0  requested operation succeeded (for status: all GPUs healthy)\n"
             "  1  any other failure, unhealthy status, or interruption\n"
-            "  3  requested SM clock lock was not honored within tolerance"
+            "  3  requested SM clock lock read back outside tolerance"
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     start = subparsers.add_parser(
-        "start", help="lock GPUs and run the context-holding monitor daemon"
+        "start", help="lock GPUs and start the monitor daemon that holds their contexts"
     )
     start.add_argument(
         "--gpus",
@@ -1196,8 +1187,8 @@ def _build_parser() -> argparse.ArgumentParser:
     start.add_argument(
         "--sm-mhz",
         metavar="MHZ",
-        type=lambda value: _positive_frequency(value, label="--sm-mhz"),
-        help="SM lock frequency (default: PIPELINK_LOCK_SM_MHZ)",
+        type=lambda value: _nonnegative_frequency(value, label="--sm-mhz"),
+        help="SM lock frequency; 0 means unlocked (default: PIPELINK_LOCK_SM_MHZ)",
     )
     start.add_argument(
         "--foreground",
@@ -1207,14 +1198,13 @@ def _build_parser() -> argparse.ArgumentParser:
     start.set_defaults(handler=_start)
     probe = subparsers.add_parser(
         "probe",
-        help="temporarily lock, sample, and unlock authorized GPUs; report JSON",
+        help="lock, sample and unlock configured GPUs; print a JSON report",
     )
     probe.add_argument(
         "--sm-mhz",
         metavar="F",
-        required=True,
-        type=lambda value: _positive_frequency(value, label="--sm-mhz"),
-        help="SM frequency to probe",
+        type=lambda value: _nonnegative_frequency(value, label="--sm-mhz"),
+        help="SM frequency to probe; 0 means unlocked (default: PIPELINK_LOCK_SM_MHZ)",
     )
     probe.add_argument(
         "--gpus",
@@ -1225,7 +1215,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
     stop = subparsers.add_parser(
-        "stop", help="signal live daemons and clean stale configured markers"
+        "stop", help="stop live daemons and remove stale markers of configured GPUs"
     )
     stop.add_argument(
         "--gpus", metavar="INDEXES", help="only stop markers for these configured GPUs"
@@ -1233,7 +1223,7 @@ def _build_parser() -> argparse.ArgumentParser:
     stop.set_defaults(handler=_stop)
 
     status = subparsers.add_parser(
-        "status", help="show marker, process, clock, and violation health"
+        "status", help="show markers, daemon processes, clocks and violations"
     )
     status.add_argument(
         "--gpus", metavar="INDEXES", help="only show markers for these configured GPUs"

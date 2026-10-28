@@ -1,9 +1,9 @@
-"""Lazy public-kernel registry; importing this module never imports a backend.
+"""Lazy public-kernel registry; backends are imported only on demand.
 
-Adapters own all compilation, plans and input-layout conversion in prepare.
-run is one complete product iteration, including resets/merges, without a host
-synchronization. outputs reads the most recent result and performs any untimed
-layout or log-base conversion; it must not launch attention again.
+prepare does all compilation, planning and input-layout conversion. run is one
+complete product iteration, including resets and merges, with no host
+synchronization. outputs reads the latest result and does any untimed layout or
+log-base conversion without launching attention again.
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ class Impl:
 
 
 def load_registry() -> tuple[list[Impl], dict[str, str]]:
-    """Load available modules and report every import failure, without hiding it."""
+    """Load available modules and report every import failure."""
     impls, errors = [], {}
     for name in ("fa3", "fa4", "flashinfer", "flex", "production"):
         try:

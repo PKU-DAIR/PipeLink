@@ -108,21 +108,33 @@ class FamilyKernel {
   CUfunction function_ = nullptr;
   void* reset_;
   size_t reset_bytes_;
+  std::string path_, symbol_;
   CUlaunchConfig launch_{};
  public:
   FamilyKernel(std::string const& path, LinkMetadata const& meta, int grid, void* reset, size_t reset_bytes)
-      : reset_(reset), reset_bytes_(reset_bytes) {
-    CU_CHECK(cuModuleLoad(&module_, path.c_str()));
-    CU_CHECK(cuModuleGetFunction(&function_, module_, meta.symbol.c_str()));
-    CU_CHECK(cuFuncSetAttribute(function_, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, meta.dyn_smem_bytes));
+      : reset_(reset), reset_bytes_(reset_bytes), path_(path), symbol_(meta.symbol) {
     launch_.gridDimX = grid; launch_.gridDimY = launch_.gridDimZ = 1;
     launch_.blockDimX = meta.threads; launch_.blockDimY = launch_.blockDimZ = 1;
     launch_.sharedMemBytes = meta.dyn_smem_bytes;
     // Only cluster (1,1,1) is supported; no launch attribute is needed.
+    load();
   }
   ~FamilyKernel() { if (module_) cuModuleUnload(module_); }
   FamilyKernel(FamilyKernel const&) = delete;
   FamilyKernel& operator=(FamilyKernel const&) = delete;
+
+  // Caller drains its context and destroys any live graphs before unloading.
+  // Params, launch shape, reset addresses and device buffers stay valid.
+  void unload() {
+    if (module_) CU_CHECK(cuModuleUnload(module_));
+    module_ = nullptr;
+    function_ = nullptr;
+  }
+  void load() {
+    CU_CHECK(cuModuleLoad(&module_, path_.c_str()));
+    CU_CHECK(cuModuleGetFunction(&function_, module_, symbol_.c_str()));
+    CU_CHECK(cuFuncSetAttribute(function_, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, launch_.sharedMemBytes));
+  }
 
   void launch(PackedParams& params, cudaStream_t stream = nullptr) {
     if (reset_bytes_) CUDA_CHECK(cudaMemsetAsync(reset_, 0, reset_bytes_, stream));
@@ -152,7 +164,7 @@ class Buffer {
 };
 
 // Independent fp32 spot oracle: all heads at boundary rows, full visible keys.
-// Scores live in scratch rather than S-sized shared memory, including at 128K.
+// Scores live in global scratch so the kernel scales to 128K tokens.
 __global__ void spot_reference(OracleElement const* q, OracleElement const* k, OracleElement const* v,
     int const* samples, int sample_count, int seqlen, int heads_q, int heads_kv,
     int window, int chunk, bool phi, int32_t const* selection,

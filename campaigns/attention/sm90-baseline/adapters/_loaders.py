@@ -47,7 +47,7 @@ def _module_from_file(name: str, path: Path):
 
 
 def load_vllm_m3():
-    """Return the unmodified sparse_attn.py module; only its two imports are supplied."""
+    """Return the unmodified sparse_attn.py module, supplying its two imports."""
     import torch
     import triton
     import triton.language as tl

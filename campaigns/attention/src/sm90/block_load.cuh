@@ -102,8 +102,8 @@ CUTLASS_DEVICE void run_block_load(
   auto block_tma_Q = params.tma_load_Q.get_slice(_0{});
   Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ));
 
-  // Load owns strict LPT scheduling: the host orders CSR rows by list length.
-  // Dynamic ticket allocation and every producer/ring phase remain FA3's.
+  // Strict LPT scheduling: the host orders CSR rows by list length. Dynamic
+  // ticket allocation and all producer/ring phases are FA3's.
   cutlass::arch::wait_on_dependent_grids();
   int ticket = int(blockIdx.x);
   while (ticket < block.num_work) {
@@ -115,9 +115,9 @@ CUTLASS_DEVICE void run_block_load(
     int const row_begin = block.row_ptr[row];
     int const row_end = block.row_ptr[row + 1];
     int const steps = row_end - row_begin;
-    // Unpacked FA3 schedules a Q head, not a packed-GQA KV head.
-    // kv_head carries that logical Q head; physical KV addressing divides it
-    // below. qhead_per_kvhead=1 preserves the WorkDesc row convention.
+    // Unpacked FA3 schedules one Q head per work item, so kv_head carries the
+    // logical Q head; physical KV addressing divides it below.
+    // qhead_per_kvhead=1 keeps the WorkDesc row convention.
     publish_load_work(c, WorkDesc{
         q_block, batch, q_head, steps, params.seqlen_q, params.seqlen_k,
         q_offset, 0,
@@ -144,9 +144,9 @@ CUTLASS_DEVICE void run_block_load(
       Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ));
       if (elected) { prefetch(params.tma_load_Q, tQgQ); }
 
-      // SW128 stores the two 64-dimension planes 16 KiB apart. Each logical
-      // 64-row half therefore uses two 8 KiB boxes, not one compact 16 KiB
-      // box. Four boxes complete the unchanged 32 KiB K/V transaction.
+      // SW128 stores the two 64-dimension planes 16 KiB apart, so each logical
+      // 64-row half uses two 8 KiB boxes. Four boxes complete FA3's 32 KiB
+      // K/V transaction.
       // Box offsets and the shared base are 1 KiB aligned: SW128 xor is zero.
       auto load_k = [&](PhiBlockPair const& pair, auto const& state) {
         c.k.producer_acquire(state);

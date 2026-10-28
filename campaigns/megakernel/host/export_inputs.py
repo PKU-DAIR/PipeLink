@@ -179,7 +179,7 @@ def little_endian_array(tensor: torch.Tensor, dtype_name: str) -> np.ndarray:
 
 
 def attention_instructions(schedule, partitions: int) -> list[mk_instructions.Instruction]:
-    """Expand upstream's single-partial schedule without changing other operators."""
+    """Expand upstream's single-partial attention schedule into `partitions` partials."""
     instructions = schedule.get_linear_instructions()
     if partitions == 1:
         return instructions

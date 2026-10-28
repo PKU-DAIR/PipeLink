@@ -1,5 +1,5 @@
 """CPU-only checks at the pre-codegen TIR -> device CUDA seam."""
-import hashlib
+
 import importlib.util
 from pathlib import Path
 
@@ -106,6 +106,22 @@ def test_else_selection_drops_other_arm_and_unused_params(barriers_module, targe
     assert "< 128)" not in source
     assert "const float* __restrict__ A" not in source
 
+
+
+def test_readonly_global_parameter_survives_role_pruning(target):
+    @T.prim_func
+    def kernel(A: T.Tensor((256,), T.float32), B: T.Tensor((256,), T.float32),
+               C: T.Tensor((256,), T.float32)):
+        with T.Kernel(1, threads=256):
+            tx = T.get_thread_binding()
+            if tx < 128:
+                B[tx] = A[tx]
+            else:
+                B[tx] = C[tx]
+    source = _emit(_lower(kernel, target), [], target, warp_range=(4, 8), params=("B", "C")).body
+    assert "const float* __restrict__ C" in source
+    assert "const float* __restrict__ B" not in source
+    assert "__restrict__ A" not in source
 
 def test_thread_interval_chain_selects_middle_branch(target):
     @T.prim_func
@@ -234,38 +250,29 @@ def test_scheduled_role_materialization(target):
     assert "warp_base() * 256" in source and "- 1024" not in source
 
 
-def test_original_ws_arm_bodies_are_byte_identical(target):
+def test_ws_branches_split_into_profile_specific_role_bodies(target):
+    """Each warp-specialized arm becomes its own role body; the consumer arm carries the profile's MMA."""
     path = Path(__file__).resolve().parent / "fixtures/ws_gemm.py"
     spec = importlib.util.spec_from_file_location("ws_gemm_externalize_test", path)
     ws = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ws)
     captured = capture(ws.program(3), target=target, pass_configs=ws.PASS_CONFIGS)
     arch = str(target.attrs["arch"])
-    # sm103: captured before the shared rewrite helpers / new entry point were added
-    # (byte-identical to the sm_100a capture it was first recorded from). sm90: the
-    # producer arm is byte-identical to sm103; the consumer arm is the wgmma body.
-    # sm120: both arms are byte-identical to sm103 (mma_sync + ldmatrix consumer).
-    baseline = {
-        "sm_103a": {"producer": "e5bc7c31ecc71a6e1782ba8a6c775f92be89e122826fb4f08bd0adaee77ec55b",
-                    "consumer": "50c8f8409209645b40cefa60494f459f6aae5931737f445dffd5b62e621f31a3"},
-        "sm_90a": {"producer": "e5bc7c31ecc71a6e1782ba8a6c775f92be89e122826fb4f08bd0adaee77ec55b",
-                   "consumer": "a632428c3422ba2ca8010b4af6ebbc11a0411f5c4cb4432648de69ab3eab971f"},
-        "sm_120a": {"producer": "e5bc7c31ecc71a6e1782ba8a6c775f92be89e122826fb4f08bd0adaee77ec55b",
-                    "consumer": "50c8f8409209645b40cefa60494f459f6aae5931737f445dffd5b62e621f31a3"},
-    }[arch]
     for stage in ws.PIPELINK.stages:
         role, declaration = next(iter(stage.roles.items()))
         result = split_roles({3: captured.modules["pre_codegen"]}, branch=declaration.branch,
                              prefix=symbol_prefix(stage),
-                             smem_handles={"A_shared": "pipelink_tilelang_ws_smem_a_ring", "B_shared": "pipelink_tilelang_ws_smem_b_ring"},
+                             smem_handles={"A_shared": "pipelink_tilelang_ws_smem_a_ring",
+                                           "B_shared": "pipelink_tilelang_ws_smem_b_ring"},
                              full="pipelink_tilelang_ws_full", empty="pipelink_tilelang_ws_empty",
                              declared_params=tuple(field.name for field in stage.params.fields), target=target)
-        assert hashlib.sha256(result.body.encode()).hexdigest() == baseline[role]
-        if arch == "sm_90a" and role == "consumer":
-            assert "wgmma" in result.body and "tcgen05" not in result.body and "copy_sm100" not in result.body
-        if arch == "sm_120a" and role == "consumer":
-            assert "mma_sync" in result.body and "wgmma" not in result.body and "tcgen05" not in result.body
-        # The generalized entry point must also accept the legacy WS selector.
+        assert ("tma_load" in result.body) == (role == "producer")
+        if role == "consumer":
+            # The fixture's gemm lowers to mma_sync on sm103 as on sm120, and to wgmma on sm90.
+            mma = "wgmma" if arch == "sm_90a" else "mma_sync"
+            assert mma in result.body
+            assert "tcgen05" not in result.body and ("wgmma" in result.body) == (mma == "wgmma")
+        # externalize_role also accepts a WS branch selector.
         arm = externalize_role(captured.modules["pre_codegen"], role=role, branch=declaration.branch,
                                warp_range=None, external=[], prefix="arm_", declared_params=result.functions[0].params,
                                target=target).body

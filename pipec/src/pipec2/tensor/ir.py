@@ -1,8 +1,8 @@
 """Finite local Access IR: effects, local metadata, observations, and returns.
 
-Graph cycles are intentional.  Expressions in operands are the tensor expression
-language, never Python code; their site-local environments are checked by the
-execution model.  No node can inspect ghost payload identities.
+Graphs may contain cycles.  Operand expressions are written in the tensor
+expression language; the execution model checks their site-local environments.
+No node can inspect ghost payload identities.
 """
 from __future__ import annotations
 

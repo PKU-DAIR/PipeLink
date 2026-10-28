@@ -1,4 +1,8 @@
-"""Seal records once; verify persisted records with readers before dispatch."""
+"""Fast-protocol legs, escalation triggers and decisions.
+
+``seal_*`` builds and hashes a record once; ``read_*`` validates a record loaded
+from disk before anything uses it.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -61,7 +65,7 @@ def _leg_median(value: object) -> float:
 
 
 def read_leg(record: object) -> dict[str, Any]:
-    """Validate a protocol leg loaded from persisted or external evidence."""
+    """Validate a protocol leg loaded from disk or another external source."""
     if not isinstance(record, dict):
         raise ValueError("protocol leg record must be an object")
     schema = record.get("schema_version")
@@ -94,7 +98,7 @@ def seal_leg(
     result_path: str,
     escalation_depth: int = 0,
 ) -> dict[str, Any]:
-    """Build and seal a valid leg for direct in-process use."""
+    """Build and seal a leg for in-process use."""
     if protocol_variant not in PROTOCOL_VARIANTS:
         raise ValueError(f"unknown protocol variant: {protocol_variant!r}")
     if escalation_depth not in {0, 1}:
@@ -142,7 +146,7 @@ def seal_trigger(fast: dict[str, Any]) -> dict[str, Any]:
 
 
 def read_trigger_evaluation(value: object) -> dict[str, Any]:
-    """Validate a trigger evaluation loaded from persisted or external evidence."""
+    """Validate a trigger evaluation loaded from disk or another external source."""
     if (
         not isinstance(value, dict)
         or value.get("schema_version") != TRIGGER_EVALUATION_SCHEMA
@@ -168,7 +172,7 @@ def decide(
     trigger_evaluation: dict[str, Any] | None = None,
     direct_f2_audit_only: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Decide using records already returned by the seal/read helpers."""
+    """Decide from records already produced by the seal/read helpers."""
     _refuse_experiment_only_variant(fast["protocol_variant"])
     if fast["protocol_variant"] not in FAST_TO_ORIGINAL or fast["escalation_depth"] != 0:
         raise ValueError("decision requires one depth-zero fast screening leg")

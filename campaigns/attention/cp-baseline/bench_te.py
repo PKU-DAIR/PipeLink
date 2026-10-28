@@ -87,8 +87,8 @@ def capture(cell, q, k, v, world, transport):
 
 
 def measure(graph, reps=10, min_interval_ms=20.0):
-    """Median per-forward time; each interval starts after an NCCL collective aligns every
-    rank's stream and is the slowest rank's CUDA-event span."""
+    """Median per-forward time. Each interval starts after an NCCL collective aligns all
+    rank streams and spans the slowest rank's CUDA events."""
     token = torch.zeros(1, device="cuda")
     start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
 

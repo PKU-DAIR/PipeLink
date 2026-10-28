@@ -1,4 +1,4 @@
-"""CUDA driver execution for the host broker; no frontend/kernel type dependency."""
+"""CUDA driver calls for the host broker; independent of frontend and kernel types."""
 from __future__ import annotations
 
 import ctypes as C
@@ -35,17 +35,18 @@ _PEER_ACCESS_ALREADY_ENABLED = 704  # CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED
 class CudaBackend:
     """A loaded kernel, its device context, and one setup stream.
 
-    A current context of the requested device is borrowed; otherwise the
-    device primary context is retained, so ordinary runtime caller allocations
-    remain interoperable. The context is never left pushed: every method runs
-    inside `current()`, so several backends (one per device) coexist in one
-    thread. Context-loss paths do not free possibly in-flight addresses.
+    If a context of the requested device is current, the backend borrows it;
+    otherwise it retains the device's primary context, so allocations made
+    through the CUDA runtime stay usable. Every method pushes the context with
+    `current()` and pops it on return, so several backends (one per device) can
+    share a thread. After a context loss, possibly in-flight addresses are not
+    freed.
 
     `stream` is the backend's own stream: the setup stream for open-time work
     and the default launch stream for the CLI. `zero` and `launch` run on the
-    caller's stream; `synchronize` drains the whole context so open/close order
-    against every stream an integrator may have launched on. `capture` records
-    a body issued on one stream into a replayable `Graph`.
+    caller's stream. `synchronize` drains the whole context, so open and close
+    are ordered against every stream an integrator may have launched on.
+    `capture` records work issued on one stream into a replayable `Graph`.
     """
 
     def __init__(self, cubin: str | Path, symbol: str, *, device: int = 0,
@@ -63,6 +64,9 @@ class CudaBackend:
         self._retained = False
         self.lost = False
         self.closed = False
+        self._image_path = str(Path(cubin).resolve())
+        self._symbol = symbol
+        self._dynamic_smem_bytes = dynamic_smem_bytes
         try:
             self._call("cuInit", [C.c_uint], 0)
             self._call("cuDeviceGet", [C.POINTER(C.c_int), C.c_int], C.byref(self.device), device)
@@ -77,20 +81,23 @@ class CudaBackend:
                            C.byref(self.context), self.device)
                 self._retained = True
             with self.current():
-                self._setup(cubin, symbol, device, dynamic_smem_bytes, cluster, block)
+                self._setup(device, cluster, block)
         except BaseException:
             self.close()
             raise
 
-    def _setup(self, cubin: str | Path, symbol: str, device: int, dynamic_smem_bytes: int,
-               cluster: tuple[int, int, int], block: tuple[int, int, int]) -> None:
-        self._call("cuStreamCreate", [C.POINTER(C.c_void_p), C.c_uint], C.byref(self.stream), 0)
+    def _load_module(self) -> None:
         self._call("cuModuleLoad", [C.POINTER(C.c_void_p), C.c_char_p],
-                   C.byref(self.module), str(cubin).encode())
+                   C.byref(self.module), self._image_path.encode())
         self._call("cuModuleGetFunction", [C.POINTER(C.c_void_p), C.c_void_p, C.c_char_p],
-                   C.byref(self.function), self.module, symbol.encode())
+                   C.byref(self.function), self.module, self._symbol.encode())
         self._call("cuFuncSetAttribute", [C.c_void_p, C.c_int, C.c_int],
-                   self.function, 8, dynamic_smem_bytes)
+                   self.function, 8, self._dynamic_smem_bytes)
+
+    def _setup(self, device: int, cluster: tuple[int, int, int],
+               block: tuple[int, int, int]) -> None:
+        self._call("cuStreamCreate", [C.POINTER(C.c_void_p), C.c_uint], C.byref(self.stream), 0)
+        self._load_module()
         version = C.c_int()
         self._call("cuDriverGetVersion", [C.POINTER(C.c_int)], C.byref(version))
         driver_text = Path("/proc/driver/nvidia/version").read_text()
@@ -109,7 +116,7 @@ class CudaBackend:
         }
         self.identity = {"target": arch, "toolkit": "13.3", "driver_api": version.value,
                          "driver_build": build.group(1)}
-        config, attribute = self._config(cluster, block, cluster, dynamic_smem_bytes, self.stream_token)
+        config, attribute = self._config(cluster, block, cluster, self._dynamic_smem_bytes, self.stream_token)
         active = C.c_int()
         self._call("cuOccupancyMaxActiveClusters", [C.POINTER(C.c_int), C.c_void_p, C.POINTER(_Config)],
                    C.byref(active), self.function, C.byref(config))
@@ -121,7 +128,7 @@ class CudaBackend:
 
     @contextmanager
     def current(self) -> Iterator[None]:
-        """Make this backend's context current for the body (raw driver calls, providers)."""
+        """Make this backend's context current for the body (e.g. raw driver calls, providers)."""
         self._call("cuCtxPushCurrent_v2", [C.c_void_p], self.context)
         try:
             yield
@@ -243,8 +250,8 @@ class CudaBackend:
             self._call("cuEventDestroy_v2", [C.c_void_p], event)
 
     def abandon(self) -> None:
-        # The caller receives an error and cannot reuse the failed context.
-        # Do not pretend a failed synchronization made its allocations reusable.
+        # After a failed synchronization the context and its allocations are unusable;
+        # the caller gets the error and close() tears the context down without frees.
         self.lost = True
 
     def _config(self, grid: tuple[int, int, int], block: tuple[int, int, int],
@@ -304,11 +311,10 @@ class CudaBackend:
             except Exception as exc:
                 errors.append(exc)
         if self._retained:
-            # The context is no longer on this thread's stack when its reference is dropped.
+            # Runs after current() has popped the context, so the reference is dropped off-stack.
             operations = []
             if self.lost:
-                # This backend retained the primary context. Failed stream work
-                # is disposed through context teardown, never individual frees.
+                # A lost primary context is reset as a whole; its allocations are not freed one by one.
                 operations.append(("cuDevicePrimaryCtxReset_v2", [C.c_int], (self.device,)))
             operations.append(("cuDevicePrimaryCtxRelease_v2", [C.c_int], (self.device,)))
             for name, types, args in operations:
@@ -321,7 +327,7 @@ class CudaBackend:
             raise ExceptionGroup("CUDA backend cleanup failed", errors)
 
     def _release_context_objects(self, errors: list[Exception]) -> None:
-        """Drain, then destroy graphs, allocations, module and stream (this context is current)."""
+        """Drain, then destroy graphs, allocations, module and stream. Call with this context current."""
         if self.stream.value and not self.lost:
             try:
                 self.synchronize()
@@ -355,8 +361,43 @@ class CudaBackend:
             raise
 
 
+def reload_modules(backends: Sequence[CudaBackend]) -> None:
+    """Drain one context, then unload all kernels and reload them in the given order.
+
+    Backends must be distinct, live, share one context and have no live graphs.
+    Streams, allocations and context ownership are kept. A driver failure
+    propagates without rollback; each backend still owns whatever module it holds,
+    and ordinary close() or ExitStack cleanup releases it.
+    """
+    if not backends:
+        return
+    context = backends[0].context.value
+    seen: set[int] = set()
+    for backend in backends:
+        if id(backend) in seen:
+            raise ValueError("module reload requires distinct backends")
+        seen.add(id(backend))
+        if backend.closed or backend.lost:
+            raise ValueError("cannot reload a closed or lost CUDA backend")
+        if not context or backend.context.value != context:
+            raise ValueError("module reload requires one shared CUDA context")
+        if any(not graph.closed for graph in backend._graphs):
+            raise ValueError("cannot reload a CUDA backend with live graphs")
+        if not backend.module.value or not backend.function.value:
+            raise ValueError("cannot reload a CUDA backend without a loaded kernel")
+    with backends[0].current():
+        backends[0]._call("cuCtxSynchronize", [])
+        for backend in backends:
+            backend._call("cuModuleUnload", [C.c_void_p], backend.module)
+            backend.module = C.c_void_p()
+            backend.function = C.c_void_p()
+        for backend in backends:
+            backend._load_module()
+            backend._call("cuFuncLoad", [C.c_void_p], backend.function)
+
+
 class Graph:
-    """An instantiated CUDA graph replaying exactly the work captured on one stream."""
+    """An instantiated CUDA graph that replays the work captured on one stream."""
 
     def __init__(self, backend: CudaBackend, graph: int, executable: int):
         self._backend = backend
@@ -412,13 +453,14 @@ _U64, _SIZE = C.c_uint64, C.c_size_t
 
 
 class MulticastGroup:
-    """In-process caller fabrication of one multicast object over N backends' devices.
+    """One multicast object over the devices of N backends, created in-process by the caller.
 
-    Each device gets a VMM backing of `size` bytes (rounded to the multicast granularity),
-    mapped once with read/write access for every member device, so `unicast` doubles as
-    the peer table; every device also maps the multicast object (`multicast[r]`). The
-    backing is bound once at its granularity; channels lend subviews through `views`.
-    POSIX_FD handle types match the evidenced driver path; nothing is exported.
+    Each device gets a VMM backing of `size` bytes (rounded up to the multicast
+    granularity), mapped with read/write access for every member device, so `unicast`
+    doubles as the peer table. Each device also maps the multicast object
+    (`multicast[r]`). Each backing is bound once, whole; channels lend subviews through
+    `views`. Handles use the POSIX_FD type, the driver path that was tested, but are
+    never exported.
     """
 
     def __init__(self, backends: Sequence[CudaBackend], size: int):
@@ -490,7 +532,7 @@ class MulticastGroup:
                 for r in range(len(self.backends))]
 
     def close(self) -> None:
-        """Unmap, unbind and release; the caller drained every member first."""
+        """Unmap, unbind and release. The caller must drain every member first."""
         errors: list[Exception] = []
         def attempt(backend: CudaBackend, name: str, types: list[Any], *args: Any) -> None:
             try:

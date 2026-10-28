@@ -36,7 +36,7 @@ def _affine(shape=(128, 64), stride=(64, 1), bits=16, **fields):
 
 
 @pytest.fixture(scope="module")
-def d1_captures():
+def ws_gemm_captures():
     spec = importlib.util.spec_from_file_location("layout_test_recipe", Path(__file__).resolve().parent / "fixtures/ws_gemm.py")
     recipe = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(recipe)
@@ -57,8 +57,8 @@ def d1_captures():
 
 
 @pytest.fixture
-def d1(profile, d1_captures):
-    return d1_captures[profile]
+def ws_gemm(profile, ws_gemm_captures):
+    return ws_gemm_captures[profile]
 
 
 def test_implemented_profile_atom_round_trip(profile):
@@ -108,8 +108,8 @@ def test_bank_layout_coordinates_round_trip(bank, constructor, bits, dtype):
                 assert actual == expected
 
 
-def test_real_d1_capture_and_manifest_layout_select_128b(profile, d1):
-    result, buffers = d1
+def test_real_ws_gemm_capture_and_manifest_layout_select_128b(profile, ws_gemm):
+    result, buffers = ws_gemm
     for name in ("A_shared", "B_shared"):
         buffer = buffers[name]
         value = from_captured(result.layout_objects[name], elem_bits=16, buffer=buffer)
@@ -127,14 +127,13 @@ def test_real_d1_capture_and_manifest_layout_select_128b(profile, d1):
 
 
 @pytest.mark.parametrize("name,mma", [("sm_90a", "wgmma"), ("sm_120a", "mma_sync")])
-def test_d1_capture_keeps_the_ring_contract_and_switches_the_mma_body(d1_captures, name, mma):
+def test_ws_gemm_capture_keeps_the_ring_contract_and_switches_the_mma_body(ws_gemm_captures, name, mma):
     """The captured channel contract is target-independent; only the opaque consumer body changes."""
-    (sm103, sm103_buffers), (other, other_buffers) = d1_captures["sm_103a"], d1_captures[name]
+    (sm103, sm103_buffers), (other, other_buffers) = ws_gemm_captures["sm_103a"], ws_gemm_captures[name]
     assert "tcgen05" not in other.kernel_source and "copy_sm100.h" not in other.kernel_source
     assert mma in other.kernel_source and "wgmma" not in sm103.kernel_source
     assert (name == "sm_90a") == ("wgmma" in other.kernel_source)
     for buffer in ("A_shared", "B_shared"):
-        assert str(other.layout_objects[buffer]) == str(sm103.layout_objects[buffer])
         assert tvm.ir.structural_equal(other.layout_objects[buffer], sm103.layout_objects[buffer])
         assert (from_captured(other.layout_objects[buffer], elem_bits=16, buffer=other_buffers[buffer])
                 == from_captured(sm103.layout_objects[buffer], elem_bits=16, buffer=sm103_buffers[buffer]))

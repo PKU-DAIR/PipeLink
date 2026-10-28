@@ -5,7 +5,7 @@
 #include "mok_abi.h"
 
 /* Framework-private provider residue; dimensions and foreign geometry are host inputs.
- * P2 keeps this common layout across the three interpreter/provider contracts. */
+ * The port keeps this common layout across the three interpreter/provider contracts. */
 typedef struct MokFrameworkResidue {
     int32_t num_local_tokens, hidden, intermediate, num_local_experts;
     int32_t schedule_capacity, macrobatch_size, minibatch_size, topk, num_comm_sms;

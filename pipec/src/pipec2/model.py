@@ -1,6 +1,6 @@
 """Shared contract types for PipeLink ABI v2.
 
-W2 entry points::
+Phase entry points::
 
     protocol.expand(channel_name, producer: Endpoint, consumer: Endpoint,
                     stages, pipeline, canon: dict[str, CanonEndpoint], profile)
@@ -67,7 +67,10 @@ for _clause_id, _phase, _description in (
     ("L-ALIGN", "solve", "claim bindings satisfy native and physical alignment"),
     ("L-BUDGET", "solve", "solver finds a feasible layout within its deterministic work limit"),
     ("L8", "layout", "paired endpoints have equal canonical physical layout identity"),
+    ("L-CALL", "link", "callable interfaces and call sites agree; the call graph is acyclic and "
+     "barrier-bearing exports run once per barrier instance"),
     ("L-ENTRYABI", "load", "stage entry ABI is supported by the live linker"),
+    ("L-JOIN", "link", "role-bearing stages declare one identical entry rendezvous over the launch"),
     ("L-HANDLE", "load", "handle declarations and references are complete and consistent"),
     ("L-HOSTCHAN", "link", "host declarations and selected resource contracts agree"),
     ("L-HOSTABI", "launch", "native host provider ABI agrees with the declared inventory"),
@@ -293,10 +296,91 @@ class Role(_JsonMixin):
 
 
 @dataclass(frozen=True)
+class Cohort(_JsonMixin):
+    """A converged, contiguous, ``threads``-aligned group of the caller's threads."""
+    threads: int
+
+
+@dataclass(frozen=True)
+class Collectives(_JsonMixin):
+    """Synchronization a callable performs over its cohort."""
+    kind: Literal["none", "warp", "named", "cta"]
+    handle: str | None = field(default=None, metadata={"omit_none": True})
+
+
+@dataclass(frozen=True)
+class CallParam(_JsonMixin):
+    """One pointer parameter of a callable: what an export touches or a call site provides."""
+    index: int
+    space: Literal["smem", "gmem", "generic", "local", "value"]
+    access: Literal["r", "w", "rw"]
+    dtype: str
+    extent: int
+    layout: Layout | None = field(default=None, metadata={"omit_none": True})
+
+    @classmethod
+    def from_json_obj(cls, obj: dict[str, Any]) -> CallParam:
+        from .layout import load_layout
+
+        if not isinstance(obj, dict):
+            raise TypeError("CallParam JSON value must be an object")
+        required = {"index", "space", "access", "dtype", "extent"}
+        if not required <= obj.keys() or obj.keys() - required - {"layout"}:
+            raise ValueError("CallParam requires index/space/access/dtype/extent and optional layout")
+        space = _decode_value(Literal["smem", "gmem", "generic", "local", "value"], obj["space"])
+        return cls(
+            _decode_value(int, obj["index"]), space,
+            _decode_value(Literal["r", "w", "rw"], obj["access"]),
+            _decode_value(str, obj["dtype"]), _decode_value(int, obj["extent"]),
+            load_layout(obj["layout"], space, "$.layout") if "layout" in obj else None,
+        )
+
+
+@dataclass(frozen=True)
+class CallInterface(_JsonMixin):
+    cohort: Cohort
+    collectives: Collectives
+    params: tuple[CallParam, ...]
+
+
+@dataclass(frozen=True)
+class CallSite(_JsonMixin):
+    cohort: Cohort
+    params: tuple[CallParam, ...]
+
+
+@dataclass(frozen=True)
 class Export(_JsonMixin):
     symbol: str
     decl: str
     decl_sha256: str
+    interface: CallInterface | None = field(default=None, metadata={"omit_none": True})
+
+
+@dataclass(frozen=True)
+class EntryRendezvous(_JsonMixin):
+    """Every role reaches ``bar.sync barrier, threads`` at entry."""
+    barrier: int
+    threads: int
+
+
+@dataclass(frozen=True)
+class TypeMember(_JsonMixin):
+    name: str
+    ctype: str
+    extent: int
+    offset: int
+    bytes: int
+    align: int
+
+
+@dataclass(frozen=True)
+class TypeDecl(_JsonMixin):
+    """A by-value type registered with PL_TYPE, captured from the compiler."""
+    name: str
+    bytes: int
+    align: int
+    members: tuple[TypeMember, ...]
 
 
 @dataclass(frozen=True)
@@ -435,6 +519,8 @@ class CallDecl(_JsonMixin):
     signature: str
     decl: str
     decl_sha256: str
+    # The caller side of a callable interface (produce endpoints only).
+    site: CallSite | None = field(default=None, metadata={"omit_none": True})
 
 
 @dataclass(frozen=True)
@@ -558,8 +644,9 @@ class Claim(_JsonMixin):
             present = sorted(name for name, value in forbidden.items() if value is not None)
             if present:
                 raise ValueError(f"regs claim forbids fields: {', '.join(present)}")
-            if not self.roles or not self.values:
-                raise ValueError("regs claim requires non-empty roles and values")
+            launch_cap = self.handle == "pipelink_launch_regs" and self.reg_group == "launch" and self.roles == []
+            if not self.values or (not self.roles and not launch_cap):
+                raise ValueError("regs claim requires values and roles, except the role-free launch cap")
         elif self.domain in _INTERVAL_DOMAINS and (self.extent is None or self.align is None):
             raise ValueError(f"{self.domain} claim requires extent and align")
 
@@ -576,14 +663,19 @@ class StageManifest(_JsonMixin):
     variants: list[Variant]
     endpoints: list[Endpoint]
     claims: list[Claim]
-    topology: StageTopology
+    # Role-less stages may leave topology undeclared; the solver intersects declared ones.
+    topology: StageTopology | None = field(metadata={"omit_none": True})
     params: ParamsDecl
     descriptor: DescriptorDecl | None
     hints: dict[str, Any]
     target: TargetStamp
     symbols: SymbolTable | None = None
     host: dict[str, Any] | None = field(default=None, metadata={"omit_none": True})
+    entry_rendezvous: EntryRendezvous | None = field(default=None, metadata={"omit_none": True})
+    types: tuple[TypeDecl, ...] | None = field(default=None, metadata={"omit_none": True})
     tensor: Any | None = field(default=None, metadata={"omit_none": True})
+    # Capacities of pipeline-capacity domains this stage's compiled code provides.
+    domain_capacities: dict[str, int] | None = field(default=None, metadata={"omit_none": True})
     # Informational evidence, including optional sections[path] source labels;
     # all present provenance entries participate in canonical serialized digests.
     provenance: dict[str, Any] | None = field(default=None, metadata={"omit_none": True})
@@ -919,14 +1011,20 @@ __all__ = [
     "BarrierSide",
     "BarrierStorage",
     "CallDecl",
+    "CallInterface",
+    "CallParam",
+    "CallSite",
     "CanonEndpoint",
     "Claim",
     "ClauseFailure",
     "ClusterConstraints",
+    "Cohort",
+    "Collectives",
     "CounterDecl",
     "Depth",
     "DescriptorDecl",
     "Endpoint",
+    "EntryRendezvous",
     "Export",
     "Extent",
     "Handle",
@@ -966,6 +1064,8 @@ __all__ = [
     "TensorLifetime",
     "Tile",
     "TxSum",
+    "TypeDecl",
+    "TypeMember",
     "Variant",
     "register_clause",
 ]

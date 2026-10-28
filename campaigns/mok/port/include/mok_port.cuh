@@ -1,6 +1,6 @@
-// Shared device helpers of the MoK port. Every owner package compiles this header
-// from the one pinned revision, like mxfp8.cuh and ThunderKittens.
-// It carries no owner geometry and no owner template bodies.
+// Shared device helpers of the MoK port, free of owner geometry and template bodies.
+// Every owner package compiles this header from the one pinned revision, like
+// mxfp8.cuh and ThunderKittens.
 #pragma once
 
 #include <cstdint>

@@ -2,13 +2,13 @@
 
     uv run --project pipec --locked python campaigns/mok/port/sass.py [--build-dir DIR] [--cell ID]
 
-Reports all matrix cells by default to campaigns/mok/evidence/p2-sass.json. Selecting
---cell reports only that cell. When the default cell is included, its P1 diagnostic is
-also written to p1-sass.json beside the matrix report. Root-index-only builds retain
-the P1 output. --out overrides the primary report path.
+By default, reports every matrix cell to <MOK_EVIDENCE_DIR>/sass.json (MOK_EVIDENCE_DIR
+defaults to $PIPELINK_SCRATCH_ROOT/mok/evidence); --cell reports one cell. When the default
+cell is included, its own diagnostic also goes to sass-default-cell.json beside the matrix
+report; root-index-only builds write only that output. --out overrides the primary path.
 
-Diagnostic only: acceptance is numeric parity and linked/one-TU bitwise outputs.
-Each CALL target is listed so a seam-attributable call is visible.
+This is a diagnostic; acceptance rests on numeric parity and bitwise-equal
+linked/one-TU outputs. Each CALL target is listed so seam-attributable calls show.
 """
 from __future__ import annotations
 
@@ -99,7 +99,7 @@ def summary(payload: dict) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--build-dir", type=Path, default=REPO / "campaigns/mok/port/build")
-    parser.add_argument("--out", type=Path, help="Primary report path (defaults to evidence/p2-sass.json for a matrix)")
+    parser.add_argument("--out", type=Path, help="Primary report path (defaults to <MOK_EVIDENCE_DIR>/sass.json for a matrix)")
     parser.add_argument("--cell", help="Report only this matrix link ID (default: all cells)")
     args = parser.parse_args()
     matrix_path = args.build_dir / "matrix.json"
@@ -112,10 +112,12 @@ def main() -> int:
         cells = [cell for cell in matrix["cells"] if args.cell is None or cell["id"] == args.cell]
         if not cells:
             parser.error(f"No matrix cells match {args.cell!r}")
-    out = args.out or REPO / "campaigns/mok/evidence" / ("p2-sass.json" if matrix is not None else "p1-sass.json")
-    p1_out = out.with_name("p1-sass.json")
+    evidence = Path(os.environ.get("MOK_EVIDENCE_DIR")
+                    or Path(os.environ.get("PIPELINK_SCRATCH_ROOT", REPO / "out")) / "mok/evidence")
+    out = args.out or evidence / ("sass.json" if matrix is not None else "sass-default-cell.json")
+    p1_out = out.with_name("sass-default-cell.json")
     if matrix is not None and out.resolve() == p1_out.resolve():
-        parser.error("The matrix --out must differ from the reserved default-cell p1-sass.json path")
+        parser.error("The matrix --out must differ from the reserved sass-default-cell.json path")
     metadata = {
         "diagnostic_only": True,
         "N_definition": "operand-delta count; structural differences are separate checks",

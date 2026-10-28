@@ -25,7 +25,7 @@ inline PhiPattern phi_pattern(Json const& mask) {
   return p;
 }
 
-// Independent token-level oracle, rather than interpreting load metadata/CSR.
+// Independent token-level oracle; it does not read the load metadata or CSR.
 __host__ __device__ inline bool phi_visible(int q, int k, int head) {
   return k >= 0 && k <= q &&
       (q / 64 - k / 64 < 16 || (k / 64 + head + 1) % 8 == 0);
@@ -91,7 +91,8 @@ struct PhiPlan {
   }
 };
 
-// Created before any warmup/timing, shared by linked/control, alive through launches.
+// Created before warmup and timing, shared by linked and control, and kept alive
+// across all launches.
 class PhiWorkspace {
   int32_t *rows_ = nullptr, *order_ = nullptr;
   PhiBlockPair* pairs_ = nullptr;

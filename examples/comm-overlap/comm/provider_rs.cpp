@@ -1,5 +1,6 @@
-// Comm owner provider: peer receive slots/counters/released, local output/generation,
-// and a launch-reset follow-on completion ticket. Transport is push-only.
+// Comm owner provider for the push-only RS group: the peer receive slots, counters and
+// released flags, the local output and generation, and a completion ticket for the
+// follow-on reduction that is reset at every launch.
 #include "comm.h"
 #include <climits>
 #include <cstring>

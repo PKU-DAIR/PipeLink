@@ -4,6 +4,18 @@ set -euo pipefail
 project=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd -- "$project/../../.." && pwd)
 source "$repo/tools/env.sh"
+
+# third_party/flash-attention pin: upstream commit (for fetching) and its tree hash.
+# The tree hash identifies the sources in both a submodule checkout and a re-created
+# vendored repository, so it is what this build verifies.
+FLASH_ATTENTION_COMMIT=ce088ab9ce0fc0434dcd8afa0a791da9fcc3a820
+FLASH_ATTENTION_TREE=c28e232599d36f12ba953657a4cae8848e268b52
+tree=$(git -C "$repo/third_party/flash-attention" rev-parse 'HEAD^{tree}')
+if [[ "$tree" != "$FLASH_ATTENTION_TREE" ]]; then
+    printf 'third_party/flash-attention tree %s does not match pin %s (commit %s)\n' \
+        "$tree" "$FLASH_ATTENTION_TREE" "$FLASH_ATTENTION_COMMIT" >&2
+    exit 2
+fi
 : "${PIPELINK_CUDA_HOME:?Set PIPELINK_CUDA_HOME in the repository environment}"
 export CUDA_HOME="$PIPELINK_CUDA_HOME"
 export PATH="$CUDA_HOME/bin:$PATH"
@@ -38,7 +50,7 @@ done
 for feature in LOCAL SOFTCAP VARLEN PACKGQA CLUSTER; do
     export "FLASH_ATTENTION_DISABLE_${feature}=FALSE"
 done
-# Remote-only extensions must survive source mirrors, including --out syncs.
+# Build outside the source tree so source syncs (including --out) keep the extension.
 output="$PIPELINK_SCRATCH_ROOT/sm90-baseline/fa3"
 mkdir -p "$output/flash_attn_3"
 cd "$repo/third_party/flash-attention/hopper"

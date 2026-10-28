@@ -1,4 +1,4 @@
-"""Explicit strict-v2/gap-v6 result dispatch for gates and aggregators."""
+"""Read pair and summary validity by schema version (strict-v2 or gap-v6) for gates and aggregators."""
 from __future__ import annotations
 
 from typing import Any, Iterable
@@ -7,7 +7,7 @@ from .constants import SCHEMA_VERSIONS
 
 
 def pair_is_primary_valid(record: dict[str, Any]) -> bool:
-    """Read the primary validity field only after explicit schema dispatch."""
+    """Return the pair's primary validity field for its schema; unknown schemas raise."""
     version = record.get("schema_version")
     if version in {
         SCHEMA_VERSIONS["pair"],
@@ -31,7 +31,7 @@ def pair_is_primary_valid(record: dict[str, Any]) -> bool:
 def chronological_primary_pairs(
     records: Iterable[dict[str, Any]], target: int
 ) -> list[dict[str, Any]]:
-    """Return at most the first target primary-valid records by attempt number."""
+    """Return the first ``target`` primary-valid records in attempt order."""
     if not isinstance(target, int) or isinstance(target, bool) or target <= 0:
         raise ValueError("pair target must be a positive integer")
     ordered = sorted(records, key=lambda record: record.get("attempt", -1))
@@ -44,7 +44,7 @@ def chronological_primary_pairs(
 
 
 def summary_primary_valid_count(record: dict[str, Any]) -> int:
-    """Read the primary valid count only after explicit summary-schema dispatch."""
+    """Return the summary's primary valid-pair count for its schema; unknown schemas raise."""
     version = record.get("schema_version")
     if version in {
         SCHEMA_VERSIONS["summary"],

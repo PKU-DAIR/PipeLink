@@ -39,7 +39,9 @@ _LOCK_SM_MHZ = (
 )
 _ALLOW_UNLOCKED = _ENV["PIPELINK_ALLOW_UNLOCKED"] == "1"
 _LOCKED_CLOCK_WINDOW_FRACTION = 0.005
-_LOCKED_SLOWDOWN_REASON_MASK = 0x4 | 0x8 | 0x40 | 0x80
+# SW power cap (0x4) is excluded: consumer Blackwell asserts it permanently. Real power throttling
+# moves the SM clock out of the lock window, which the clock check catches.
+_LOCKED_SLOWDOWN_REASON_MASK = 0x8 | 0x40 | 0x80
 _LOCKED_QUALIFIER_SCHEMA = "gpulockd-policy-v1"
 _LOCK_ROOT = Path(_ENV["PIPELINK_SCRATCH_ROOT"]) / "parity-gpu-locks"
 
@@ -231,6 +233,8 @@ def _locked_mode(
 ) -> tuple[bool, str]:
     if _ALLOW_UNLOCKED:
         return False, "PIPELINK_ALLOW_UNLOCKED=1 forces unlocked idle discovery"
+    if _LOCK_SM_MHZ is None:
+        return False, "PIPELINK_LOCK_SM_MHZ is unset: clocks are unlocked"
     matched_live = [
         gpu
         for gpu, state in marker_states.items()
@@ -290,12 +294,10 @@ def _locked_ineligible_reasons(
     ):
         reasons.append("sm-clock-not-at-lock")
     reason_mask = row.get("reason_mask")
-    # gpulockd exempts reasons a GPU asserted while idle (and warned at start).
-    exempt_reasons = marker.get("exempt_reasons", 0)
     if (
         not isinstance(reason_mask, int)
         or isinstance(reason_mask, bool)
-        or reason_mask & _LOCKED_SLOWDOWN_REASON_MASK & ~exempt_reasons
+        or reason_mask & _LOCKED_SLOWDOWN_REASON_MASK
     ):
         reasons.append("cap-thermal-or-hw-slowdown-reason-active")
     temperature_c = row.get("temperature_c")
@@ -495,10 +497,9 @@ def discover_idle_gpus(
 ) -> DiscoveryLease:
     """Discover qualified devices while holding exclusive per-GPU leases.
 
-    Live gpulockd policy supplies qualification in locked mode. Unlocked mode
-    requires the caller's existing telemetry qualifier seam; the retired pinned
-    workload is not a default or fallback. A candidate is never selected without
-    a passing qualification result. ``max_devices`` defaults to the configured
+    In locked mode, live gpulockd policy qualifies each candidate; unlocked mode
+    requires an explicit telemetry ``qualifier``. Only candidates that pass
+    qualification are selected. ``max_devices`` defaults to the configured
     concurrency cap, read at call time.
     """
     if max_devices is None:
@@ -528,11 +529,15 @@ def discover_idle_gpus(
         {
             gpu: {
                 "path": str(lock_state_dir / f"gpu{gpu}.json"),
-                "inspection": "skipped-because-PIPELINK_ALLOW_UNLOCKED=1",
+                "inspection": (
+                    "skipped-because-PIPELINK_ALLOW_UNLOCKED=1"
+                    if _ALLOW_UNLOCKED
+                    else "skipped-because-PIPELINK_LOCK_SM_MHZ-unset"
+                ),
             }
             for gpu in _CONFIGURED_GPUS
         }
-        if _ALLOW_UNLOCKED
+        if _ALLOW_UNLOCKED or _LOCK_SM_MHZ is None
         else _lock_marker_states(initial, lock_state_dir)
     )
     use_locked_mode, mode_reason = _locked_mode(marker_states)
@@ -649,6 +654,7 @@ def discover_idle_gpus(
                 "schema_version": "m3-gpu-discovery-initial-v1",
                 "epoch_id": epoch_id,
                 "discovery_mode": discovery_mode,
+                "clock_locked": use_locked_mode,
                 "mode_reason": mode_reason,
                 "lock_marker_state_dir": str(lock_state_dir),
                 "configured_lock_marker_states": [
@@ -775,6 +781,7 @@ def discover_idle_gpus(
             )
         eligibility = {
             "discovery_mode": discovery_mode,
+            "clock_locked": use_locked_mode,
             "mode_reason": mode_reason,
             "configured_physical_gpus": list(_CONFIGURED_GPUS),
             "requested_max_devices": requested_max_devices,
@@ -807,6 +814,7 @@ def discover_idle_gpus(
             "utc_time": utc_now(),
             "epoch_id": epoch_id,
             "discovery_mode": discovery_mode,
+            "clock_locked": use_locked_mode,
             "mode_reason": mode_reason,
             "external_assignment": external_assignment,
             "selection_notes": selection_notes,

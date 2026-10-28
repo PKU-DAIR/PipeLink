@@ -28,7 +28,6 @@ extern "C" __device__ void sm90_signal_producer_work(const void* raw, unsigned) 
 PL_STAGE("org.sm90.signal.producer", "1.0.0");
 PL_PARAMS(Params, arrivals);
 PL_ROLE(producer, sm90_signal_producer_work, 1);
-PL_CLAIM_EX(pl::claim("pipelink_signal_full", "mbarrier").extent(1));
 PL_ENDPOINT(completion, pl::signal_endpoint("completion", pl::produce, "producer")
     .scope(SIGNAL_SCOPE)
     .protocol(pl::mbarrier{

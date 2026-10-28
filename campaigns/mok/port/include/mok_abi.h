@@ -1,14 +1,13 @@
 /* MoK port: framework-published call ABI shared by every owner (C, host and device).
- * No owner template bodies, no geometry of another owner: tile geometry crosses owners
- * only as host facts. */
+ * It holds no owner template bodies; tile geometry crosses owners only as host facts. */
 #ifndef MOK_ABI_H
 #define MOK_ABI_H
 
 #include <stdint.h>
 
 /* Counters workspace lent by the framework to every op call. Op code forms its counter views as
- * base + pipelink_mok_cnt_<channel>() for the counter channels it declares. The guard is the
- * one PL_TYPE's generated prelude uses, so a stub-first one-TU control does not redeclare it.
+ * base + pipelink_mok_cnt_<channel>() for the counter channels it declares. The guard matches
+ * PL_TYPE's generated prelude, so a stub-first one-TU control declares the struct once.
  * Every TU whose callables take `const MokCounters*` registers it with `MOK_COUNTERS_PL_TYPE;`. */
 #ifndef MOKCOUNTERS_DEFINED
 #define MOKCOUNTERS_DEFINED
@@ -16,9 +15,9 @@ typedef struct MokCounters {
   int32_t* base;
 } MokCounters;
 #endif
-#define MOK_COUNTERS_PL_TYPE PL_TYPE(MokCounters, int32_t* base;)
+#define MOK_COUNTERS_PL_TYPE PL_TYPE(MokCounters, base)
 
-/* Conservative power-of-two envelope; upstream family derivation: P2 contract §5.
+/* Conservative power-of-two envelope; derived from the upstream shape families.
  * Capacity is independent of local tokens/top-k: EP4 functional tests use factor 6. */
 #define MOK_ENVELOPE_LOCAL_TOKENS 16384
 #define MOK_ENVELOPE_CAPACITY 524288
@@ -36,7 +35,7 @@ typedef struct MokCounters {
 #define MOK_SLOTS_Y_ROUTED_READY (MOK_ENVELOPE_CAPACITY / MOK_ENVELOPE_MIN_MINIBATCH)
 #define MOK_SLOTS_Y_ROUTED_DONE (MOK_ENVELOPE_CAPACITY / (MOK_ENVELOPE_MIN_TILE / 2))
 
-/* Backward extents and pass capacities: P2 contract §5. */
+/* Backward extents and pass capacities. */
 #define MOK_SLOTS_D_Y_ROUTED_READY MOK_SLOTS_X_ROUTED_READY
 #define MOK_SLOTS_D_HIDDEN_READY MOK_SLOTS_GATE_UP_TILE_READY
 #define MOK_SLOTS_D_GATE_UP_READY MOK_SLOTS_HIDDEN_ROW_BLOCK_READY

@@ -1,4 +1,4 @@
-"""Dependency-free command, packaging, and evidence carrier for stage builds."""
+"""Stdlib-only helpers for stage builds: run and log commands, pack stages, record hashes."""
 from __future__ import annotations
 
 import fcntl
@@ -30,7 +30,7 @@ def write_json(path: Path, value: object) -> None:
 
 
 class CommandRecorder:
-    """Run with explicit owner cwd/environment; retain logs even on command failure."""
+    """Run commands in a fixed cwd and environment, logging each one even when it fails."""
 
     def __init__(self, *, cwd: Path, env: Mapping[str, str], root: Path,
                  timeout: float | None = None, record_path: Path | None = None,
@@ -64,7 +64,7 @@ class CommandRecorder:
 
 
 def dependency_hashes(paths: Iterable[Path], *, cwd: Path, root: Path) -> dict[str, str]:
-    """Hash host Make depfiles' dependencies (one rule, no drive-letter prefixes)."""
+    """Hash every dependency listed in Make depfiles (one rule each, POSIX paths)."""
     dependencies = set()
     for path in paths:
         _, body = path.read_text().replace("\\\n", " ").split(":", 1)
@@ -73,7 +73,7 @@ def dependency_hashes(paths: Iterable[Path], *, cwd: Path, root: Path) -> dict[s
 
 
 def write_hash_index(out: Path, stage_key: str, artifacts: Mapping[str, object]) -> None:
-    """Replace one stage namespace without losing cooperating builders' evidence."""
+    """Replace one stage's entry in HASHES.json under a lock, keeping other stages' entries."""
     out.mkdir(parents=True, exist_ok=True)
     with (out / ".hashes.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -87,7 +87,7 @@ def pack_cu(recorder: CommandRecorder, source: Path, out_plink: Path, *,
             includes: list[Path], defines: dict[str, str], log: Path,
             env: Mapping[str, str], nvcc_flags: Sequence[str] = (),
             profile: str | None = None) -> dict:
-    """Pack one stage; `profile` names a non-default pipec2 target profile."""
+    """Pack one stage with ``pipec2 pack``; ``profile`` selects a non-default target profile."""
     report = Path(f"{out_plink}.report.json")
     recorder.run(["uv", "run", "--project", "pipec", "--locked", "pipec2", "pack",
                   source, "-o", out_plink,

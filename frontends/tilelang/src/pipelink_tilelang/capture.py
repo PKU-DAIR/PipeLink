@@ -1,11 +1,12 @@
 """CPU-only compiler facts from stock TileLang 0.1.14 pass instrumentation.
 
-The JSON contract is the probe's ``passes`` and ``facts`` subtree, unchanged.
-Its C++ compiler runs and source-comparison rows are probe evidence, not facts.
-Set CUDA_HOME before importing TileLang; this module does not configure the process.
+The JSON keeps the original TileLang probe's ``passes`` and ``facts`` schema;
+the probe's C++ compiler runs and source comparisons are not part of it.
+Callers set CUDA_HOME before importing this module.
 """
 from collections.abc import Mapping
 from dataclasses import dataclass
+import itertools
 import json
 import math
 from pathlib import Path
@@ -42,8 +43,8 @@ class Capture:
     passes: list[str]
     facts: dict[str, Any]
     snapshots: dict[str, str]
-    # Retain the original AST objects for downstream projection/map printing;
-    # never reconstruct executable expressions by parsing the JSON strings.
+    # Downstream projection and map printing use these AST objects; the JSON
+    # expression strings are never parsed back into expressions.
     modules: dict[str, Any]
     layout_objects: dict[str, Any]
     kernel_source: str
@@ -108,6 +109,34 @@ def _integer(expr, values, fact):
     raise CaptureError(fact, f"unmeasured integer expression: {type(expr).__name__}: {expr}")
 
 
+def fragment_rows(layout, record, fact):
+    """``(logical coordinate, participant, position)`` for every element copy a fragment holds.
+
+    Evaluates the captured ASTs. A replicated fragment holds each
+    logical coordinate once per replica; TileLang lists its replica variable first.
+    """
+    variables = list(layout.get_forward_vars())
+    indices = layout.get_forward_index()
+    physical = record["physical_shape"]
+    replicas = record["replication"]
+    _require(len(variables) == len(record["logical_shape"]) + (replicas > 1), fact,
+             "forward variables differ from the logical rank")
+    rows = []
+    for replica in range(replicas):
+        for coordinate in itertools.product(*(range(size) for size in record["logical_shape"])):
+            values = dict(zip(variables, (replica, *coordinate) if replicas > 1 else coordinate))
+            participant = _integer(layout.thread, values, fact) + record["thread_min"]
+            position = 0
+            for index, extent in zip(indices, physical):
+                position = position * extent + _integer(index, values, fact)
+            rows.append((coordinate, participant, position))
+    _require(len({row[1:] for row in rows}) == len(rows), fact, "fragment ownership is not one-to-one")
+    _require(all(record["thread_min"] <= thread < record["thread_min"] + record["thread_extent"]
+                 and 0 <= position < math.prod(physical) for _, thread, position in rows),
+             fact, "fragment address exceeds captured bounds")
+    return rows
+
+
 def _layout_capture(mod):
     records, objects = {}, {}
 
@@ -119,10 +148,12 @@ def _layout_capture(mod):
                "forward_vars": [str(x) for x in layout.get_forward_vars()],
                "forward_index": [str(x) for x in layout.get_forward_index()]}
         if isinstance(layout, tilelang.layout.Fragment):
-            _require(layout.thread_range is not None, f"layouts.{name}.thread_min", "fragment has no measured thread range")
-            # thread is role-local. Keep thread_min separate; CTA = thread + min.
-            rec.update(thread=str(layout.thread), thread_min=int(layout.thread_range.min),
-                       thread_extent=int(layout.thread_range.extent),
+            # ``thread`` is role-local; the CTA thread is thread + thread_min.
+            # Layout inference binds the role's thread range. A T.annotate_layout
+            # fragment has none, so its thread expression covers [0, thread_size).
+            bound = layout.thread_range
+            rec.update(thread=str(layout.thread), thread_min=int(bound.min) if bound is not None else 0,
+                       thread_extent=int(bound.extent) if bound is not None else int(layout.get_thread_size()),
                        thread_size=int(layout.get_thread_size()), replication=int(layout.replicate_size))
         records[name] = rec
         objects[name] = layout
@@ -204,7 +235,7 @@ def _snapshot(mod):
                 result["registers"].append([int(x) for x in call.args])
         if not automatic:
             result["barrier_init"].extend([slot, count] for slot, count in sorted(explicit_init.items()))
-        # Bind is the pinned tirx carrier for flattened shared pointers, not LetStmt.
+        # The pinned tirx carries flattened shared pointers in Bind nodes (no LetStmt).
         for node in _nodes(func.body, tir.Stmt):
             if hasattr(node, "var") and hasattr(node, "value"):
                 value = node.value
@@ -322,8 +353,8 @@ def _barrier_schedule(branches, arms, *, explicit_mod=None):
     if explicit_mod is not None:
         return _explicit_barrier_schedule(explicit_mod, branches, arms)
     schedule = []
-    # Preserve the probe's positional schedule labels; Declarations separately
-    # bind semantic role names to the then/else branch selectors.
+    # Schedule labels are positional, as in the original probe; Declarations
+    # bind role names to the then/else branches.
     for role, branch, arm in zip(("producer", "consumer"), branches, arms):
         for loop in _nodes(arm, tir.For):
             arrivals = [call for call in _nodes(loop.body, tir.Call) if _op_name(call) in
@@ -509,12 +540,169 @@ def _validate(facts):
                          for branch in branches), f"layouts.{name}.thread_min", "fragment range differs from branch interval")
 
 
+def _chunk_thread_remap(mod, offsets, *, initial=False):
+    """Translate whole-warp delivery cohorts without changing logical arithmetic.
+
+    Layout inference uses the first chunk. A cyclic permutation of the CTA's
+    thread coordinate then schedules that same lowered work on each chunk's
+    actual owners. Lane numbers, local positions and full-CTA rendezvous are preserved.
+    """
+    def symbol(call):
+        return (call.args[0].value if isinstance(call, tir.Call)
+                and _op_name(call) in ("tirx.call_extern", "tirx.call_pure_extern")
+                and isinstance(call.args[0], tir.StringImm) else None)
+
+    functions = {}
+    for name, function in mod.functions.items():
+        if not isinstance(function, tir.PrimFunc):
+            functions[name] = function
+            continue
+        threads = [(node.loop_var, int(node.extent)) for node in _nodes(function.body, tir.For)
+                   if node.thread_binding is not None and node.thread_binding.thread_tag == "threadIdx.x"]
+        threads += [(node.node.var, int(node.value)) for node in _nodes(function.body, tir.AttrStmt)
+                    if node.attr_key == "thread_extent" and node.node.thread_tag == "threadIdx.x"]
+        _require(len(threads) == 1, "chunk_layouts", "one physical thread axis is required")
+        thread, width = threads[0]
+        rewritten = set()
+
+        def transform(node):
+            if not isinstance(node, tir.For) or node.thread_binding is not None:
+                return None
+            calls = [call for call in _nodes(node.body, tir.Call) if symbol(call) in offsets]
+            if not calls:
+                return None
+            # The nearest enclosing loop of the import is its chunk loop.
+            if any(_nodes(loop.body, tir.Call) and any(symbol(call) in offsets
+                   for call in _nodes(loop.body, tir.Call)) for loop in _nodes(node.body, tir.For)):
+                return None
+            tables = {tuple(int(x) for x in offsets[symbol(call)]) for call in calls}
+            _require(len(tables) == 1, "chunk_layouts", "imports sharing a chunk loop need the same cohort translation")
+            values, = tables
+            _require(isinstance(node.min, tir.IntImm) and int(node.min) == 0
+                     and isinstance(node.extent, tir.IntImm) and int(node.extent) == len(values),
+                     "chunk_layouts", "cohort translation needs a static complete chunk loop")
+            if initial:
+                _require(not any(var.same_as(thread) for var in _nodes(node.body, tir.Var)),
+                         "chunk_layouts", "explicit physical-thread arithmetic cannot be delivery-specialized")
+                return None
+            offset = tir.IntImm("int32", values[-1])
+            for index in range(len(values) - 2, -1, -1):
+                offset = tir.Select(node.loop_var == index, tir.IntImm("int32", values[index]), offset)
+            # Common repeated affine bands avoid a runtime table/branch chain.
+            for period in range(1, len(values)):
+                step = values[period] - values[0]
+                if all(value == values[0] + step * (i // period) for i, value in enumerate(values)):
+                    offset = values[0] + step * tir.truncdiv(node.loop_var, period)
+                    break
+            body = tir.stmt_functor.substitute(node.body, {thread: tir.truncmod(thread - offset + width, width)})
+            rewritten.update(symbol(call) for call in calls)
+            return tir.For(node.loop_var, node.min, node.extent, node.kind, body,
+                           node.thread_binding, node.annotations)
+
+        errors = []
+
+        def checked(node):
+            if not errors:
+                try:
+                    return transform(node)
+                except CaptureError as error:
+                    errors.append(error)
+            return None
+
+        body = tir.stmt_functor.ir_transform(function.body, None, checked, ["tirx.For"])
+        if errors:
+            raise errors[0]
+        if not initial:
+            _require(rewritten == set(offsets), "chunk_layouts", "a delivery chunk loop disappeared during lowering")
+        functions[name] = function.with_body(body)
+    return tvm.IRModule(functions, attrs=mod.attrs)
+
+
+def _converge_shared_barriers(mod):
+    """Keep whole-role shared barriers outside compiler-generated thread guards.
+
+    Split guarded statements at the barrier, retaining both sides' ordering.
+    This is only used for a single whole-CTA import role, never a WS kernel.
+    """
+    def shared_sync(call):
+        return (isinstance(call, tir.Call) and _op_name(call) == "tirx.tvm_storage_sync"
+                and call.args and isinstance(call.args[0], tir.StringImm)
+                and call.args[0].value in ("shared", "shared.dyn"))
+
+    def has_sync(statement):
+        return any(shared_sync(call) for call in _nodes(statement, tir.Call))
+
+    def flatten(statement):
+        if isinstance(statement, tir.SeqStmt):
+            return [child for item in statement.seq for child in flatten(item)]
+        return [statement]
+
+    functions, splits = {}, 0
+    for name, function in mod.functions.items():
+        if not isinstance(function, tir.PrimFunc):
+            functions[name] = function
+            continue
+        threads = [node.node.var for node in _nodes(function.body, tir.AttrStmt)
+                   if node.attr_key == "thread_extent" and node.node.thread_tag == "threadIdx.x"]
+        uniform = [loop.loop_var for loop in _nodes(function.body, tir.For) if loop.thread_binding is None]
+        errors = []
+
+        def split_guard(node):
+            nonlocal splits
+            if not isinstance(node, tir.IfThenElse) or not has_sync(node):
+                return None
+            variables = _nodes(node.condition, tir.Var)
+            if not any(var.same_as(thread) for var in variables for thread in threads):
+                return None
+            _require(node.else_case is None and not _nodes(node.condition, tir.BufferLoad)
+                     and all(any(var.same_as(allowed) for allowed in [*threads, *uniform]) for var in variables),
+                     "barriers.converged", "shared barriers require a static one-sided thread guard")
+            output, pending = [], []
+
+            def flush():
+                if pending:
+                    body = pending[0] if len(pending) == 1 else tir.SeqStmt(pending)
+                    output.append(tir.IfThenElse(node.condition, body, None))
+                    pending.clear()
+
+            for statement in flatten(node.then_case):
+                if isinstance(statement, tir.Evaluate) and shared_sync(statement.value):
+                    flush()
+                    output.append(statement)
+                    splits += 1
+                else:
+                    _require(not has_sync(statement), "barriers.converged",
+                             "cannot converge a shared barrier across nested control flow")
+                    pending.append(statement)
+            flush()
+            return output[0] if len(output) == 1 else tir.SeqStmt(output)
+
+        def checked(node):
+            if not errors:
+                try:
+                    return split_guard(node)
+                except CaptureError as error:
+                    errors.append(error)
+            return None
+
+        body = tir.stmt_functor.ir_transform(function.body, None, checked, ["tirx.IfThenElse"])
+        if errors:
+            raise errors[0]
+        functions[name] = function.with_body(body)
+    return tvm.IRModule(functions, attrs=mod.attrs), splits
+
+
 @tvm.instrument.pass_instrument
 class _PassCapture:
     def __init__(self, windows):
         self.windows = windows
         self.passes, self.mods = [], {}
         self.last_mod = None
+        self.physical_allocations = None
+
+    def run_before_pass(self, mod, info):
+        if str(info.name) == "tl.MergeSharedMemoryAllocations":
+            self.physical_allocations = mod
 
     def run_after_pass(self, mod, info):
         name = str(info.name)
@@ -542,6 +730,10 @@ def capture(program, *, target, pass_configs: Mapping[str, Any],
     _require("pre_codegen" not in windows.values() and len(set(windows.values())) == len(windows), "windows", "duplicate or reserved snapshot name")
     target = tvm.target.Target(target)
     trace = _PassCapture(dict(windows))
+    initial = tvm.IRModule.from_expr(program)
+    chunk_offsets = dict(program.attrs.get("pipelink.chunk_thread_offsets", {}))
+    if chunk_offsets:
+        _chunk_thread_remap(initial, chunk_offsets, initial=True)
     with target, tvm.transform.PassContext(opt_level=3, config=dict(pass_configs), instruments=[trace]):
         if pass_configs.get("tl.disable_warp_specialized") and any(
                 "tl.ws_schedule" in block.annotations for block in _nodes(program.body, tir.SBlock)):
@@ -553,6 +745,19 @@ def capture(program, *, target, pass_configs: Mapping[str, Any],
             scheduled = tilelang.cuda.transform.MaterializeWSSchedule()(scheduled)
             program = next(iter(scheduled.functions.values()))
         artifact = tilelang.lower(program, target=target, enable_host_codegen=False, enable_device_compile=False)
+    if chunk_offsets:
+        trace.last_mod = _chunk_thread_remap(trace.last_mod, chunk_offsets)
+    barrier_splits = 0
+    if program.attrs.get("pipelink.full_cta_import_role", False):
+        trace.last_mod, barrier_splits = _converge_shared_barriers(trace.last_mod)
+    if chunk_offsets or barrier_splits:
+        from tilelang.backend.module import create_backend_context
+        from tilelang.engine.lower import device_codegen_without_compile
+        with target:
+            kernel_source = device_codegen_without_compile(
+                trace.last_mod, create_backend_context(target, None, "auto")).inspect_source()
+    else:
+        kernel_source = artifact.kernel_source
     _require(trace.passes[-3:] == ["tl.LowerIntrin", "tirx.Simplify", "pass_fn"],
              "passes.pre_codegen", f"unexpected final callbacks: {trace.passes[-5:]}")
     # In this pin pass_fn is HoistBroadcastValues, the actual codegen input.
@@ -584,6 +789,12 @@ def capture(program, *, target, pass_configs: Mapping[str, Any],
     except (TypeError, ValueError, AttributeError, IndexError, KeyError) as error:
         raise CaptureError("barrier_schedule", str(error)) from error
     facts = {"captures": captured, "layouts": layouts, "branches": branches, "barrier_schedule": schedule}
+    if barrier_splits:
+        facts["full_cta_barriers"] = {"thread_guard_splits": barrier_splits}
+    if chunk_offsets:
+        facts["chunk_layouts"] = {str(name): {"thread_offsets": [int(x) for x in values]}
+                                  for name, values in chunk_offsets.items()}
     _validate(facts)
     return Capture(trace.passes, facts, {name: mod.script() for name, mod in trace.mods.items()},
-                   trace.mods, objects, artifact.kernel_source)
+                   {**trace.mods, "initial": initial, "physical_allocations": trace.physical_allocations},
+                   objects, kernel_source)

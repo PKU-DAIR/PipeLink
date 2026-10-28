@@ -367,7 +367,6 @@ extern "C" __device__ void mok_framework_worker(const void* opaque, unsigned) {
     }
 }
 PL_STAGE("mok.interp.bwd", "1.0.0");
-PL_NO_PARAMS();
 PL_ROLE(worker, mok_framework_worker, 8);
 PL_TOPOLOGY(pl::topology{2, pl::cluster{{2,1,1}, pl::launch{2,{2,1,1}}}, true, "clc"});
 PL_CLAIM_EX(pl::claim("pipelink_mok_worker_warps", "warp").extent(8).align(4).at(0).roles({"worker"}));
@@ -395,7 +394,6 @@ PL_CALL(act_init, pipelink_call_act_init, pl::produce, "worker", "mok_act_init")
 PL_CALL(act_bwd, pipelink_call_act_bwd, pl::produce, "worker", "mok_act_bwd");
 PL_HOST_GROUP("mok.framework", "mok.framework.params", "mok_framework", plk_header_v2, PLK_ABI_TYPE_ID(plk_header_v2), false);
 PL_HOST_DOMAIN(1, "ep");
-PL_HOST_ABI_EMPTY(100, MokFrameworkResidue);
 PL_HOST_ABI_TYPE(101, plk_role_view_mok_interp_bwd_worker, residue, scalars);
 PL_HOST_RESIDUE(2, "mok.framework.residue", MokFrameworkResidue, 100, true, pl::host::roles({"mok.interp.bwd:worker"}));
 PL_HOST_SCALARS(1, pl::host::scalars(pl::host::roles({"mok.interp.bwd:worker"}))
@@ -439,4 +437,3 @@ PL_HOST_FACT(pl::host::fact("mok.framework.EXPERT_PADDING").i32(256).owner("mok.
 PL_HOST_SCHEDULER(pl::host::scheduler("mok.framework", "mok.framework.clc-grid.v1",
     pl::host::schema().required("pass", pl::host::leaf::static_("i64")))
     .input("pass", pl::host::binding_ref("pipelink_mok_pass")));
-PL_HOST_TARGET();

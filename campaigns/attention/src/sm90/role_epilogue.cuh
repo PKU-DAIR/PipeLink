@@ -50,8 +50,8 @@ CUTLASS_DEVICE void store_empty_output(
   int const last_row = min(first_row + Config::kBlockM, work.seqlen_q);
   Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O,
                           params.stride_O)(_, _, work.kv_head, work.batch, _0{});
-  // FA3's 128-bit zero stores, repartitioned over one warp rather than the
-  // two MMA WGs. TMA-compatible dense rows and head offsets are 16B aligned.
+  // FA3's 128-bit zero stores, repartitioned over one warp instead of the two
+  // MMA WGs. TMA-compatible dense rows and head offsets are 16B aligned.
   int const column = (lane % 16) * 8;
   for (int row = first_row + lane / 16; row < last_row; row += 2) {
     *reinterpret_cast<uint4*>(&mO(row, column)) = make_uint4(0, 0, 0, 0);
@@ -91,8 +91,8 @@ CUTLASS_DEVICE void run_epilogue(
     }
     if (work.flags & WorkFlags::empty_output) {
       store_empty_output<Config>(params, work);
-      // No corrected_o/final_stats payload exists for an empty tile, and no
-      // V/O alias use occurred: do not change their states or o_drained.
+      // An empty tile has no corrected_o/final_stats payload and never used
+      // the V/O alias, so their states and o_drained stay as they are.
       c.work_epilogue.consumer_release(work_read);
       work_read.advance();
       continue;
@@ -134,9 +134,9 @@ CUTLASS_DEVICE void run_epilogue(
     c.final_stats.consumer_release(stats_read);  // every lane finished its rows
 
     if (elected) {
-      // Completion, not merely issue, permits both the next O write and the
-      // next tile's V load to reuse the aliased bytes. Exactly one arrival on
-      // each barrier; the other 31 lanes must not release corrected_o.
+      // Only store completion (issue is not enough) lets the next O write and
+      // the next tile's V load reuse the aliased bytes. Exactly one lane
+      // arrives on each barrier; the other 31 must not release corrected_o.
       tma_store_wait<0>();
       c.corrected_o.consumer_release(output_read);
       c.o_drained.arrive();

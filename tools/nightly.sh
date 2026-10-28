@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Owner-run acceptance on the owner's machines; needs one Hopper/sm90 or Blackwell/sm103 GPU.
-# This is not a self-hosted CI runner promise. Usage: bash tools/nightly.sh GPU_INDEX
-# Requires CUDA 13.3, Compute Sanitizer, CUTLASS, and the T4 pinned TileLang backend:
-# set PIPELINK_TILELANG_PYTHON and TILELANG_INCLUDE_DIR as documented in T4.
-# Without the backend, T4 hand-cell acceptance fails; optional TileLang cells skip.
+# Run the GPU tutorial tests on one Hopper/sm90 or Blackwell/sm103 GPU. The maintainer runs
+# this by hand; there is no CI runner. Usage: bash tools/nightly.sh GPU_INDEX
+# Requires CUDA 13.3, Compute Sanitizer, the CUTLASS and mixture-of-kittens submodules and the
+# TileLang backend pinned in T4: set PIPELINK_TILELANG_PYTHON and TILELANG_INCLUDE_DIR as T4
+# describes. Without the backend, the T4/T6 CODA test fails with a prerequisite message.
 set -euo pipefail
 
 if [[ $# -ne 1 || ! $1 =~ ^[0-9]+$ ]]; then

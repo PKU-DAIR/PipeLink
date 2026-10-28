@@ -1,8 +1,8 @@
-"""Isolated pinned TileLang recipe codegen; stdin request, stdout JSON result.
+"""Recipe codegen with the pinned TileLang: reads a JSON request on stdin, writes JSON on stdout.
 
-Not imported by pipec2. No CUDA compilation or execution takes place here.
-T.copy selects the natural packet intrinsic in an isolated compiler envelope;
-only that exact primitive is projected, never an owning kernel's source body.
+pipec2 runs this module as a subprocess; it neither compiles nor executes CUDA.
+A minimal T.copy kernel selects the natural packet intrinsic, and only that
+primitive is projected into the result; no owning kernel's source is copied.
 Scalar T.copy steps are already expression-addressed and cannot select a relay.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ def _bind_coordinates(value, coordinates):
 
 def _require_native_receipt(args):
     # tl.tcgen05_ld(dps, repetitions, pack16, source, column_offset,
-    #               pattern_bits, destination): N is NOT the pattern bitwidth.
+    #               pattern_bits, destination); N differs from pattern_bits.
     geometry = [int(args[index]) for index in (0, 1, 2, 5)] if len(args) == 7 else None
     if geometry != [32, 16, 0, 32]:
         raise RuntimeError(f"natural T.copy changed native receipt geometry: {geometry}")
@@ -62,7 +62,7 @@ def emit(request):
     def native_receipt_template():
         physical = T.Layout((128, 16), lambda m, n: (m, n))
         natural = T.Fragment((128, 16), forward_thread_fn=lambda m, n: m, forward_index_fn=lambda m, n: n)
-        # This isolated template always projects the admitted 32-bit receipt.
+        # The template always projects the supported 32-bit receipt.
         receipt_dtype = request["receipt_dtype"]
 
         @T.prim_func
@@ -254,8 +254,8 @@ def emit(request):
                                   "dst": {"resource": operands["dst"], "index": operands.get("offset", 0) + slot}}
                         body.append(project_copy({"operands": scalar, "metadata": metadata}))
                 elif primitive in {"smem_store_round", "smem_load_round"}:
-                    # The model expands each round into these independently
-                    # interleavable scalar slots; no atomic batch is invented.
+                    # The model expands each round into independently
+                    # interleavable scalar slots; emit them as separate copies.
                     for slot in range(operands["width"]):
                         private = {"resource": operands["src"] if primitive == "smem_store_round" else operands["dst"],
                                    "index": operands.get("offset", 0) + slot}
@@ -277,8 +277,8 @@ def emit(request):
                     else:
                         body.append(sync)
                 elif primitive == "tmem_packet_receipt":
-                    # pipec preserves relocation in column units and checks this
-                    # address against the certified finite packet worlds.
+                    # pipec relocates this address in column units and checks it
+                    # under every enumerated binding world.
                     address = tir.Cast("uint32", expression(operands["address"], metadata))
                     dest = buffers[operands["dest"]]
                     offset = expression(operands.get("offset", 0), metadata)

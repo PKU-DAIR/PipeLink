@@ -4,7 +4,7 @@
 #include <pipelink_host_abi_v2.h>
 #include "gemm.h"
 
-/* These are the consumer's types, not the withheld GEMM owner's params. */
+/* The consumer's own params types; the GEMM owner's params stay withheld. */
 typedef struct ScaledStoreResidue {
   float* output;
   int32_t M;

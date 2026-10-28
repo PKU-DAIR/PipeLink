@@ -202,6 +202,20 @@ def test_overlap_witness_fences_before_its_outer_barrier(monkeypatch, target, na
 
 
 @pytest.mark.parametrize("target", PROFILES)
+def test_staged_relay_on_a_named_barrier_lowers(monkeypatch, target):
+    # The pinned backend realizes a nonzero barrier as tl::__sync_thread_partial(id, count).
+    sync = STAGED_BODIES[target].replace("__syncthreads();", "tl::__sync_thread_partial(1, 32);")
+    _backend(monkeypatch, _kernel(sync, ENTRY_PARAMETERS[target]))
+    planned, imp, solved, profile = _native_plan(staged=True, target=target)
+    imp = replace(imp, lends=tuple(
+        replace(lend, binding="relocatable", location=ResourceLocation("pipelink_outer", None))
+        if lend.name == "barrier" else lend for lend in imp.lends))
+    solved = replace(solved, native_bases={**solved.native_bases, "pipelink_outer": 1})
+    adapter = lower.emit_adapter(planned, imp, solved, profile)
+    assert adapter.source.count("tl::__sync_thread_partial(1, 32)") == 2
+
+
+@pytest.mark.parametrize("target", PROFILES)
 def test_staged_round_borrows_the_same_reservation_without_new_sync(monkeypatch, target):
     body = STAGED_BODIES[target].replace(
         "  pl_scratch_2[(int)threadIdx.x] = fragment32[0];",

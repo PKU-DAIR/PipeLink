@@ -1,4 +1,5 @@
 #include "mk_host_abi.h"
+#include "../../../evaluator/harness/parity/paired_reload.h"
 
 #include <cuda.h>
 #include <dlfcn.h>
@@ -179,10 +180,10 @@ void usage(const char* argv0) {
       "--cluster X,Y,Z --params-bytes N --params-align N "
       "--residue-offset N --residue-bytes N --owner-id N "
       "--dtypes-digest HEX --owner-contract HEX --provider PATH.so --bundle DIR --out DIR "
-      "--mode check|bench --opcode-map 0:0,...,7:7 "
+      "--mode check|bench|pair|pair-check --opcode-map 0:0,...,7:7 "
       "[--ntok N] [--pos-id-first N] [--sync-each 0|1] "
       "[--bench-seconds S --bench-discard S --bench-batch-tokens N "
-      "--pos-id P]\n",
+      "--pos-id P] [--reference <complete reference option pairs>]\n",
       argv0);
 }
 
@@ -313,8 +314,9 @@ Options parse_options(int argc, char** argv) {
     options.bench_pos_id = parse_u32(values.at("--pos-id"), "--pos-id");
   }
 
-  if (options.mode != "check" && options.mode != "bench") {
-    fail("--mode must be check or bench");
+  if (options.mode != "check" && options.mode != "bench" &&
+      options.mode != "pair" && options.mode != "pair-check") {
+    fail("--mode must be check, bench, pair, or pair-check");
   }
   if (options.threads == 0 || options.params_bytes == 0 || options.owner_id == 0) {
     fail("--threads, --params-bytes, and --owner-id must be positive");
@@ -339,7 +341,7 @@ Options parse_options(int argc, char** argv) {
     if (options.ntok_set && options.ntok == 0) {
       fail("--ntok must be positive");
     }
-  } else {
+  } else if (options.mode == "bench") {
     if (!options.bench_seconds_set || !options.bench_discard_set ||
         !options.bench_batch_tokens_set || !options.bench_pos_id_set) {
       fail("bench mode requires --bench-seconds, --bench-discard, "
@@ -348,6 +350,12 @@ Options parse_options(int argc, char** argv) {
     if (options.bench_seconds <= 0.0 || options.bench_discard < 0.0 ||
         options.bench_batch_tokens == 0) {
       fail("bench seconds and batch tokens must be positive; discard must be nonnegative");
+    }
+  } else {
+    if (!options.bench_pos_id_set || options.sync_each ||
+        options.bench_seconds_set || options.bench_discard_set ||
+        options.bench_batch_tokens_set || options.ntok_set || options.pos_id_first_set) {
+      fail("paired modes require --pos-id and queued copies; no legacy count/time overrides");
     }
   }
   return options;
@@ -566,6 +574,11 @@ class Module {
     }
   }
   CUfunction function() const { return function_; }
+  void unload() {
+    cuda_check(cuModuleUnload(module_), "cuModuleUnload(reload)");
+    module_ = nullptr;
+    function_ = nullptr;
+  }
   Module(const Module&) = delete;
   Module& operator=(const Module&) = delete;
 
@@ -635,20 +648,22 @@ class DeviceBuffer {
   size_t bytes_ = 0;
 };
 
-class PinnedRow {
+class PinnedEmbeddings {
  public:
-  explicit PinnedRow(size_t bytes) : bytes_(bytes) {
-    cuda_check(cuMemAllocHost(&pointer_, bytes), "cuMemAllocHost(embedding row)");
+  explicit PinnedEmbeddings(const std::vector<unsigned char>& embeddings)
+      : bytes_(embeddings.size()) {
+    cuda_check(cuMemAllocHost(&pointer_, bytes_), "cuMemAllocHost(embedding rows)");
+    std::memcpy(pointer_, embeddings.data(), bytes_);
   }
-  ~PinnedRow() {
-    if (pointer_ != nullptr) {
-      cuMemFreeHost(pointer_);
-    }
+  ~PinnedEmbeddings() {
+    if (pointer_ != nullptr) cuMemFreeHost(pointer_);
   }
-  void* get() const { return pointer_; }
-  size_t size() const { return bytes_; }
-  PinnedRow(const PinnedRow&) = delete;
-  PinnedRow& operator=(const PinnedRow&) = delete;
+  const unsigned char* row(size_t index, size_t row_bytes) const {
+    if (index >= bytes_ / row_bytes) fail("embedding row out of range");
+    return static_cast<const unsigned char*>(pointer_) + index * row_bytes;
+  }
+  PinnedEmbeddings(const PinnedEmbeddings&) = delete;
+  PinnedEmbeddings& operator=(const PinnedEmbeddings&) = delete;
 
  private:
   void* pointer_ = nullptr;
@@ -1029,17 +1044,11 @@ void launch_kernel(CUfunction function, const plk_geometry_v2& geometry, CUstrea
              "cuLaunchKernelEx");
 }
 
-void stage_embedding(const std::vector<unsigned char>& embeddings,
-                     size_t embedding_rows, size_t row,
-                     PinnedRow* pinned_row, const DeviceBuffer& hidden_states,
-                     CUstream stream) {
-  if (row >= embedding_rows) {
-    fail("embedding row out of range");
-  }
-  std::memcpy(pinned_row->get(), embeddings.data() + row * pinned_row->size(),
-              pinned_row->size());
-  cuda_check(cuMemcpyHtoDAsync(hidden_states.get(), pinned_row->get(),
-                               pinned_row->size(), stream),
+void stage_embedding(const PinnedEmbeddings& embeddings, size_t row,
+                     const DeviceBuffer& hidden_states, CUstream stream) {
+  cuda_check(cuMemcpyHtoDAsync(hidden_states.get(),
+                              embeddings.row(row, hidden_states.size()),
+                              hidden_states.size(), stream),
              "cuMemcpyHtoDAsync(hidden_states <- embeddings[t])");
 }
 
@@ -1143,11 +1152,90 @@ struct BenchBatch {
   uint32_t tokens;
 };
 
+// The compare.py check predicate: all nine tensors finite, layer-zero KV strict
+// at rtol=.02, atol=.02*RMS(reference). Snapshot files use compare.py's
+// tok0_<name>.bin layout.
+void check_snapshot(const Manifest& manifest, const fs::path& out) {
+  for (const char* name : {"hidden_states", "logits", "q_post_rope", "attn_out",
+                           "silu_out", "k_row", "v_row", "attn_out_p0", "attn_lse_p0"}) {
+    const auto& expected = tensor_spec(manifest, std::string("ref_tok0_") + name);
+    auto observed = expected;
+    observed.path = out / (std::string("tok0_") + name + ".bin");
+    const auto left = read_bytes(observed);
+    const auto right = read_bytes(expected);
+    const size_t width = dtype_bytes(expected.dtype);
+    auto value = [&](const std::vector<unsigned char>& bytes, size_t index) {
+      float result;
+      if (expected.dtype == "bf16") {
+        uint16_t word;
+        std::memcpy(&word, bytes.data() + index * width, sizeof(word));
+        const uint32_t bits = static_cast<uint32_t>(word) << 16;
+        std::memcpy(&result, &bits, sizeof(result));
+      } else if (expected.dtype == "f32") {
+        std::memcpy(&result, bytes.data() + index * width, sizeof(result));
+      } else {
+        fail("unsupported snapshot dtype: " + expected.dtype);
+      }
+      return static_cast<double>(result);
+    };
+    for (size_t i = 0; i < expected.bytes / width; ++i) {
+      if (!std::isfinite(value(left, i)) || !std::isfinite(value(right, i)))
+        fail(std::string("nonfinite snapshot: ") + name);
+    }
+    if (std::strcmp(name, "k_row") == 0 || std::strcmp(name, "v_row") == 0) {
+      if (expected.dims.size() != 3 || expected.dims[1] != 8 || expected.dims[2] != 64)
+        fail("invalid KV reference shape");
+      const size_t elements = expected.dims[1] * expected.dims[2];
+      double squares = 0;
+      for (size_t i = 0; i < elements; ++i) {
+        const double ref = value(right, i);
+        squares += ref * ref;
+      }
+      const double atol = 0.02 * std::sqrt(squares / elements);
+      for (size_t i = 0; i < elements; ++i) {
+        if (std::abs(value(left, i) - value(right, i)) >
+            atol + 0.02 * std::abs(value(right, i)))
+          fail(std::string("strict layer-zero KV snapshot failed: ") + name);
+      }
+    }
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
-    const Options options = parse_options(argc, argv);
+    int reference_index = argc;
+    for (int i = 1; i < argc; ++i) {
+      if (std::strcmp(argv[i], "--reference") == 0) {
+        reference_index = i;
+        break;
+      }
+    }
+    const Options options = parse_options(reference_index, argv);
+    const bool paired = options.mode == "pair" || options.mode == "pair-check";
+    if (paired != (reference_index < argc))
+      fail("paired modes require --reference with complete reference options");
+    const Options reference = paired
+        ? parse_options(argc - reference_index, argv + reference_index) : options;
+    if (paired && (reference.mode != options.mode ||
+        reference.bundle != options.bundle || reference.out != options.out ||
+        reference.provider != options.provider ||
+        reference.bench_pos_id != options.bench_pos_id ||
+        reference.opcode_map != options.opcode_map ||
+        reference.threads != options.threads ||
+        reference.cluster.x != options.cluster.x ||
+        reference.cluster.y != options.cluster.y ||
+        reference.cluster.z != options.cluster.z ||
+        reference.dynamic_smem != options.dynamic_smem ||
+        reference.owner_id != options.owner_id ||
+        reference.params_bytes != options.params_bytes ||
+        reference.params_align != options.params_align ||
+        reference.residue_bytes != options.residue_bytes ||
+        reference.residue_offset != options.residue_offset ||
+        std::memcmp(&reference.dtypes_digest, &options.dtypes_digest, sizeof(plk_digest_v2)) ||
+        std::memcmp(&reference.owner_contract, &options.owner_contract, sizeof(plk_digest_v2))))
+      fail("paired images must share fixture, opcode binding and provider ABI/geometry");
     const Manifest manifest = read_manifest(options.bundle);
     const Scalars scalars = read_scalars(options.bundle);
 
@@ -1250,22 +1338,32 @@ int main(int argc, char** argv) {
     }
 
     Context context(device);
-    Module module(options.cubin, options.kernel);
-    cuda_check(cuFuncSetAttribute(
-                   module.function(),
-                   CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                   static_cast<int>(options.dynamic_smem)),
-               "cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES)");
+    auto load_module = [](const Options& arm) {
+      auto module = std::make_unique<Module>(arm.cubin, arm.kernel);
+      cuda_check(cuFuncSetAttribute(module->function(),
+                     CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                     static_cast<int>(arm.dynamic_smem)),
+                 "cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES)");
+      return module;
+    };
+    auto module = load_module(options);
+    auto reference_module = paired ? load_module(reference) : nullptr;
     SharedLibrary provider_library(options.provider);
     verify_provider_abi(provider_library, options);
-    plk_common_v2 common{};
-    common.header = {PLK_HOST_ABI_V2, sizeof(common)};
-    common.owner_id = options.owner_id;
-    common.block = {options.threads, 1, 1};
-    common.cluster = options.cluster;
-    common.dynamic_smem_bytes = options.dynamic_smem;
-    common.profile.dtypes = options.dtypes_digest;
-    common.owner_contract = options.owner_contract;
+    if (paired) verify_provider_abi(provider_library, reference);
+    auto make_common = [](const Options& arm) {
+      plk_common_v2 result{};
+      result.header = {PLK_HOST_ABI_V2, sizeof(result)};
+      result.owner_id = arm.owner_id;
+      result.block = {arm.threads, 1, 1};
+      result.cluster = arm.cluster;
+      result.dynamic_smem_bytes = arm.dynamic_smem;
+      result.profile.dtypes = arm.dtypes_digest;
+      result.owner_contract = arm.owner_contract;
+      return result;
+    };
+    const auto common = make_common(options);
+    const auto reference_common = make_common(reference);
     Stream stream;
     Event start_event;
     Event stop_event;
@@ -1305,9 +1403,11 @@ int main(int argc, char** argv) {
     zero_buffer(buffers.silu_out, "silu_out");
     zero_buffer(buffers.logits, "logits");
 
-    const std::vector<unsigned char> embeddings = read_bytes(embedding_spec);
-    PinnedRow embedding_row(2048u * sizeof(uint16_t));
+    const PinnedEmbeddings embeddings(read_bytes(embedding_spec));
     AlignedParams params(options.params_bytes, options.params_align);
+    std::unique_ptr<AlignedParams> reference_params;
+    if (paired)
+      reference_params = std::make_unique<AlignedParams>(reference.params_bytes, reference.params_align);
     MkProviderArgs provider_args = make_provider_args(
         buffers, num_sms, num_instructions, max_seq_len, rope_rows, num_layers,
         bar_rows, vocab_size, attn_scale, rms_norm_eps,
@@ -1324,9 +1424,103 @@ int main(int argc, char** argv) {
       cuda_check(cuMemsetD32Async(buffers.bar.get(), 0,
                                   buffers.bar.size() / sizeof(uint32_t), stream),
                  "cuMemsetD32Async(Bar)");
-      stage_embedding(embeddings, scalar_ntok, embedding_index, &embedding_row,
-                      buffers.hidden_states, stream);
+      stage_embedding(embeddings, embedding_index, buffers.hidden_states, stream);
     };
+
+    if (paired) {
+      if (options.bench_pos_id != scalar_pos_id_first)
+        fail("paired numerical reference requires bundle pos_id_first");
+      // Both images share one RuntimeBuffers allocation: every decode
+      // overwrites its fixed KV row and intermediates before reading them.
+      // Each image keeps its own opaque parameter aggregate and bindings.
+      provider_args.pos_id = options.bench_pos_id;
+      ProviderSession candidate_session(provider_library, stream);
+      ProviderSession reference_session(provider_library, stream);
+      candidate_session.open(common, provider_args, options, device_sms, params);
+      reference_session.open(reference_common, provider_args, reference,
+                             device_sms, *reference_params);
+      auto time_batch = [&](bool candidate, int repetitions) -> double {
+        auto& arm_params = candidate ? params : *reference_params;
+        const auto& session = candidate ? candidate_session : reference_session;
+        cuda_check(cuEventRecord(start_event, stream), "cuEventRecord(pair start)");
+        for (int token = 0; token < repetitions; ++token) {
+          prepare_token(static_cast<size_t>(token) % scalar_ntok);
+          launch_kernel((candidate ? module : reference_module)->function(),
+                        session.geometry(), stream, &arm_params);
+        }
+        cuda_check(cuEventRecord(stop_event, stream), "cuEventRecord(pair stop)");
+        wait_with_watchdog(stop_event, "paired batch");
+        cuda_check(cuStreamSynchronize(stream), "cuStreamSynchronize(pair)");
+        float elapsed = 0;
+        cuda_check(cuEventElapsedTime(&elapsed, start_event, stop_event),
+                   "cuEventElapsedTime(pair)");
+        return elapsed;
+      };
+      auto snapshots = [&](const char* phase) {
+        for (bool candidate : {true, false}) {
+          time_batch(candidate, 1);
+          const fs::path out = options.out / phase / (candidate ? "candidate" : "reference");
+          fs::create_directories(out);
+          dump_outputs(out, 0, options.bench_pos_id, buffers, num_layers,
+                       max_seq_len, num_sms, vocab_size);
+          check_snapshot(manifest, out);
+        }
+      };
+      uint64_t reload_start = 0, reload_end = 0;
+      auto reload = [&] {
+        snapshots("before_reload");
+        cuda_check(cuStreamSynchronize(stream), "cuStreamSynchronize(reload)");
+        reload_start = epoch_ns();
+        module->unload();
+        reference_module->unload();
+        module.reset();
+        reference_module.reset();
+        reference_module = load_module(reference);
+        module = load_module(options);
+        reload_end = epoch_ns();
+        snapshots("after_reload");
+      };
+      snapshots("initial");
+      pipelink::parity::PairResult result;
+      if (options.mode == "pair") {
+        result = pipelink::parity::time_pair(time_batch, reload);
+      } else {
+        // Bounded sanitizer probe: two queued HtoDs per arm on each side,
+        // exercising immutable pinned-row lifetime without 320 timed calls.
+        time_batch(true, 2);
+        time_batch(false, 2);
+        reload();
+        time_batch(true, 2);
+        time_batch(false, 2);
+      }
+      snapshots("final");
+      cuda_check(cuStreamSynchronize(stream), "cuStreamSynchronize(pair release)");
+      candidate_session.release_after_sync();
+      reference_session.release_after_sync();
+      std::cout << "{\"protocol\":\"paired-reload-v2\",\"mode\":"
+                << std::quoted(options.mode) << ",\"pair\":";
+      if (options.mode == "pair") pipelink::parity::write_json(std::cout, result);
+      else std::cout << "null";
+      std::cout << ",\"numerical\":{\"status\":\"PASS\","
+                   "\"predicate\":\"finite-nine+strict-layer0-kv\","
+                   "\"snapshot_phases\":[\"initial\",\"before_reload\",\"after_reload\",\"final\"],"
+                   "\"root\":" << std::quoted(options.out.string()) << "},"
+                   "\"provenance\":{\"candidate_image\":" << std::quoted(options.cubin.string())
+                << ",\"reference_image\":" << std::quoted(reference.cubin.string())
+                << ",\"bundle\":" << std::quoted(options.bundle.string())
+                << ",\"visible_device\":0,\"shared_runtime_buffers\":true,"
+                   "\"initial_load_order\":[\"candidate\",\"reference\"],"
+                   "\"reload_load_order\":[\"reference\",\"candidate\"],"
+                   "\"reload_count\":1,\"reload_interval_ns\":["
+                << reload_start << ',' << reload_end
+                << "],\"pos_id\":" << options.bench_pos_id
+                << ",\"embedding_rows\":" << scalar_ntok
+                << ",\"queued_probe_repetitions\":" << (options.mode == "pair-check" ? 2 : 0)
+                << ",\"provider_sessions_per_arm\":1,"
+                   "\"provider_sessions_persist_through_reload\":true"
+                << "}}\n";
+      return 0;
+    }
 
     if (options.mode == "check") {
       std::vector<TokenTiming> timings;
@@ -1338,7 +1532,7 @@ int main(int argc, char** argv) {
         ProviderSession session(provider_library, stream);
         session.open(common, provider_args, options, device_sms, params);
         cuda_check(cuEventRecord(start_event, stream), "cuEventRecord(start)");
-        launch_kernel(module.function(), session.geometry(), stream, &params);
+        launch_kernel(module->function(), session.geometry(), stream, &params);
         cuda_check(cuEventRecord(stop_event, stream), "cuEventRecord(stop)");
         wait_with_watchdog(stop_event, "decode token");
         cuda_check(cuStreamSynchronize(stream), "cuStreamSynchronize(token)");
@@ -1365,7 +1559,7 @@ int main(int argc, char** argv) {
       for (uint32_t token = 0; token < options.bench_batch_tokens; ++token) {
         const size_t embedding_index = token % static_cast<size_t>(scalar_ntok);
         prepare_token(embedding_index);
-        launch_kernel(module.function(), session.geometry(), stream, &params);
+        launch_kernel(module->function(), session.geometry(), stream, &params);
         if (options.sync_each) {
           cuda_check(cuEventRecord(stop_event, stream),
                      "cuEventRecord(token stop)");

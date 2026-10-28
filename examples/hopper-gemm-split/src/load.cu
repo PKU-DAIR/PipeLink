@@ -32,9 +32,7 @@ extern "C" __device__ void gemm_load_role(const void* raw_params, unsigned) {
 }
 
 PL_STAGE("gemm.load", "1.0.0");
-#if defined(GEMM_HOST_ABI) && GEMM_HOST_ABI
-PL_NO_PARAMS();
-#else
+#if !(defined(GEMM_HOST_ABI) && GEMM_HOST_ABI)
 PL_PARAMS(GemmLoadParams, a, b, K);
 #endif
 PL_ROLE(load, gemm_load_role, 1);

@@ -22,7 +22,9 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
-EVIDENCE = Path(os.environ.get("MOK_EVIDENCE_DIR", REPO / "campaigns/mok/evidence"))
+# Fresh receipts go to scratch; the committed campaigns/mok/evidence/ tree holds the reference run.
+EVIDENCE = Path(os.environ.get("MOK_EVIDENCE_DIR")
+                or Path(os.environ.get("PIPELINK_SCRATCH_ROOT", REPO / "out")) / "mok/evidence")
 
 
 def parser():
@@ -39,15 +41,16 @@ def parser():
     p.add_argument("--dry-run", action="store_true", help="validate link resource metadata without importing CUDA/torch")
     p.add_argument("--upstream-only", action="store_true")
     p.add_argument("--steps", type=int, default=3)
-    p.add_argument("--repetitions", type=int, default=20)
+    p.add_argument("--repetitions", type=int, default=10)
     p.add_argument("--tokens", type=int, nargs="+", choices=(2048, 8192), default=(2048, 8192))
     p.add_argument("--timing-config", choices=("upstream", "harness"), default="upstream",
-                   help="matched config: upstream precision defaults or legacy harness 36/28")
+                   help="matched config: upstream precision defaults or the harness's 36/28")
     p.add_argument("--timing-sections", action="store_true", help="diagnostic nested events around launch regions")
-    p.add_argument("--lock-mhz", type=int)
+    p.add_argument("--lock-mhz", type=int,
+                   help="time only: SM lock (default PIPELINK_LOCK_SM_MHZ; 0 or unset runs unlocked)")
     p.add_argument("--tool", choices=("memcheck", "racecheck", "synccheck"), nargs="+", default=("memcheck", "racecheck", "synccheck"))
     p.add_argument("--timeout", type=int, default=7200)
-    p.add_argument("--tag", default="p2", help="evidence filename prefix, not a path")
+    p.add_argument("--tag", default="mok", help="receipt filename prefix under MOK_EVIDENCE_DIR, not a path")
     p.add_argument("--sanitizer-rank", choices=("memcheck", "racecheck", "synccheck"), help=argparse.SUPPRESS)
     return p
 
@@ -213,7 +216,7 @@ def launch(args):
     env = dict(os.environ, CUDA_VISIBLE_DEVICES=os.environ["PIPELINK_GPUS"])
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     report = {"mode": args.mode, "world": args.world, "status": "FAIL", "runs": [],
-              "lock_mhz": args.lock_mhz, "clock_locked": False}
+              "lock_mhz": args.lock_mhz or None, "clock_locked": False}
     # Workers inherit the same host-project Python interpreter as this launcher.
     base = [sys.executable, "-m", "torch.distributed.run", "--standalone", f"--nproc-per-node={args.world}",
             str(Path(__file__).resolve()), *sys.argv[1:]]
@@ -338,33 +341,34 @@ def main():
         raise ValueError("--steps must be >=3 and --repetitions must be positive")
     if args.upstream_only and args.mode != "check":
         raise ValueError("--upstream-only is available only for check")
-    if args.lock_mhz and args.mode != "time":
+    if args.lock_mhz is not None and args.mode != "time":
         raise ValueError("--lock-mhz is available only for time")
     if args.dry_run:
         return dry_run(args)
-    if args.mode=="time":
-        args.lock_mhz = args.lock_mhz or int(os.environ["PIPELINK_LOCK_SM_MHZ"])
+    if args.mode=="time" and args.lock_mhz is None:
+        # Unset, empty or 0 means unlocked clocks: no gpulockd calls, clock_locked=false.
+        args.lock_mhz = int(os.environ.get("PIPELINK_LOCK_SM_MHZ", "").strip() or 0)
     configure_environment(args)
     if "RANK" in os.environ:
         if args.lock_mhz and not os.environ.get("MOK_CLOCK_PARENT"):
             raise ValueError("--lock-mhz requires launching run.py directly, not through an external torchrun")
         if args.sanitizer_rank and not os.environ.get("MOK_UNDER_SANITIZER"):
             tool = Path(os.environ["PIPELINK_CUDA_HOME"]) / "bin/compute-sanitizer"
-            # One instrumented Python worker per torchrun rank, never a sanitizer
-            # around torchrun. Findings stay in evidence, not --error-exitcode:
-            # otherwise torchrun kills other ranks before their reports flush.
+            # The sanitizer wraps each rank's Python worker. Findings go to
+            # evidence instead of --error-exitcode, which would let torchrun
+            # kill the other ranks before their reports flush.
             env = dict(os.environ, MOK_UNDER_SANITIZER="1")
             result = subprocess.run([str(tool), "--tool", args.sanitizer_rank,
                                      sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]],
                                     env=env, capture_output=True, text=True)
-            # Store sanitized tool output as JSON rather than leaking paths into logs.
+            # Tool output goes into sanitized JSON evidence, keeping paths out of logs.
             text = result.stdout + result.stderr
             save(f"{args.tag}-{args.sanitizer_rank}-{args.image}-rank{os.environ['RANK']}-sanitizer.json",
                  {"tool": args.sanitizer_rank, "rank": int(os.environ["RANK"]), "returncode": result.returncode,
                   **sanitizer_counts(text, args.sanitizer_rank),
                   "stdout": result.stdout, "stderr": result.stderr})
-            # Findings are adjudicated by the parent only after every rank's
-            # reporter has flushed. A rank-level failure here kills its peers.
+            # The parent judges findings once every rank's report has flushed;
+            # a nonzero exit here would kill the peer ranks.
             return result.returncode
         if args.mode == "sanitize" and not args.sanitizer_rank:
             raise ValueError("launch sanitize directly so every rank gets its own compute-sanitizer")

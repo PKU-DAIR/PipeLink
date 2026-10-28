@@ -27,8 +27,8 @@ extern "C" int pipelink_params_query_mc(
   const uint32_t grid = in.slices < uint64_t(in.sm_count) ? in.slices : uint32_t(in.sm_count);
   out->channel_count = Count;
   out->workspace_count = 0;
-  // Hardware is observed by the caller's backend, never guessed from a model.
-  // The runner checks full-grid residency independently for both kernel images.
+  // sm_count comes from the caller backend's observation of the device. The runner
+  // separately checks that the full grid is resident for both kernel images.
   out->geometry = {1, 1, {grid, 1, 1}, common->block, {1, 1, 1}, 0, common->dynamic_smem_bytes};
   return PLK_OK;
 }

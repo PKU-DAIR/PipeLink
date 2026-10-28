@@ -88,8 +88,8 @@ class MoKHost:
         self.workspace = functional.create_workspace(self.config, dist.group.WORLD, device=self.device,
                                                      num_local_tokens=L, hidden_size=H, topk=k)
         if self.world==1:
-            # Classify the confirmed upstream EP1 trap without poisoning this
-            # process. This is setup evidence, never a changed capacity or kernel.
+            # Detect the known upstream EP1 trap before launch, without
+            # poisoning this process; capacity and kernel stay upstream's.
             padding = axes["manifest"]["host"]["facts"]["mok.framework.EXPERT_PADDING"]
             counts = torch.bincount(self.inputs.experts.flatten(),minlength=E)
             required = int((((counts+padding-1)//padding)*padding).sum().item())
@@ -184,8 +184,8 @@ class MoKHost:
 
     def megakernel(self, pass_name="fwd", image=None):
         image = image or self.image
-        self.sessions[pass_name].launch(torch.cuda.current_stream().cuda_stream,
-                                       image=self.controls[pass_name] if image == "one-tu" else None)
+        backend = self.controls[pass_name] if image == "one-tu" else self.sessions[pass_name].backend
+        self.sessions[pass_name].launch(torch.cuda.current_stream().cuda_stream, image=backend)
 
     def poison_outputs(self,pass_name):
         """Checks only: NaN-fill (0xFF for MXFP8 bytes) what the pass writes, so an
@@ -459,8 +459,9 @@ class AllRank:
         return maximum
 
 
-def time_host(host,pass_name,repetitions=20,*,sections=False):
+def time_host(host,pass_name,repetitions=10,*,sections=False):
     from evaluator.harness.parity.example import time_pair
+    from pipec2.host.cuda import reload_modules
     inputs = host.inputs
     def prepare(image):
         if pass_name=="bwd": host.forward(inputs,image=image)
@@ -468,16 +469,24 @@ def time_host(host,pass_name,repetitions=20,*,sections=False):
         host.barrier()
     def issue(image):
         return {"fwd":host.forward,"bwd":host.backward,"rec":host.recompute}[pass_name](inputs,image=image)
+    def reload_pair():
+        host.barrier()
+        torch.cuda.synchronize()
+        dist.barrier()
+        reload_modules((host.controls[pass_name], host.sessions[pass_name].backend))
+        dist.barrier()
+        torch.cuda.synchronize()
     a = AllRank(lambda:issue("linked"),lambda:prepare("linked"))
     b = AllRank(lambda:issue("one-tu"),lambda:prepare("one-tu"))
-    paired = time_pair(a,b,repetitions=repetitions)
-    control_ratio = paired["ratio_linked_over_onetu"]
-    passed = paired["status"]=="PASS" and 0.995 <= control_ratio <= 1.005
+    paired = time_pair(a,b,repetitions=repetitions,reload=reload_pair)
+    control_speedup = paired["ratio_onetu_over_linked"]
+    passed = paired["status"]=="PASS" and 1 / 1.005 <= control_speedup <= 1 / 0.995
     result = {"status":"PASS" if passed else "FAIL",
-        "parity_gate":{"maximum_linked_over_onetu":1.03,"passed":control_ratio<=1.03},
-        "control_band":{"minimum":0.995,"maximum":1.005,"passed":passed},
+        "parity_gate":{"minimum_onetu_over_linked":1 / 1.03,"passed":control_speedup>=1 / 1.03},
+        "control_band":{"minimum_speedup":1 / 1.005,"maximum_speedup":1 / 0.995,
+                        "statistic":paired["statistic"],"passed":passed},
         "whole_step":paired,"samples":{"linked":a.records,"one_tu":b.records},
-        "measurement":"isolated pass whole step; preparation outside events; MAX rank total"}
+        "measurement":"isolated pass whole step; preparation outside events; MAX rank total; counterbalanced module load order"}
     if not passed:
         return result
     schedule = context = None
@@ -542,9 +551,8 @@ def time_host(host,pass_name,repetitions=20,*,sections=False):
         result["section_method"] = ("Diagnostic nested CUDA events, enabled only inside issue: linked session launch includes counter reset; "
             "upstream dispatch op includes allocations/counter initialization and, for B, wrapper zero-empty launch. "
             "Section max-rank totals are separately reduced; subtracting from full MAX totals is descriptive, not same-rank attribution.")
-    # time_pair's historical B label is one-TU; name the actual B arm explicitly.
-    result["upstream_pair"] = {"arms":{"A":"linked","B":"upstream"},**placement,
-        "ratio_linked_over_upstream":placement["ratio_linked_over_onetu"]}
+    # time_pair labels arm B one-TU; here B is upstream.
+    result["upstream_pair"] = {"arms":{"A":"linked","B":"upstream"},**placement}
     result["samples"].update(placement_linked=linked.records,upstream=upstream.records)
     operations = {
         "fwd":"route int64->int32, all-gather, barrier, schedule, x/router copies, barrier, forward megakernel, barrier, forward epilogue",

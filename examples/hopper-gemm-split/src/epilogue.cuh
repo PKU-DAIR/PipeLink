@@ -8,8 +8,8 @@ __device__ __forceinline__ void run(const void* raw_params) {
   extern __shared__ __align__(1024) unsigned char gemm_smem[];
   cutlass::arch::ClusterBarrier::wait(barrier(gemm_smem, pipelink_gemm_ready()), 0);
   auto const* accum = reinterpret_cast<const float*>(gemm_smem + pipelink_gemm_output());
-  // Consecutive lanes own consecutive columns: coalesced scalar stores, without
-  // exposing CuTe's per-thread register-fragment layout to the epilogue owner.
+  // Consecutive lanes own consecutive columns, so scalar stores coalesce; the
+  // epilogue reads the row-major smem tile and never sees CuTe's fragment layout.
   for (int i = int(threadIdx.x) & 31; i < TileM * TileN; i += 32) {
     const int row = int(blockIdx.x) * TileM + i / TileN;
     const int col = int(blockIdx.y) * TileN + i % TileN;

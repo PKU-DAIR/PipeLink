@@ -24,7 +24,7 @@ PACKAGES = ("torch", "triton", "flash-attn-4", "nvidia-cutlass-dsl", "quack-kern
 
 
 def fetch_sources():
-    """Fetch pinned file-loaded kernels; installed backends come from uv.lock."""
+    """Fetch pinned file-loaded kernels; installed backends are pinned in pyproject.toml."""
     root = clones_root()
     root.mkdir(parents=True, exist_ok=True)
     repos = (
@@ -237,7 +237,7 @@ def main():
             "shape": {"batch": 1, "seqlen": 2048, "heads_q": 32, "heads_kv": 8, "head_dim": 128, "dtype": "bf16"},
             "reference": {"dtype": "fp32", "tf32": False, "all_output_elements": True, "max_abs_error_threshold": 0.02},
             "timing_note": "First-call wall time includes import, layout/plan and JIT; not an attention benchmark.",
-            "overrides": {"flash-msa torch requirement": "upstream 2.12.0 overridden with plan pin 2.14.0"},
+            "overrides": {"flash-msa torch requirement": "upstream 2.12.0 overridden with the project pin 2.14.0"},
             "implementations": [],
         }
         with tempfile.TemporaryDirectory(prefix="sm90-env-", dir=os.environ.get("TMPDIR")) as directory:

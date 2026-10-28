@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "m3-resource-record-v2",
-  "title": "M3 image-derived subject-specific resource audit record",
+  "title": "Parity image-derived subject-specific resource audit record",
   "type": "object",
   "required": ["schema_version", "utc_time", "subject_id", "case_id", "image_id", "image_sha256", "sass_sha256", "resources", "headline_predicate"],
   "properties": {

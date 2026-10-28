@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
 from enum import Enum
+from types import SimpleNamespace
 from typing import Any, NoReturn, TypeAlias
 
 from .model import CanonEndpoint, Claim, ClauseFailure, Endpoint, LayoutError, SchemaError
@@ -47,7 +48,7 @@ class Swizzle:
 
 @dataclass(frozen=True, kw_only=True)
 class Layout:
-    """Authored layout, not an expanded or canonical physical identity.
+    """A layout as authored, before profile expansion and canonicalization.
 
     The endpoint space selects AffineLayout or TmemLayout. Absence is distinct
     from null, and atom fields remain authored overrides until canonicalization.
@@ -292,8 +293,8 @@ def _expand_atom(layout: Layout, profile: Profile, ep: Endpoint) -> Layout:
                 {"atom": atom, "field": key, "atom_value": expansion[key], "actual": value},
             )
     try:
-        # Only the newly encountered profile fields need syntax loading. Authored
-        # overrides are already typed; merging them must not validate them again.
+        # Only newly encountered profile fields need syntax loading; authored
+        # overrides are already typed, so merging skips revalidation.
         expanded = _load_layout(expansion, ep.space, f"endpoints.{ep.name}.layout", partial=True)
         overrides = _authored_fields(layout)
         del overrides["atom"]
@@ -404,7 +405,16 @@ def _affine_layout(
             {"layout_shape": _layout_json(shape), "tile_shape": list(ep.tile.shape)},
         )
 
-    coalesced_shape, coalesced_stride = _coalesce(shape, stride)
+    return _affine_address(ep, layout, elem_bits, ring_stride_bits)
+
+
+def _affine_address(
+    ep: Any,
+    layout: AffineLayout,
+    elem_bits: int,
+    ring_stride_bits: int | None,
+) -> tuple[tuple[Any, ...], tuple[int, ...] | None, int]:
+    coalesced_shape, coalesced_stride = _coalesce(layout.shape, layout.stride)
     bit_stride = _scale_tree(coalesced_stride, elem_bits)
     origin_bits = _default(layout.origin_bits, 0)
 
@@ -531,6 +541,14 @@ def canonicalize(
         tile_shape=ep.tile.shape,
         tv_role=ep.owner_role if ep.space == "reg" and ep.protocol.kind != "call" else None,
     )
+
+
+def smem_param_address(layout: Layout, profile: Profile, name: str) -> tuple[Any, ...]:
+    """Physical identity of a shared-memory callable parameter: the canonical bit-address
+    function of its layout, without the tile, ring or base claim an endpoint adds."""
+    ep = SimpleNamespace(name=name, space="smem")
+    expanded = _expand_atom(layout, profile, ep)
+    return _affine_address(ep, expanded, expanded.elem_bits, None)[0]
 
 
 def unify(a: CanonEndpoint, b: CanonEndpoint) -> list[ClauseFailure]:

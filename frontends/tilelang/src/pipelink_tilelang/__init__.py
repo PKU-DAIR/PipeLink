@@ -57,4 +57,10 @@ def __getattr__(name):
     if name in ("TensorExportStage", "export_fragment"):
         from . import tensor_export
         return getattr(tensor_export, name)
+    if name in ("Partner", "import_tensor"):
+        from . import contract
+        return getattr(contract, name)
+    if name in ("contract_stage", "HostParams"):
+        from . import explicit
+        return getattr(explicit, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

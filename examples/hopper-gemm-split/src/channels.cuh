@@ -22,21 +22,17 @@ extern "C" __device__ int pipelink_gemm_drained();
 extern "C" __device__ int pipelink_gemm_warp_mma();
 
 namespace hopper_gemm {
-// PipeLink's allocated mbarrier slots occupy 16 bytes, not sizeof(uint64_t).
+// Each mbarrier slot PipeLink allocates is 16 bytes wide, larger than sizeof(uint64_t).
 __device__ __forceinline__ uint64_t* barrier(unsigned char* smem, int base, int slot = 0) {
   return reinterpret_cast<uint64_t*>(smem + 16 * (base + slot));
 }
 }
 
-// Both owners state the same physical facts. These are shared vocabulary, not
-// generated transport or arithmetic. Extents shrink when depth is rebound.
+// Both owners declare the same physical layout through these macros, which emit
+// only annotations. Extents shrink when depth is rebound.
 #define GEMM_OPERAND_CLAIMS() \
   PL_CLAIM_EX(pl::claim("pipelink_gemm_operands", "smem") \
-      .extent(0, {{"pipelink_gemm_depth", hopper_gemm::SlotBytes}}).align(1024)); \
-  PL_CLAIM_EX(pl::claim("pipelink_gemm_full", "mbarrier") \
-      .extent(0, {{"pipelink_gemm_depth", 1}}).align(1)); \
-  PL_CLAIM_EX(pl::claim("pipelink_gemm_empty", "mbarrier") \
-      .extent(0, {{"pipelink_gemm_depth", 1}}).align(1))
+      .extent(0, {{"pipelink_gemm_depth", hopper_gemm::SlotBytes}}).align(1024))
 
 #define GEMM_OPERANDS(direction, role) \
   PL_ENDPOINT(operands, pl::endpoint("operands", direction, role) \
@@ -52,9 +48,7 @@ __device__ __forceinline__ uint64_t* barrier(unsigned char* smem, int base, int 
       .bind("full", "pipelink_gemm_full").bind("empty", "pipelink_gemm_empty"))
 
 #define GEMM_OUTPUT_CLAIMS() \
-  PL_CLAIM("pipelink_gemm_output", "smem", hopper_gemm::OutputBytes, 128, "kernel"); \
-  PL_CLAIM("pipelink_gemm_ready", "mbarrier", 1, 1, "kernel"); \
-  PL_CLAIM("pipelink_gemm_drained", "mbarrier", 1, 1, "kernel")
+  PL_CLAIM("pipelink_gemm_output", "smem", hopper_gemm::OutputBytes, 128, "kernel")
 
 // One CTA uses this depth-one channel once, with the ordinary full/empty protocol.
 // All 256 MMA threads publish their own stores before their ready arrival.

@@ -1,4 +1,4 @@
-"""Generic ratio-free 10-second role telemetry producer for case/device blocks."""
+"""Record 10-second clock telemetry per role for case/device qualification; no timing ratio is computed."""
 from __future__ import annotations
 
 import json
@@ -32,7 +32,7 @@ def run_image_telemetry_qualifier(
     policy_tuple: dict[str, Any],
     archive: Path,
 ) -> dict[str, Any]:
-    """Run five warmups + one 10/1 telemetry-only role observation."""
+    """Run five warmups, then one 10 s solo slot (1 s discarded) that records telemetry only."""
     policy = freeze_policy(policy_tuple)
     command = image_spec["command"]
     if not isinstance(command, list) or not command:

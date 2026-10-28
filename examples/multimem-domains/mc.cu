@@ -12,10 +12,10 @@ extern "C" __device__ void mc_tp_allreduce_role(const void* opaque, unsigned) {
   for (uint64_t slice = blockIdx.x; slice < p.slices; slice += gridDim.x) {
     const uint32_t epoch = next_epoch(p.epoch, slice);
     const uint32_t target = 2u * epoch;
-    // The prior *whole kernel*, including dp's red reads, must have finished on
-    // this rank's stream before the next session launches. Each tp participant
-    // therefore releases its old red reads before this entry rendezvous lets
-    // any rank overwrite red. mc completion alone is NOT that release.
+    // The previous whole kernel, including dp's red reads, has finished on this
+    // rank's stream before the next session launches, so a tp participant arriving
+    // here has released its old red reads. Only then may this rendezvous let any
+    // rank overwrite red; mc completion alone would release too early.
     multicast_barrier(p.bar_mc + slice, p.bar_local + slice, target, barrier);
     alias_fence();  // caller filled input through its local unicast mapping
     const uint64_t begin = slice * p.slice_elements + uint64_t(p.tp_rank) * half;
@@ -37,7 +37,6 @@ extern "C" __device__ void mc_tp_allreduce_role(const void* opaque, unsigned) {
 }
 
 PL_STAGE("mc.tp-allreduce", "1.0.0");
-PL_NO_PARAMS();
 PL_ROLE(mc, mc_tp_allreduce_role, 1);
 PL_CLAIM_EX(pl::claim("pipelink_mc_warp", "warp").extent(1).align(1).at(0).roles({"mc"}));
 PL_CLAIM_EX(pl::claim("pipelink_mc_barrier", "named_barrier").extent(1).align(1).roles({"mc"}));
@@ -65,4 +64,3 @@ PL_HOST_CHANNEL(4, uint32_t, pl::host::channel("mc.tp_done", "u32").rank(1).read
 PL_HOST_CHANNEL(5, uint32_t, pl::host::channel("mc.epoch", "u32").rank(1).read_write()
     .caller("mc_epoch"));
 PL_HOST_SCHEDULER(pl::host::scheduler("mc.owner", "multimem.persistent-slices", pl::host::schema()));
-PL_HOST_TARGET();

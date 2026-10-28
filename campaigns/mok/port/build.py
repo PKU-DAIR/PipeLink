@@ -119,7 +119,7 @@ def main() -> None:
                 REPO / "third_party/mixture-of-kittens/third_party/ThunderKittens/include",
                 REPO / "pipec/src/pipec2/pack/include", header_path().parent]
     if not args.link_only:
-        # A fresh copy prevents patches accumulating across authoring builds.
+        # Copy pristine sources each build so patches never apply twice.
         if (out / "csrc").exists():
             shutil.rmtree(out / "csrc")
         shutil.copytree(REPO / "third_party/mixture-of-kittens/csrc", out / "csrc")
@@ -241,13 +241,13 @@ def main() -> None:
         observed = sorted(link.get("dropped_endpoints", []), key=lambda row: (row["stage"], row["endpoint"], row["reason"]))
         if observed != expected:
             write_json(cell_out / "drop-mismatch.json", {"expected": expected, "observed": observed})
-            raise RuntimeError(f"{cell_id}: contract §5.2 dropped_endpoints multiset mismatch; see {cell_out / 'drop-mismatch.json'}")
+            raise RuntimeError(f"{cell_id}: dropped_endpoints multiset mismatch; see {cell_out / 'drop-mismatch.json'}")
         expansions = {row["channel"]: row for row in link["protocol_expansions"] if row["counter"] is not None}
         slots = {key.removeprefix("pipelink_mok_cnt_") for key in body["handles"] if key.startswith("pipelink_mok_cnt_")}
         if set(expansions) != slots:
-            raise RuntimeError(f"{cell_id}: contract §5 live counter graph mismatch: {set(expansions)} != {slots}")
+            raise RuntimeError(f"{cell_id}: live counter graph mismatch: {set(expansions)} != {slots}")
         if pass_name == "rec" and expansions["hidden_row_block_ready"]["counter"][2]:
-            raise RuntimeError(f"{cell_id}: contract §5 recompute hidden counter must have no consumers")
+            raise RuntimeError(f"{cell_id}: recompute hidden counter must have no consumers")
         counter_graph = {}
         for owner in OPS:
             for endpoint in manifests[owner]["endpoints"]:
@@ -256,7 +256,7 @@ def main() -> None:
                     directions = counter_graph.setdefault(endpoint["name"], {"produce": [], "consume": []})
                     directions[endpoint["direction"]].append(f"mok.{owner}")
         if pass_name == "bwd" and sorted(counter_graph["routed_buffers_done"]["produce"]) != ["mok.act", "mok.comm", "mok.gemm"]:
-            raise RuntimeError(f"{cell_id}: contract §5 routed_buffers_done must retain all three producer stages")
+            raise RuntimeError(f"{cell_id}: routed_buffers_done must retain all three producer stages")
         flags = [*FLAGS, "-O3", "--frandom-seed=mok.one_tu", f"-maxrregcount={link['regs_cap']}",
                  *[f"-I{inc}" for inc in includes],
                  f'-DMOK_BINDING_STUB="{cell_out / "generated/binding_stub.cu"}"',
@@ -301,7 +301,7 @@ def main() -> None:
             artifact = artifacts[p]
             stage_id = artifact["stage_id"]
             if link["input_hashes"][stage_id] != artifact["sha256"]:
-                raise RuntimeError(f"{cell_id}: contract §11.2 artifact identity changed: {p}")
+                raise RuntimeError(f"{cell_id}: artifact identity changed: {p}")
             variant_key = link["variants"][stage_id]
             variant = next(v for v in manifests[p]["stage"]["variants"] if v["key"] == variant_key)
             selected.append({"stage_id": stage_id, "artifact": artifact["path"], "artifact_sha256": artifact["sha256"],
@@ -331,7 +331,7 @@ def main() -> None:
     write_json(out / "timings.json", timings)
     for name, digest in input_hashes.items():
         if sha256(out / name) != digest:
-            raise RuntimeError(f"contract §11.2 input artifact/provider changed during matrix: {name}")
+            raise RuntimeError(f"input artifact/provider changed during matrix: {name}")
     if failures:
         write_json(out / "build-failures.json", failures)
         raise RuntimeError(f"{len(failures)}/24 cells failed; see {out / 'build-failures.json'}; wall={timings['total_seconds']:.3f}s")
@@ -343,7 +343,7 @@ def main() -> None:
         artifact["links"] = sorted(consumed)
         expected_count = 8 if package.startswith("framework.") else 24
         if len(consumed) != expected_count:
-            raise RuntimeError(f"{package}: contract §11.2 package fan-out mismatch")
+            raise RuntimeError(f"{package}: package fan-out mismatch")
         for payload in artifact["payloads"]:
             fanout.append({"stage_id": artifact["stage_id"], "payload_id": payload["payload_id"],
                            "payload_sha256": payload["sha256"], "links": sorted(consumed)})
@@ -353,7 +353,7 @@ def main() -> None:
         for variant in manifests[package]["stage"]["variants"]:
             count = counts[variant["index"]]
             if count != expected_count:
-                raise RuntimeError(f"{package}: contract §11.2 variant {variant['index']} fan-out {count} != {expected_count}")
+                raise RuntimeError(f"{package}: variant {variant['index']} fan-out {count} != {expected_count}")
             variant_counts.append({"stage_id": artifact["stage_id"], "variant": variant,
                                    "links": count, "expected": expected_count})
     write_json(out / "payload-fanout.json", {"schema": "pipelink-mok-payload-fanout-v1", **provenance,

@@ -10,7 +10,7 @@ extern "C" __device__ void gemm_epilogue_scaled_store_role(const void* opaque, u
   auto const& params = *static_cast<ScaledStoreResidue const*>(view.residue);
   extern __shared__ __align__(1024) unsigned char gemm_smem[];
   const unsigned ready = __cvta_generic_to_shared(gemm_smem + 16 * pipelink_gemm_ready());
-  // The consumer owns this declared protocol, not the producer's CuTe fragments.
+  // The consumer sees only the declared smem tile and mbarriers, never the producer's CuTe fragments.
   asm volatile("{ .reg .pred done; WAIT: mbarrier.try_wait.parity.shared::cta.b64 done, [%0], 0; "
                "@!done bra WAIT; }" : : "r"(ready) : "memory");
   auto const* tile = reinterpret_cast<float const*>(gemm_smem + pipelink_gemm_output());
@@ -24,13 +24,10 @@ extern "C" __device__ void gemm_epilogue_scaled_store_role(const void* opaque, u
 }
 
 PL_STAGE("gemm.epilogue.scaled-store", "1.0.0");
-PL_NO_PARAMS();
 PL_ROLE(epilogue, gemm_epilogue_scaled_store_role, 1);
 PL_CLAIM_EX(pl::claim("pipelink_gemm_warp_epilogue", "warp")
     .extent(1).align(1).at(9).roles({"epilogue"}));
 PL_CLAIM("pipelink_gemm_output", "smem", 128 * 128 * 4, 128, "kernel");
-PL_CLAIM("pipelink_gemm_ready", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_gemm_drained", "mbarrier", 1, 1, "kernel");
 PL_ENDPOINT(accumulator, pl::endpoint("accumulator", pl::consume, "epilogue")
     .space("smem").scope("cta").proxy("generic").tile("f32", {128, 128})
     .layout(pl::affine{{128, 128}, {128, 1}, 32})
@@ -41,7 +38,7 @@ PL_ENDPOINT(accumulator, pl::endpoint("accumulator", pl::consume, "epilogue")
     .bind("base", "pipelink_gemm_output").bind("full", "pipelink_gemm_ready")
     .bind("empty", "pipelink_gemm_drained"));
 
-// Only local records are annotated; pipec supplies the neutral C ABI inventory.
+// Annotate only this consumer's records; pipec supplies the shared C ABI types.
 PL_HOST_GROUP("gemm.user", "gemm.user.params", "user",
               plk_header_v2, PLK_ABI_TYPE_ID(plk_header_v2), false);
 PL_HOST_ABI_TYPE(100, ScaledStoreResidue, output, M, N, alpha);
@@ -55,4 +52,3 @@ PL_HOST_SCALARS(1, pl::host::scalars(pl::host::roles({"gemm.epilogue.scaled-stor
 PL_HOST_CHANNEL(1, float, pl::host::channel("gemm.output", "f32")
     .rank(2).write().caller("output"));
 PL_HOST_SCHEDULER(pl::host::scheduler("gemm.owner"));
-PL_HOST_TARGET();

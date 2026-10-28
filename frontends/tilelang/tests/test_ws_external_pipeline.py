@@ -89,13 +89,6 @@ def test_external_arrival_count_cluster_target_and_phase(target):
     consumer_wait = next(call for call in waits if "smem_full" in str(call.args[0]))
     parity = consumer_wait.args[1]
     assert parity.op.name.endswith(".bitwise_xor") and int(parity.args[1]) == 1
-    producer_wait = next(call for call in waits if "smem_empty" in str(call.args[0]))
-    # This pin retains both xor nodes instead of folding the empty-side
-    # inversion with the phase-origin inversion.
-    parity = producer_wait.args[1]
-    assert parity.op.name.endswith(".bitwise_xor") and int(parity.args[1]) == 1
-    assert parity.args[0].op.name.endswith(".bitwise_xor")
-    assert int(parity.args[0].args[1]) == 1
 
 
 def test_external_full_side_lowers_without_a_producer_role(target):

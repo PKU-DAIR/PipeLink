@@ -1,4 +1,4 @@
-"""Exact M3 §2.1 Philox streams, sharing classes, and stream-map writer."""
+"""Philox input streams, sharing classes and the stream-map writer."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -46,8 +46,8 @@ _COMMON_ABC = {
     3: RoleSpec("C", "BF16", "U[-2,2)", -2.0, 2.0),
 }
 
-# M3 plan §2.1, lines 305-315: complete frozen role table.  F1 roles 4/5
-# deliberately remain separate objects/classes (V3 columns versus V4 rows).
+# Role table per namespace. F1 roles 4 and 5 stay separate
+# classes: V3 biases columns, V4 biases rows.
 ROLE_TABLES: dict[str, dict[int, RoleSpec]] = {
     "F1": {
         **_COMMON_ABC,
@@ -78,7 +78,7 @@ ROLE_TABLES: dict[str, dict[int, RoleSpec]] = {
     "N-tiny-jit": dict(_COMMON_ABC),
 }
 
-# M3 plan §2.1, lines 305-315: numeric-case encodings.
+# Case ID to numeric-case encodings.
 CASE_ENCODINGS: dict[str, dict[str, Any]] = {
     "F1": {"case_ids": [f"F1-{index:02d}" for index in range(13)], "numeric_cases": list(range(13))},
     "F2": {"case_ids": [f"F2-{index:02d}" for index in range(18)], "numeric_cases": list(range(18))},
@@ -104,7 +104,7 @@ CASE_ENCODINGS: dict[str, dict[str, Any]] = {
     "N-tiny-jit": {"case_ids": ["64^3", "128^3", "256^3"], "numeric_cases": [0, 1, 2]},
 }
 
-# M3 plan §2.1, lines 317-331: exact consumer equivalence classes.
+# Which consumers share identical input bytes.
 SHARING_EQUIVALENCE_CLASSES: dict[str, str] = {
     "F1.roles-1-3": "all V0-V4 linked images and their five exact one-TU controls",
     "F1.role-4": "V3 linked and V3 exact control only; exactly N column-bias elements",
@@ -147,16 +147,16 @@ def philox4x32_10(counter: tuple[int, int, int, int], key: tuple[int, int]) -> t
 def resolve_namespace(namespace: str | int) -> tuple[str, int]:
     if isinstance(namespace, str):
         if namespace not in NAMESPACE_IDS:
-            raise ValueError(f"unknown M3 stream namespace: {namespace}")
+            raise ValueError(f"unknown stream namespace: {namespace}")
         return namespace, NAMESPACE_IDS[namespace]
     matches = [name for name, value in NAMESPACE_IDS.items() if value == namespace]
     if len(matches) != 1:
-        raise ValueError(f"unregistered M3 stream namespace: 0x{namespace:08x}")
+        raise ValueError(f"unregistered stream namespace: 0x{namespace:08x}")
     return matches[0], namespace
 
 
 def stream_address(namespace: str | int, numeric_case: int, role_id: int, element_index: int) -> dict[str, Any]:
-    """Resolve the exact §2.1 key/counter/lane address for one element."""
+    """Return the Philox key, counter and lane that generate one element."""
     name, ns = resolve_namespace(namespace)
     if not 0 <= numeric_case <= UINT32_MASK:
         raise ValueError("numeric case must fit uint32")
@@ -185,7 +185,7 @@ def word_at(namespace: str | int, numeric_case: int, role_id: int, element_index
 
 
 def uniform01(word: int) -> float:
-    """§2.1 binary64 ``(word + 0.5) * 2^-32``."""
+    """Map a Philox word to binary64 ``(word + 0.5) * 2^-32``."""
     if not 0 <= word <= UINT32_MASK:
         raise ValueError("Philox word must fit uint32")
     return (word + UNIFORM_WORD_OFFSET) * UNIFORM_SCALE
@@ -208,7 +208,7 @@ def signed_int4_at(namespace: str | int, numeric_case: int, role_id: int, elemen
 
 
 def _bfloat16_bits_rne(value: float) -> int:
-    """Round a binary64 value directly once to BF16, ties to even."""
+    """Round a binary64 value to BF16 in one step, ties to even."""
     if math.isnan(value):
         return 0x7FC0
     sign = 0x8000 if math.copysign(1.0, value) < 0 else 0
@@ -263,7 +263,7 @@ def storage_bytes(namespace: str | int, numeric_case: int, role_id: int, count: 
 
 
 def values_match(actual: float, expected: float, *, rtol: float, atol: float) -> bool:
-    """M3 §2.1 non-finite policy plus ordinary rtol/atol comparison."""
+    """Compare with rtol/atol; NaN matches only NaN and infinities must share sign."""
     if math.isnan(actual) or math.isnan(expected):
         return math.isnan(actual) and math.isnan(expected)
     if math.isinf(actual) or math.isinf(expected):
@@ -349,7 +349,7 @@ def build_stream_map(config: dict[str, Any]) -> dict[str, Any]:
             if len(set(consumers)) != len(consumers):
                 raise ValueError(f"{case_id} role {role_id}: consumers must be unique")
             if tensor.get("dtype", spec.dtype) != spec.dtype or tensor.get("distribution", spec.distribution) != spec.distribution:
-                raise ValueError(f"{case_id} role {role_id}: dtype/distribution drift from §2.1")
+                raise ValueError(f"{case_id} role {role_id}: dtype/distribution drift from the stream map")
             element_count = math.prod(shape)
             if namespace == "F1" and role_id == 4 and dimensions.get("N") != element_count:
                 raise ValueError(f"{case_id}: F1 role 4 must contain exactly N elements")

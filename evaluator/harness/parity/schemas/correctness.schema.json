@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "m3-correctness-record-v2",
-  "title": "M3 correctness, subject tolerance, sanitizer, and barrier record",
+  "title": "Parity correctness, subject tolerance, sanitizer, and barrier record",
   "type": "object",
   "required": ["schema_version", "utc_time", "subject_id", "case_id", "image_id", "stream_map_sha256", "stream_classes", "gate_a", "gate_b", "safety", "barrier_audit", "tolerance_policy", "all_true"],
   "properties": {

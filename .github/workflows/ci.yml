@@ -60,11 +60,10 @@ jobs:
     strategy:
       fail-fast: false
       # Admission follows docs/index.md and the example READMEs.
-      # Unsupported, not compiled: Hopper WGMMA GEMM on Blackwell profiles; T4 TMEM
-      # providers on sm_90a/sm_120a/sm_121a and Hopper WGMMA-register providers elsewhere.
-      # TileLang-authored cells require the pinned frontend and are owner-run.
+      # Unsupported, not compiled: Hopper WGMMA GEMM on Blackwell profiles.
+      # TileLang-authored cells and CODA (T4/T6) require the pinned frontend and are owner-run.
       matrix:
-        example: [hello-callable, ring-pipeline, contract-gallery, one-epilogue-many-producers, profile-consumer, hopper-gemm-split]
+        example: [hello-callable, ring-pipeline, contract-gallery, profile-consumer, hopper-gemm-split]
         profile: [sm_90a, sm_100a, sm_103a, sm_120a, sm_121a]
         exclude:
           - example: hopper-gemm-split
@@ -96,41 +95,6 @@ jobs:
           case "$EXAMPLE" in
             contract-gallery)
               uv run --project pipec --locked python examples/contract-gallery/check.py --profile "$PROFILE"
-              ;;
-            one-epilogue-many-producers)
-              # Pack only: linking even hand-CUDA non-alias adapters needs the
-              # pinned TileLang backend (T4 prerequisites); no wheel build in CI.
-              example_dir="examples/$EXAMPLE"
-              work_dir="${PIPELINK_SCRATCH_ROOT}/ci/${EXAMPLE}/${PROFILE}"
-              mkdir -p "$work_dir"
-              includes=(-I third_party/cutlass/include -I pipec/src/pipec2/pack/include)
-              for stage in consumer/epilogue providers/rowscale/rowscale; do
-                uv run --project pipec --locked pipec2 pack "${example_dir}/${stage}.cu" \
-                  --profile "$PROFILE" "${includes[@]}" -o "${work_dir}/${stage##*/}.plink"
-              done
-              case "$PROFILE" in
-                sm_90a)
-                  source_file=producer_sm90.cu
-                  placements=(REG SMEM)
-                  defines=(-D PL_TILE_N=128)
-                  ;;
-                sm_120a|sm_121a)
-                  source_file=producer_sm120.cu
-                  placements=(REG SMEM)
-                  defines=(-D PL_TILE_N=128)
-                  ;;
-                *)
-                  source_file=producer_source.cu
-                  placements=(TMEM SMEM)
-                  defines=(-D PL_TILE_N=128 -D PL_MMA_M=128)
-                  ;;
-              esac
-              for placement in "${placements[@]}"; do
-                uv run --project pipec --locked pipec2 pack \
-                  "${example_dir}/providers/accumulator/${source_file}" --profile "$PROFILE" \
-                  "${includes[@]}" "${defines[@]}" -D "PL_EXPORT_${placement}=1" \
-                  -o "${work_dir}/${placement,,}.plink"
-              done
               ;;
             hopper-gemm-split)
               uv run --project pipec --locked python examples/hopper-gemm-split/build.py --profile "$PROFILE"

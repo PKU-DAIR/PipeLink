@@ -1,0 +1,15 @@
+{
+  "natives": {
+    "fused": {
+      "source": "campaigns/coda/natives/sm120/kernels.cu", "kernel": "coda_sm120_fused",
+      "std": "c++17", "compile_flags": ["-DNDEBUG"], "includes": ["third_party/cutlass/include"], "defines": {},
+      "grid": "((M // 128) * (N // 256), 1, 1)", "threads": 256, "cluster": [1, 1, 1], "dyn_smem": 73728
+    },
+    "unfused_gemm": {
+      "source": "campaigns/coda/natives/sm120/kernels.cu", "kernel": "coda_sm120_gemm",
+      "std": "c++17", "compile_flags": ["-DNDEBUG"], "includes": ["third_party/cutlass/include"], "defines": {},
+      "grid": "((M // 128) * (N // 256), 1, 1)", "threads": 256, "cluster": [1, 1, 1], "dyn_smem": 73728
+    }
+    }
+  }
+}

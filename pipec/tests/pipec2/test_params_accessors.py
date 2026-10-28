@@ -88,7 +88,6 @@ extern "C" __device__ int provider_{name}_get(unsigned index) {{
 }}
 PL_STAGE("provider.{name}", "1.0.0");
 PL_PARAMS(Params_{name}, value, padding);
-PL_EXPORT(get_{name}, provider_{name}_get);
 PL_CALL(get_{name}, provider_{name}_get, pl::consume, "get_{name}");
 ''')
         pack_cu(source, tmp_path / f"{name}.plink", profile="sm_103a")

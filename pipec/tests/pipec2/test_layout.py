@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-from pipec2 import container
 from pipec2.layout import canonicalize, load_layout, unify
 from pipec2.model import (
     Claim,
@@ -19,17 +17,6 @@ from pipec2.model import (
     Tile,
 )
 from pipec2.profile import get_profile
-
-ROOT = Path(__file__).resolve().parents[3]
-
-
-def built_manifests() -> list[Path]:
-    """Locally built example/campaign packages; unbuilt artifacts contribute no cases."""
-    return sorted([
-        *ROOT.glob("campaigns/attention/out/packaged/*/*.plink"),
-        *ROOT.glob("campaigns/megakernel/port/build/artifacts/*.plink"),
-        *ROOT.glob("examples/profile-consumer/build/sm_103a/artifacts/*.plink"),
-    ])
 
 
 def _protocol() -> Protocol:
@@ -325,17 +312,6 @@ def test_claim_alignment_is_converted_from_bytes_to_bits() -> None:
         get_profile("sm_103a"),
     )
     assert canon.align_bits == 8192
-
-
-@pytest.mark.parametrize("path", built_manifests(), ids=lambda path: path.relative_to(ROOT).as_posix())
-def test_inventory_layout_json_is_lossless(path: Path) -> None:
-    raw = container.read(path)[0]
-    for index, endpoint in enumerate(raw["endpoints"]):
-        if endpoint["space"] == "none":
-            assert "layout" not in endpoint  # completion-only endpoints carry no data layout
-            continue
-        layout = endpoint["layout"]
-        assert load_layout(layout, endpoint["space"], f"$.endpoints[{index}].layout").to_json_obj() == layout
 
 
 @pytest.mark.parametrize("layout", [

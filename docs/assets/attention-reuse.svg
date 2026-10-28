@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 494" role="img" aria-labelledby="ar-title ar-desc">
   <title id="ar-title">One attention core, seven compositions</title>
-  <desc id="ar-desc">Seven Hopper attention compositions link the same unchanged core package. Each row swaps only small stages around it: a 28-line mask for sliding window, a 29-line score callee for softcap, a block load and mask for Phi-3 block-sparse, a selected-block load and a partial epilogue for MiniMax-M3 sparse attention, and a context-parallel load plus a communication owner's KV-gather warps for multi-GPU attention.</desc>
+  <desc id="ar-desc">Seven Hopper attention compositions link the same unchanged core package. Each row swaps only small stages around it: a 19-line mask for sliding window, a 20-line score callee for softcap, a block load and mask for Phi-3 block-sparse, a selected-block load and a partial epilogue for MiniMax-M3 sparse attention, and a context-parallel load plus a communication owner's KV-gather warps for multi-GPU attention.</desc>
   <defs>
     <style>
       text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1f2328; }
@@ -59,7 +59,7 @@
   <text class="mono pkg" x="319" y="142" text-anchor="middle">tma-load</text>
   <rect class="new" x="544" y="116.0" width="140" height="42" rx="8"/>
   <text class="mono pkg newtext" x="614" y="134.0" text-anchor="middle">mask-window</text>
-  <text class="lines" x="614" y="150.0" text-anchor="middle">28 lines</text>
+  <text class="lines" x="614" y="150.0" text-anchor="middle">19 lines</text>
   <rect class="base" x="694" y="116.0" width="140" height="42" rx="8"/>
   <text class="mono pkg" x="764" y="142" text-anchor="middle">score-identity</text>
   <rect class="base" x="844" y="116.0" width="160" height="42" rx="8"/>
@@ -74,7 +74,7 @@
   <text class="mono pkg" x="614" y="196" text-anchor="middle">mask-default</text>
   <rect class="new" x="694" y="170.0" width="140" height="42" rx="8"/>
   <text class="mono pkg newtext" x="764" y="188.0" text-anchor="middle">score-softcap</text>
-  <text class="lines" x="764" y="204.0" text-anchor="middle">29 lines</text>
+  <text class="lines" x="764" y="204.0" text-anchor="middle">20 lines</text>
   <rect class="base" x="844" y="170.0" width="160" height="42" rx="8"/>
   <text class="mono pkg" x="924" y="196" text-anchor="middle">epilogue</text>
   <rect class="base" x="1014" y="170.0" width="140" height="42" rx="8"/>
@@ -85,10 +85,10 @@
   <text class="mono pkg" x="319" y="250" text-anchor="middle">tma-load</text>
   <rect class="new" x="544" y="224.0" width="140" height="42" rx="8"/>
   <text class="mono pkg newtext" x="614" y="242.0" text-anchor="middle">mask-window</text>
-  <text class="lines" x="614" y="258.0" text-anchor="middle">28 lines</text>
+  <text class="lines" x="614" y="258.0" text-anchor="middle">19 lines</text>
   <rect class="new" x="694" y="224.0" width="140" height="42" rx="8"/>
   <text class="mono pkg newtext" x="764" y="242.0" text-anchor="middle">score-softcap</text>
-  <text class="lines" x="764" y="258.0" text-anchor="middle">29 lines</text>
+  <text class="lines" x="764" y="258.0" text-anchor="middle">20 lines</text>
   <rect class="base" x="844" y="224.0" width="160" height="42" rx="8"/>
   <text class="mono pkg" x="924" y="250" text-anchor="middle">epilogue</text>
   <rect class="base" x="1014" y="224.0" width="140" height="42" rx="8"/>
@@ -97,10 +97,10 @@
   <text class="work" x="24" y="314">Phi-3-small</text>
   <rect class="new" x="244" y="278.0" width="150" height="42" rx="8"/>
   <text class="mono pkg newtext" x="319" y="296.0" text-anchor="middle">block-load</text>
-  <text class="lines" x="319" y="312.0" text-anchor="middle">395 lines</text>
+  <text class="lines" x="319" y="312.0" text-anchor="middle">378 lines</text>
   <rect class="new" x="544" y="278.0" width="140" height="42" rx="8"/>
   <text class="mono pkg newtext" x="614" y="296.0" text-anchor="middle">mask-phi</text>
-  <text class="lines" x="614" y="312.0" text-anchor="middle">31 lines</text>
+  <text class="lines" x="614" y="312.0" text-anchor="middle">26 lines</text>
   <rect class="base" x="694" y="278.0" width="140" height="42" rx="8"/>
   <text class="mono pkg" x="764" y="304" text-anchor="middle">score-identity</text>
   <rect class="base" x="844" y="278.0" width="160" height="42" rx="8"/>
@@ -111,21 +111,21 @@
   <text class="work" x="24" y="368">MiniMax-M3 (MSA)</text>
   <rect class="new" x="244" y="332.0" width="150" height="42" rx="8"/>
   <text class="mono pkg newtext" x="319" y="350.0" text-anchor="middle">msa-load</text>
-  <text class="lines" x="319" y="366.0" text-anchor="middle">351 lines</text>
+  <text class="lines" x="319" y="366.0" text-anchor="middle">334 lines</text>
   <rect class="base" x="544" y="332.0" width="140" height="42" rx="8"/>
   <text class="mono pkg" x="614" y="358" text-anchor="middle">mask-default</text>
   <rect class="base" x="694" y="332.0" width="140" height="42" rx="8"/>
   <text class="mono pkg" x="764" y="358" text-anchor="middle">score-identity</text>
   <rect class="new" x="844" y="332.0" width="160" height="42" rx="8"/>
   <text class="mono pkg newtext" x="924" y="350.0" text-anchor="middle">epilogue-partial</text>
-  <text class="lines" x="924" y="366.0" text-anchor="middle">155 lines</text>
+  <text class="lines" x="924" y="366.0" text-anchor="middle">138 lines</text>
   <rect class="base" x="1014" y="332.0" width="140" height="42" rx="8"/>
   <text class="mono pkg" x="1084" y="358" text-anchor="middle">empty</text>
   <text class="name" x="24" y="403">Context parallel</text>
   <text class="work" x="24" y="422">causal, 2–4 GPUs</text>
   <rect class="new" x="244" y="386.0" width="150" height="42" rx="8"/>
   <text class="mono pkg newtext" x="319" y="404.0" text-anchor="middle">cp-load</text>
-  <text class="lines" x="319" y="420.0" text-anchor="middle">435 lines</text>
+  <text class="lines" x="319" y="420.0" text-anchor="middle">417 lines</text>
   <rect class="base" x="544" y="386.0" width="140" height="42" rx="8"/>
   <text class="mono pkg" x="614" y="412" text-anchor="middle">mask-default</text>
   <rect class="base" x="694" y="386.0" width="140" height="42" rx="8"/>
@@ -134,7 +134,7 @@
   <text class="mono pkg" x="924" y="412" text-anchor="middle">epilogue</text>
   <rect class="comm" x="1014" y="386.0" width="140" height="42" rx="8"/>
   <text class="mono pkg commtext" x="1084" y="404.0" text-anchor="middle">kv-gather</text>
-  <text class="lines" x="1084" y="420.0" text-anchor="middle">279 lines</text>
+  <text class="lines" x="1084" y="420.0" text-anchor="middle">261 lines</text>
   <rect class="core" x="404" y="62" width="130" height="366" rx="10"/>
   <text class="mono coretext" x="469" y="231" text-anchor="middle">core</text>
   <text class="coresub" x="469" y="253" text-anchor="middle">one package,</text>

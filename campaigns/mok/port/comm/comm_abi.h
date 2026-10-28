@@ -12,10 +12,7 @@ typedef struct MokCommTask {
     int32_t num_workers;
 } MokCommTask;
 #endif
-#define MOK_COMM_TASK_PL_TYPE PL_TYPE(MokCommTask, \
-    int32_t op, num_tokens, macrobatch_size, minibatch_size, macrobatch_idx, task_idx, \
-        row_divisor, previous_macrobatch_idx, buffer_ready_required_count; uint32_t flags; \
-    int32_t num_workers;)
+#define MOK_COMM_TASK_PL_TYPE PL_TYPE(MokCommTask, op, num_tokens, macrobatch_size, minibatch_size, macrobatch_idx, task_idx, row_divisor, previous_macrobatch_idx, buffer_ready_required_count, flags, num_workers)
 
 enum {
     MOK_COMM_FWD_DISPATCH = 0, MOK_COMM_FWD_COMBINE = 1,

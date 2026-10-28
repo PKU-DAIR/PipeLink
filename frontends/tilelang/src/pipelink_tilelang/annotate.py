@@ -85,8 +85,8 @@ class FactsHeader:
                     scalars(path + "/" + str(index), item)
 
         scalars("", facts)
-        # These internal maps are provenance, not WS endpoint placement. In
-        # particular, keep role-local and CTA-thread coordinates distinct.
+        # Raw captured maps, for provenance only; WS endpoint placement is derived
+        # separately. Fragment maps emit role-local and CTA thread as separate functions.
         for name, layout in facts.get("layouts", {}).items():
             variables = {name: f"x{index}" for index, name in enumerate(layout["forward_vars"])}
             params = ", ".join(f"int {name}" for name in variables.values())

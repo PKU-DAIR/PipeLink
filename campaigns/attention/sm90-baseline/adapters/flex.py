@@ -38,9 +38,9 @@ def _supports(cell, *, backend):
             available = False
         if not available:
             return "Flex BACKEND=FLASH requires the pinned flash-attn-4 CuTe package"
-        # All these forward-only masks and softcaps are expressible by the
-        # pinned FLASH backend. No max_scores, CPU scalar captures or grad
-        # buffers are requested (the backend's relevant rejection cases).
+        # The pinned FLASH backend expresses all these forward-only masks and
+        # softcaps. The backend rejects max_scores, CPU scalar captures and
+        # grad buffers; none are requested.
     return None
 
 
@@ -84,7 +84,7 @@ def _mask_mod(cell, sel):
 
 
 def _static_rows(cell):
-    """Closed-form block rows; never allocate a token-by-token mask."""
+    """Closed-form block rows, without a token-by-token mask."""
     m = cell["mask"]
     kind, n = m["kind"], cell["seqlen_q"] // BLOCK
     heads = cell["heads_q"] if kind == "phi3_blocksparse" else 1
@@ -104,8 +104,8 @@ def _static_rows(cell):
                 any_visible &= k0 // m["chunk"] == q0 // m["chunk"]
                 all_visible &= k1 // m["chunk"] == q1 // m["chunk"]
             elif kind == "phi3_blocksparse":
-                # Examine the four pairs of 64-token blocks, not 128^2
-                # tokens. Causality still makes the diagonal tile partial.
+                # Examine the four 64-token block pairs per tile instead of
+                # 128^2 tokens. Causality keeps the diagonal tile partial.
                 fine = m["block"]
                 qfine = np.arange(q0 // fine, q1 // fine + 1)[:, None, None]
                 kfine = ids[None, :, None] * (BLOCK // fine) + np.arange(BLOCK // fine)
@@ -125,8 +125,8 @@ def _static_rows(cell):
 
 def _selected_rows(cell, sel):
     """Union/intersection over each 128-query tile, once per KV head."""
-    # This copy is reported as preparation. The original GPU tensor, not this
-    # host view, remains captured by mask_mod throughout all attention calls.
+    # This host copy is counted as preparation; mask_mod captures the original
+    # GPU tensor.
     chosen = sel.detach().cpu().numpy()
     n = cell["seqlen_q"] // BLOCK
     partial_rows, full_rows = [], []
@@ -157,8 +157,8 @@ def _pack_rows(rows, repeat_heads, device):
         for q, row in enumerate(head):
             indices[h, q, :len(row)] = row
     if repeat_heads != 1:
-        # The BlockMask H axis is query-head indexed, not KV-head indexed.
-        # Only metadata is repeated; K/V tensors are never replicated.
+        # The BlockMask H axis indexes query heads. Only this metadata is
+        # repeated; K/V tensors are shared.
         counts = np.repeat(counts, repeat_heads, axis=0)
         indices = np.repeat(indices, repeat_heads, axis=0)
     return (
@@ -179,9 +179,9 @@ def _block_mask(cell, sel, mask, device):
         for head in rows[1:]
         for row, first in zip(head, rows[0])
     ):
-        # In particular, the supplied prefix selections normally share their
-        # block rows across KV heads. Preserve broadcast metadata (and FA4's
-        # packed GQA) when proven from those rows, not from the pattern label.
+        # The supplied prefix selections normally share block rows across KV
+        # heads. Broadcast metadata (and FA4's packed GQA) is kept only when
+        # the rows themselves prove it.
         partial_rows, full_rows = partial_rows[:1], full_rows[:1]
         repeat = 1
     pn, pi, partial_stats = _pack_rows(partial_rows, repeat, device)
@@ -202,9 +202,9 @@ def _block_mask(cell, sel, mask, device):
 def _triton_choices(sources):
     """Read the selected template's constants from pinned Inductor codegen.
 
-    run_and_get_code also captures persistent FX-cache hits. Parsing generated
-    code, rather than the candidate timing log, records the actually emitted
-    choice without forcing a cache miss or changing the autotuning search.
+    run_and_get_code also captures persistent FX-cache hits, so parsing the
+    generated code records the emitted choice without forcing a cache miss or
+    changing the autotuning search.
     """
     choices = []
     for source in sources:
@@ -269,7 +269,7 @@ class _Prepared:
             # 1..128 under max_autotune, but FA4 Sm90 rejects widths >2.
             # The supported non-autotuned path leaves __vec_size__ unset;
             # FA4 then uses its native width 2 for this tensor-free softcap.
-            # This changes only codegen configuration, not score arithmetic.
+            # Score arithmetic is unaffected.
             compile_config["options"] = {
                 "max_autotune": False, "triton.cudagraphs": False,
             }

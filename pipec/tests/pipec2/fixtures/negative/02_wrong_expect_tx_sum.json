@@ -1,6 +1,5 @@
 {
   "name": "wrong_expect_tx_sum",
-  "reference": "design §8.3",
   "description": "Both root endpoints omit the leaf contribution from the declared expect-tx sum.",
   "base": "shared_completion",
   "phase": "protocol.expand",

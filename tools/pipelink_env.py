@@ -17,6 +17,7 @@ _BASE_KEYS = (
     "PIPELINK_LOCKED_GPUS",
     "PIPELINK_MAX_CONCURRENT_GPUS",
     "PIPELINK_LOCK_SM_MHZ",
+    "PIPELINK_LOCK_TOLERANCE_MHZ",
     "PIPELINK_LOCK_STATE_DIR",
     "PIPELINK_CHECKPOINT_ROOT",
     "PIPELINK_ALLOW_UNLOCKED",
@@ -33,6 +34,7 @@ def _defaults(repo_root: Path) -> dict[str, str]:
         "PIPELINK_LOCKED_GPUS": "",
         "PIPELINK_MAX_CONCURRENT_GPUS": "4",
         "PIPELINK_LOCK_SM_MHZ": "",
+        "PIPELINK_LOCK_TOLERANCE_MHZ": "15",
         "PIPELINK_LOCK_STATE_DIR": str(scratch_root / "gpulockd"),
         "PIPELINK_CHECKPOINT_ROOT": str(repo_root / "checkpoints"),
         "PIPELINK_ALLOW_UNLOCKED": "0",
@@ -99,7 +101,7 @@ def _derive(values: dict[str, str], environment: Mapping[str, str]) -> None:
 
 
 def load(repo_root: Path | str | None = None) -> dict[str, str]:
-    """Return validated config with process environment taking precedence."""
+    """Return the validated config: defaults, then ``.env``, then the process environment."""
     root = (
         Path(repo_root).expanduser().resolve()
         if repo_root is not None
@@ -122,6 +124,13 @@ def load(repo_root: Path | str | None = None) -> dict[str, str]:
         raise ValueError("PIPELINK_MAX_CONCURRENT_GPUS must be a positive integer") from exc
     if max_concurrent <= 0:
         raise ValueError("PIPELINK_MAX_CONCURRENT_GPUS must be a positive integer")
+    # Empty or 0 selects unlocked clocks; normalize both to "".
+    lock_mhz = values["PIPELINK_LOCK_SM_MHZ"].strip()
+    if lock_mhz:
+        if not lock_mhz.isdigit():
+            raise ValueError("PIPELINK_LOCK_SM_MHZ must be empty, 0 or a positive integer")
+        lock_mhz = "" if int(lock_mhz) == 0 else str(int(lock_mhz))
+    values["PIPELINK_LOCK_SM_MHZ"] = lock_mhz
     for key in ("PIPELINK_ALLOW_UNLOCKED", "PIPELINK_NO_CACHE"):
         if values[key] not in {"0", "1"}:
             raise ValueError(f"{key} must be 0 or 1")

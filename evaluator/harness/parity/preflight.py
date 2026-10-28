@@ -1,4 +1,4 @@
-"""Fail-closed can-implement/public-dispatcher preflight records."""
+"""Preflight records for can-implement and public-dispatcher checks; anything incomplete fails."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -97,7 +97,7 @@ def _validate_entry(entry: object) -> dict[str, Any]:
 
 
 def build_preflight_record(record: dict[str, Any]) -> dict[str, Any]:
-    """Validate and close a complete preflight matrix without deleting false rows."""
+    """Validate and finalize a complete preflight matrix, keeping rows that failed."""
     if not isinstance(record, dict):
         raise ValueError("preflight record must be an object")
     result = deepcopy(record)

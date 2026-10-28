@@ -1,4 +1,4 @@
-"""Family-neutral interleaved paired executor with smoke and escalation protocols."""
+"""Interleaved paired-timing executor shared by all families, with smoke and escalation protocols."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -83,11 +83,11 @@ from .util import canonical_json_bytes, require_sha256, sha256_bytes, sha256_fil
 
 
 class PairCapError(RuntimeError):
-    """The case reached the fixed attempt cap before its pair-valid target."""
+    """The case hit its attempt cap before reaching the target number of valid pairs."""
 
 
 class SlotExecutionError(RuntimeError):
-    """A slot plugin failed or violated the closed subprocess protocol."""
+    """A slot plugin failed or broke the slot subprocess protocol."""
 
 
 @dataclass(frozen=True)
@@ -212,7 +212,7 @@ class Protocol:
         }
         values = (self.valid_pairs, self.attempt_cap, self.slot_seconds, self.discard_seconds, self.steady_seconds)
         if self.name in official and values != official[self.name]:
-            raise ValueError(f"{self.name} protocol drifts from M3 plan")
+            raise ValueError(f"{self.name} protocol drifts from the fixed parity protocol")
         if self.name not in official and not is_sweep and not self._allow_nonstandard:
             raise ValueError("unsupported public protocol")
         if (
@@ -1093,7 +1093,10 @@ def _gap_v4_summary(
         "clock_normalized_efficiency_claimed": False,
     }
 def _gap_identity_is_gating(protocol: Protocol) -> bool:
-    """Return the adjudicated identity interpretation for a gap duration leg."""
+    """Return whether the identity check gates a gap duration leg.
+
+    It gates every protocol except definitive, smoke and sweep.
+    """
     return protocol.name not in {"definitive", "smoke", SWEEP_PROTOCOL_NAME}
 
 
@@ -1441,8 +1444,8 @@ def run_case(
 ) -> dict[str, Any]:
     """Run one complete comparison; ``image_a`` is reference, ``image_b`` linked.
 
-    The first five arguments form the family API.
-    Dependency-injection keywords exist only for CPU self-tests.
+    The first five arguments are the family API; the injectable keywords exist
+    for CPU self-tests.
     """
     if not isinstance(case_id, str) or not case_id:
         raise ValueError("case_id must be a non-empty string")

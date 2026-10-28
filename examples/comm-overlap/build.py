@@ -3,15 +3,15 @@
 
 Compositions:
   ag   comm.gather + gemm.load.ag + gemm.mma (repacked under gemm.owner.ag) + gemm.epilogue.store
-  rs   gemm.load + gemm.mma (hopper-gemm-split host packages, unchanged) + comm.epilogue.rs
-  base gemm.load + gemm.mma (unchanged) + gemm.epilogue.store: the GEMM of the sequential baselines
+  rs   gemm.load + gemm.mma (hopper-gemm-split host packages as shipped) + comm.epilogue.rs
+  base gemm.load + gemm.mma + gemm.epilogue.store: the GEMM of the sequential baselines
 
-Selecting ag or rs also builds base for sequential-baseline timings. Selected
-local packages/providers and controls are rebuilt; the frozen GEMM owner
-distribution is copied unchanged (built at its source only if absent).
---out selects a self-contained candidate root. RS width applies equally to the
-package and both same-source controls and is recorded in index.json. RS always
-builds the shared owner-local follow-on reduction kernel.
+Selecting ag or rs also builds base, which the sequential-baseline timings use.
+The selected local packages, providers and controls are rebuilt; the GEMM owner
+distribution is copied as is (and built from its source only if absent).
+--out selects a self-contained artifact root. --rs-warps applies to the package
+and both same-source controls and is recorded in index.json. RS also builds the
+owner-local follow-on reduction kernel.
 """
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ def main() -> None:
 
     cli = [sys.executable, "-m", "pipec2.cli"]
 
-    # The GEMM owner's existing four-file host distribution (load, mma, provider, gemm.h).
+    # The GEMM owner's four-file host distribution (load, mma, provider, gemm.h).
     owner = GEMM / "out/host-sm_90a/owner"
     if not all((owner / name).exists() for name in ("load.plink", "mma.plink", "provider.so")):
         command([sys.executable, GEMM / "build_host.py", "--profile", args.profile, "--owner-only"],

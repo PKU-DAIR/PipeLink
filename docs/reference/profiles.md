@@ -8,7 +8,7 @@ Regenerate from the repository root (no GPU required):
 uv run --project pipec --locked python docs/reference/generate.py
 ```
 
-These are the compiler's declared target contracts, not a claim that every example runs on every profile. `pack --profile` selects one; linked packages must agree on the target stamp. See the [coverage matrix](../index.md#mechanism--profile-coverage) and [compiler admission rules](../../pipec/README.md#target-profiles). Values below are taken directly from `PROFILES`, `Profile.arch`, `TargetCaps` and `Domain`; `null` means the field is absent.
+Each profile is a target contract the compiler declares. `pack --profile` selects one; linked packages must agree on the target stamp. How pack and link enforce profiles is in [pipec](../../pipec/README.md#target-profiles). Values come directly from `PROFILES`, `Profile.arch`, `TargetCaps` and `Domain`; `null` means the field is absent.
 
 ## Names and targets
 

@@ -1,11 +1,13 @@
 """Construct transport from grounded ownership and fit one static-phase program.
 
-The constructor proposes; the independent checker alone grants MODEL_SAT. No
-candidate action vocabulary, per-cell solver, or verification oracle is used.
+The constructor only proposes; the independent checker alone grants MODEL_SAT.
+Construction works directly from ownership, without a candidate action vocabulary,
+per-cell solver or verification oracle.
 """
 from __future__ import annotations
 
 from dataclasses import replace
+from itertools import product
 from typing import Any
 
 from . import check, expr, fit, ir, machine, staging
@@ -103,6 +105,26 @@ class _Builder:
         self.fitted.append({"purpose": purpose, "rows": len(participants), "expression": predicate.to_json_obj()})
         return predicate
 
+    def owner_guard(self, owners, participants, purpose):
+        if any(not members for members in owners):
+            raise _Reject("empty_active_owners", purpose=purpose)
+        if all(members == participants for members in owners):
+            return None
+        if all(members == owners[0] for members in owners):
+            return self.participant_guard(owners[0], participants, purpose)
+        if all(len(_runs(members)) == 1 for members in owners):
+            lower = self.expression({self.row(0, 0, w): min(members) for w, members in enumerate(owners)},
+                                    f"{purpose}:start", slot=False)
+            upper = self.expression({self.row(0, 0, w): max(members) for w, members in enumerate(owners)},
+                                    f"{purpose}:end", slot=False)
+            participant = expr.Expr("coord", ("participant",), "int")
+            return expr.Expr("pand", (expr.Expr("le", (lower, participant), "pred"),
+                                     expr.Expr("le", (participant, upper), "pred")), "pred")
+        active = self.expression({self.row(p, 0, w): int(p in members)
+                                  for w, members in enumerate(owners) for p in participants},
+                                 purpose, slot=False)
+        return expr.Expr("eq", (active, expr.Expr("const", (1,), "int")), "pred")
+
     def allowed(self, family, site):
         return family in self.families and family in self.instance.derived.permitted[site.name]
 
@@ -146,10 +168,10 @@ class _Builder:
             tables.append(selected)
         return tables
 
-    def demand_runs(self, participants):
+    def demand_runs(self, participants, owners=None):
         shape = None
-        for demands in self.demands:
-            for participant in participants:
+        for world, demands in enumerate(self.demands):
+            for participant in participants if owners is None else owners[world]:
                 positions = tuple(sorted(slot for p, slot in demands if p == participant))
                 if shape is None:
                     shape = positions
@@ -171,28 +193,36 @@ class _Builder:
         instance = self.instance
         participants, selected, kind = self._selected(site, warp=False)
         operations = []
-        runs = self.demand_runs(participants)
+        owners = [tuple(sorted({p for p, _ in table})) for table in selected]
+        predicate = self.owner_guard(owners, participants, "demand_guard")
+        runs = self.demand_runs(participants, owners)
+
+        def complete():
+            if predicate is None:
+                return operations
+            return [ir.Meta("demand_active", predicate, 0),
+                    ir.Branch("demand_active", 2, len(operations) + 2), *operations]
         if kind == "@export:smem":
             for start, width in runs:
                 rows = {self.row(p, s, w): instance.cells[table[p, start + s]].index
-                        for w, table in enumerate(selected) for p in participants for s in range(width)}
+                        for w, table in enumerate(selected) for p in owners[w] for s in range(width)}
                 self.issue(site, operations, "smem_load_round", src=kind, dst=instance.result_resource,
                            width=width, offset=start, address=self.expression(rows, f"source_load:{start}"))
-            return operations
+            return complete()
         if kind == "@export:reg":
             for start, width in runs:
                 offsets = {instance.cells[table[p, start + s]].index - s
-                           for table in selected for p in participants for s in range(width)}
+                           for w, table in enumerate(selected) for p in owners[w] for s in range(width)}
                 if len(offsets) == 1:
                     self.issue(site, operations, "reg_copy_round", src=kind, dst=instance.result_resource,
                                width=width, offset=start, src_offset=next(iter(offsets)))
                 else:
                     for slot in range(start, start + width):
                         rows = {self.row(p, 0, w): instance.cells[table[p, slot]].index
-                                for w, table in enumerate(selected) for p in participants}
+                                for w, table in enumerate(selected) for p in owners[w]}
                         self.issue(site, operations, "reg_copy", src={"resource": kind, "index": self.expression(rows, f"copy:{slot}", slot=False)},
                                    dst={"resource": instance.result_resource, "index": slot})
-            return operations
+            return complete()
         if kind == "@tmem":
             for start, width in runs:
                 if width % instance.packet_columns:
@@ -200,7 +230,7 @@ class _Builder:
                 for offset in range(start, start + width, instance.packet_columns):
                     rows = {}
                     for w, table in enumerate(selected):
-                        for p in participants:
+                        for p in owners[w]:
                             packets = {self.packet_for_cell[table[p, offset + s]][0]
                                        for s in range(instance.packet_columns)}
                             if len(packets) != 1 or any(self.packet_for_cell[table[p, offset + s]][2] != s
@@ -208,7 +238,7 @@ class _Builder:
                                 raise _Reject("noncontiguous_receipt", participant=p, offset=offset)
                             rows[self.row(p, 0, w)] = next(iter(packets))
                     self.receipt(site, operations, rows, instance.result_resource, offset)
-            return operations
+            return complete()
         raise _Reject("unknown_source_space", kind=kind)
 
     def permute(self, site):
@@ -251,10 +281,11 @@ class _Builder:
         participants = instance.participants[site.name]
         if "@export:reg" in instance.exported_storage():
             tables = []
-            for initial in instance.initial_cells:
+            for initial, demands in zip(instance.initial_cells, self.demands):
+                wanted = set(demands.values())
                 tables.append({(cell.participant, cell.index): initial[index]
                                for index, cell in enumerate(instance.cells)
-                               if cell.resource == "@export:reg" and cell.participant in participants and initial[index] != machine.EMPTY})
+                               if cell.resource == "@export:reg" and cell.participant in participants and initial[index] in wanted})
             return "@export:reg", [], tables
         if "@export:smem" in instance.exported_storage():
             owner_count = max(count for count in range(1, min(len(instance.identities), len(participants)) + 1)
@@ -324,55 +355,78 @@ class _Builder:
             self.receipt(site, operations, rows, bank, offset)
         return bank, operations, tables
 
+    def staging_barrier(self, site):
+        participants = set(self.instance.participants[site.name])
+        cohorts = {}
+        for rendezvous in self.instance.imp.rendezvous:
+            cohort = rendezvous.cohort
+            members = set(cohort.set) if cohort.set is not None else {
+                expr.evaluate(cohort.expr, {**world, **dict(zip((d.name for d in cohort.domain), point))})
+                for world in self.worlds
+                for point in product(*(d.values if d.values is not None else range(d.lo, d.hi)
+                                       for d in cohort.domain))}
+            cohorts.setdefault(rendezvous.barrier, []).append(members)
+        return next((r for r in self.resources.values()
+                     if r.domain == "barrier" and r.sync is not None
+                     and r.name not in self.instance.derived.readonly_storage
+                     and r.sync.capacity >= 1 and r.sync.generations >= 1
+                     and all(cohort == participants for cohort in cohorts.get(r.name, ()))
+                     and (r.location.base != 0 or participants == set(range(max(participants) + 1)))), None)
+
     def staged(self, site):
         instance = self.instance
         view = instance.demand_kind == "memory_view"
         if view and any(len(addresses) != len(demands) for addresses, demands in zip(self.view_addresses, instance.world_demands)):
             raise _Reject("replicated_view_identity_requires_multiple_stores")
+        compact = [{identity: rank for rank, identity in enumerate(sorted(set(demands.values())))}
+                   for demands in self.demands]
         extent = (max((address for demands in instance.world_demands for _, address, _ in demands), default=-instance.scalar_bytes)
-                  + instance.scalar_bytes) if view else len(instance.identities) * instance.scalar_bytes
+                  + instance.scalar_bytes) if view else max(map(len, compact)) * instance.scalar_bytes
         scratch = next((r for r in self.resources.values() if r.domain == "smem" and r.extent >= extent
                         and r.name not in instance.derived.readonly_storage), None)
         if scratch is None:
             raise _Reject("scratch_too_small", required=extent,
                           available=max((r.extent for r in self.resources.values() if r.domain == "smem"
                                          and r.name not in instance.derived.readonly_storage), default=0))
-        barrier = next((r for r in self.resources.values() if r.domain == "barrier" and r.sync is not None
-                        and r.name not in instance.derived.readonly_storage
-                        and r.sync.capacity >= 1 and r.sync.generations >= 1), None)
+        barrier = self.staging_barrier(site)
         if barrier is None:
             raise _Reject("rendezvous_unavailable")
         bank, operations, tables = self.source_bank(site)
         if view:
             self.view_binding = scratch.name
-            tables = [{cell: identity for cell, identity in table.items() if identity in addresses}
-                      for table, addresses in zip(tables, self.view_addresses)]
+        tables = [{cell: identity for cell, identity in table.items() if identity in wanted}
+                  for table, wanted in zip(tables, compact)]
         participants = instance.participants[site.name]
-        owners = tuple(sorted({p for p, _ in tables[0]}))
-        if not owners or any({p for p, _ in table} != set(owners) for table in tables[1:]):
-            raise _Reject("binding_dependent_source_owners")
+        owners = [tuple(sorted({p for p, _ in table})) for table in tables]
         guard = None
-        if owners != participants:
-            predicate = self.participant_guard(owners, participants, "source_guard")
+        predicate = self.owner_guard(owners, participants, "source_guard")
+        if predicate is not None:
             operations.append(ir.Meta("source_active", predicate, 0))
             guard = len(operations)
             operations.append(ir.Branch("source_active", guard + 1, 0))
-        shape = None
-        for world, table in enumerate(tables):
-            for p in owners:
-                positions = tuple(sorted(s for owner, s in table if owner == p))
-                if shape is None:
-                    shape = positions
-                elif positions != shape:
-                    raise _Reject("nonuniform_source_positions", participant=p, world=world)
-        store_runs = _runs(shape or ())
+        positions = [{p: tuple(sorted(s for owner, s in table if owner == p)) for p in members}
+                     for table, members in zip(tables, owners)]
+        shape = positions[0][owners[0][0]]
+        indexed = any(slots != shape for world in positions for slots in world.values())
+        source_indices = None
+        if indexed:
+            if any(len(slots) != len(shape) for world in positions for slots in world.values()):
+                raise _Reject("nonuniform_source_positions")
+            source_indices = [{(p, ordinal): slot for p, slots in world.items()
+                               for ordinal, slot in enumerate(slots)} for world in positions]
+            tables = [{cell: table[cell[0], slot] for cell, slot in indices.items()}
+                      for table, indices in zip(tables, source_indices)]
+        # Fixed source runs retain compact round operations. Binding-indexed
+        # source positions use the existing scalar primitive.
+        store_runs = ([(slot, 1) for slot in range(len(shape))] if indexed else _runs(shape))
         load_runs = [] if view else self.demand_runs(participants)
         address_tables = None
         if not view:
             identity_tables = [
-                {self.row(p, s, w): table[p, start + s]
-                 for w, table in enumerate(worlds) for p in actors for s in range(width)}
-                for worlds, actors, runs in ((tables, owners, store_runs), (self.demands, participants, load_runs))
+                {self.row(p, s, w): compact[w][table[p, start + s]]
+                 for w, table in enumerate(worlds) for p in actors[w] for s in range(width)}
+                for worlds, actors, runs in ((tables, owners, store_runs),
+                                             (self.demands, [participants] * len(self.worlds), load_runs))
                 for start, width in runs
             ]
             address_tables, fitted_addresses, self.staging_layout = staging.select(identity_tables, instance.scalar_bytes, extent, self.bindings)
@@ -382,13 +436,20 @@ class _Builder:
             fitted_addresses = iter(fitted_addresses)
         for start, width in store_runs:
             rows = ({self.row(p, s, w): self.view_addresses[w][table[p, start + s]]
-                     for w, table in enumerate(tables) for p in owners for s in range(width)}
+                     for w, table in enumerate(tables) for p in owners[w] for s in range(width)}
                     if view else next(address_tables))
             purpose = f"{'view' if view else 'staging'}_store:{start}"
             address = (self.expression(rows, purpose) if view else
                        self.fitted_expression(next(fitted_addresses), purpose, len(rows)))
-            self.issue(site, operations, "smem_store_round", src=bank, dst=scratch.name, width=width,
-                       offset=start, address=address)
+            if indexed:
+                rows = {self.row(p, 0, w): indices[p, start]
+                        for w, indices in enumerate(source_indices) for p in owners[w]}
+                self.issue(site, operations, "smem_store_scalar",
+                           src={"resource": bank, "index": self.expression(rows, f"staging_source:{start}", slot=False)},
+                           dst={"resource": scratch.name, "index": address})
+            else:
+                self.issue(site, operations, "smem_store_round", src=bank, dst=scratch.name, width=width,
+                           offset=start, address=address)
         if guard is not None:
             operations[guard] = replace(operations[guard], next_false=len(operations))
         self.issue(site, operations, "cta_rendezvous", resource=barrier.name)
@@ -440,7 +501,7 @@ def construct(instance: machine.Instance, route, checked: dict[str, Constructed]
     """Propose the route's program from declared cells/resources, then independently certify.
 
     ``checked`` memoizes verdicts by program digest: a route whose fold emits a
-    program already certified inherits that verdict (route-model.md, tier 0).
+    program already certified inherits that verdict.
     """
     builder = _Builder(instance, route.families)
     provenance: dict[str, Any] = {"generator": "constructive-v1", "mode": "static", "candidates": [],

@@ -2,20 +2,22 @@
 
 A **stage** is an independently packaged CUDA translation unit: an opaque LTO
 object plus a manifest describing its entry roles, parameters, resources and
-cross-stage contracts. A stage need not own scheduled work: this tutorial's
-provider exports a callable, while its caller owns the scheduled role.
+cross-stage contracts. In this tutorial the provider exports a callable and the
+caller owns the scheduled role.
 
-PipeLink uses **pack-attestation trust**: `pack` validates the object symbol
-surface and records the attestation; `link` trusts it while checking declarations,
-compatibility and resource legality. It does not independently catch a lying or
-tampered manifest against its object. `inspect` explicitly checks the payload
-digest, but is not required after every pack and does not turn the model into
-adversarial verification. See the [compiler trust model](../reference/pack-and-link.md#trust-model).
+PipeLink uses **pack-attestation trust**. `pack` validates the object's symbol
+surface and records that attestation in the manifest. `link` then trusts the
+attestation while it checks declarations, compatibility and resource legality.
+Link has no independent way to tell that a manifest misdescribes its object, so
+a lying or tampered manifest gets through. `inspect` verifies the payload digest
+whenever you run it; it is an optional integrity check and leaves the trust
+model as it is. See the
+[compiler trust model](../reference/pack-and-link.md#trust-model).
 
 ## Goal and prerequisites
 
-Build two `.plink` packages, inspect their contracts, compose a cubin, and read
-its launch requirements **without a GPU**. T1 will launch the same source pair.
+Build two `.plink` packages, inspect their contracts, link a cubin and read its
+launch requirements, all **without a GPU**. T1 launches the same source pair.
 
 Use Linux x86_64 with:
 
@@ -23,19 +25,20 @@ Use Linux x86_64 with:
 - GNU `nm`, a C++17 host compiler (`g++`), Python 3 and `uv`;
 - the repository checkout and a writable scratch directory.
 
-Start from the repository's [`.env.example`](../../.env.example) when creating
-your machine-local `.env`; preserve an existing configured file. Set
-`PIPELINK_CUDA_HOME` to your CUDA 13.3 installation and `PIPELINK_SCRATCH_ROOT` to
-a writable high-capacity directory. Values are literal `KEY=VALUE` strings, not
-shell expressions: do not put `$HOME` or `~` in those paths. T0 does not need
-`PIPELINK_GPUS`; T1 uses it for a default physical GPU selection.
+If you have no machine-local `.env` yet, copy [`.env.example`](../../.env.example).
+Set `PIPELINK_CUDA_HOME` to your CUDA 13.3 installation and
+`PIPELINK_SCRATCH_ROOT` to a writable directory with plenty of space. Values are
+literal `KEY=VALUE` strings, so write paths out in full (no `$HOME` or `~`).
+T0 needs no GPU, so you can leave `PIPELINK_GPUS` for T1, which uses it to pick
+a default device.
 
-[`tools/pipelink_env.py`](../../tools/pipelink_env.py) applies defaults, then
-`.env`, then process-environment overrides. `tools/env.sh` exports those values
-and the derived `CUDA_HOME`, `PATH`, `LD_LIBRARY_PATH` and scratch-backed
-`UV_CACHE_DIR`. The helper's default scratch is a per-user temporary directory;
-setting an explicit root keeps compiler work and caches on your chosen disk.
-It does not set `TMPDIR`, so this tutorial sets that separately.
+[`tools/pipelink_env.py`](../../tools/pipelink_env.py) layers defaults, `.env`
+and the process environment, in that order, with later sources overriding
+earlier ones. `tools/env.sh` exports the result plus `CUDA_HOME`, `PATH`,
+`LD_LIBRARY_PATH` and a scratch-backed `UV_CACHE_DIR`. Without an explicit
+`PIPELINK_SCRATCH_ROOT` the helper falls back to a per-user temporary directory;
+setting one keeps compiler work and caches on the disk you chose. The helper
+leaves `TMPDIR` alone, so the commands below set it.
 
 Run all commands from the repository root in the same Bash shell:
 
@@ -47,7 +50,7 @@ uv sync --project pipec --locked
 uv run --project pipec --locked pipec2 --help
 ```
 
-The help output includes these lines (observed 2026-09-28):
+The help output includes these lines:
 
 ```text
 usage: pipec2 [-h] {pack,inspect,link,launch,clauses} ...
@@ -55,11 +58,11 @@ usage: pipec2 [-h] {pack,inspect,link,launch,clauses} ...
 Pack, inspect, resolve, link, and launch PipeLink ABI-v2 artifacts.
 ```
 
-Select a target profile. `sm_103a` targets Blackwell/sm103; `sm_90a` targets
-Hopper/sm90; `sm_120a` targets consumer Blackwell/sm120. `sm_100a` and `sm_121a`
-target the compute capability 10.0 and 12.1 siblings of sm103 and sm120. The pack/link recipes below
-run with CUDA 13.3 on every profile; none requires a matching GPU. To repeat for another profile, change the `PROFILE` assignment and repeat the
-subsequent commands.
+Select a target profile: `sm_103a` (Blackwell/sm103), `sm_90a` (Hopper/sm90) or
+`sm_120a` (consumer Blackwell/sm120). `sm_100a` and `sm_121a` target the compute
+capability 10.0 and 12.1 siblings of sm103 and sm120. Every profile packs and
+links on any machine with CUDA 13.3. To try another profile, change `PROFILE`
+and rerun the commands that follow.
 
 ```sh
 set -o pipefail
@@ -73,31 +76,33 @@ mkdir -p "$T0_OUT"
 The pair is [`provider.cu`](../../examples/hello-callable/src/provider.cu) and
 [`caller.cu`](../../examples/hello-callable/src/caller.cu). The provider implements
 `hello_scale(float)` as multiplication by two. The caller's grid-stride loop
-reads `input[i]`, invokes the unresolved `pipelink_call_scale`, and writes
-`output[i]`. It does not include the provider source or a provider-private header.
+reads `input[i]`, calls the unresolved `pipelink_call_scale`, and writes
+`output[i]`, without including any provider source or header.
 
-There are **eight annotation invocations**, four per source:
+There are **seven annotations**, three in the provider and four in the caller:
 
 | Source / annotation | What it declares |
 |---|---|
 | Provider: `PL_STAGE("org.hello.provider", "1.0.0")` | The provider's stage identity and version. |
 | Provider: `PL_NO_PARAMS()` | No host parameter blob is needed for this stage. |
-| Provider: `PL_EXPORT(scale, hello_scale)` | Public callable `scale` is implemented by `hello_scale`. |
-| Provider: `PL_CALL(scale, hello_scale, pl::consume, "scale")` | The exported callable consumes invocations on channel `scale`. |
+| Provider: `PL_CALL(scale, hello_scale, pl::consume, "scale")` | Public callable `scale`, implemented by `hello_scale`, consumes invocations on channel `scale`. |
 | Caller: `PL_STAGE("org.hello.caller", "1.0.0")` | The caller's separate stage identity and version. |
 | Caller: `PL_PARAMS(HelloCallerParams, input, output, count)` | The caller's public C++ parameter type and fields. |
 | Caller: `PL_ROLE(call, hello_call, 4)` | Role `call` enters `hello_call` with four warps. |
 | Caller: `PL_CALL(scale, pipelink_call_scale, pl::produce, "call")` | Role `call` produces invocations through the unresolved symbol. |
 
-`produce` and `consume` describe **call traffic**, not array-data flow. The
-provider has no scheduled role: its function executes on the caller's threads.
+`produce` and `consume` describe **call traffic**: the caller produces
+invocations and the provider consumes them. The provider has no scheduled role;
+its function runs on the caller's threads.
 
 ## 2. Pack each translation unit
 
-The profile selects the target/toolkit contract and the architecture spellings
-used by the CUDA compilation and symbol probes. Device visibility is explicitly
-empty. The projections below print the meaningful pack summary, not provenance
-digests or machine-specific compiler paths.
+Each translation unit packs on its own; neither command needs the other source.
+The profile sets the target, toolkit and the architecture flags used by the CUDA
+compilation and symbol probes, and pack runs those steps with no GPUs visible.
+The `python3` filters print the stage ID and symbol mechanism from each pack
+summary and drop the provenance digests and machine-specific compiler paths,
+which differ from one machine to the next.
 
 ```sh
 uv run --project pipec --locked pipec2 pack \
@@ -115,15 +120,16 @@ org.hello.provider nm-external-text+nvjitlink-seeded-v2
 org.hello.caller nm-external-text+nvjitlink-seeded-v2
 ```
 
-Pack compiles/runs the host declaration projection, compiles the device LTO
-payload, and performs the `nm` plus seeded `-O0` nvJitLink symbol probe. The
-`.plink` contains a manifest and `stage.o`; the stage's source is not a link input.
+Pack compiles and runs the host declaration projection, compiles the device LTO
+payload, and probes its symbols with `nm` and a seeded `-O0` nvJitLink link. The
+`.plink` holds a manifest and `stage.o`. That is everything link consumes; the
+source itself is not a link input.
 
 ## 3. Inspect the manifest
 
-`inspect --json` checks the package and emits the manifest. This projection keeps
-the identity, ABI, layout and call/symbol surfaces; it does not use a digest as a
-rebuild identity.
+`inspect --json` checks the package and prints its manifest. The filter keeps
+the parts that describe the stage's contract: identity, ABI, parameter layout,
+roles, calls and symbols.
 
 ```sh
 for stage in provider caller; do
@@ -161,27 +167,28 @@ calls: [('scale', 'produce', 'call', 'float(float)')]
 symbols: {'defined_strong': ['hello_call'], 'defined_weak': [], 'mechanism': 'nm-external-text+nvjitlink-seeded-v2', 'undefined': {'pipelink_call_scale': 'function'}}
 ```
 
-Read it as follows:
+Read the two manifests field by field:
 
 - `stage.id`/`version` identify the stage contract; `entry_abi` is native `v2`.
-  `pipelink_abi` separately carries schema and target/toolkit compatibility.
-- `params` is compiler-observed size/alignment, not host-side field inference.
-  Two pointers and a 32-bit count require 24 bytes including tail padding.
-- `stage.roles` schedules `hello_call` on four warps. Pack also derives its warp
-  claim, `pipelink_call_warps`; the provider's role map is empty.
-- `stage.exports` publishes the implementation. The `endpoints` call contracts
-  connect the caller's `produce` side to the provider's `consume` side and agree
-  on `float(float)`.
-- `symbols` attests strong/weak definitions and unresolved references.
-  `pipelink_call_scale` is intentionally unresolved in the caller package;
-  the linker will generate its binding. This is why a callable can be packed
-  independently of its provider.
+  `pipelink_abi` separately carries the schema and target/toolkit
+  compatibility.
+- `params` is the size and alignment the compiler observed for the parameter
+  type, so the host never has to infer the field layout. Two pointers and a
+  32-bit count take 24 bytes including tail padding.
+- `stage.roles` schedules `hello_call` on four warps, and pack derives the warp
+  claim `pipelink_call_warps` from it. The provider has no roles.
+- `stage.exports` publishes the implementation. The two `endpoints` connect the
+  caller's `produce` side to the provider's `consume` side with matching
+  signature `float(float)`.
+- `symbols` lists strong/weak definitions and unresolved references. The
+  caller leaves `pipelink_call_scale` unresolved for the linker to bind, which
+  is what lets it pack without the provider.
 
 ## 4. Describe the composition and link it
 
 Write the pipeline next to the packages so its relative `artifact_path` entries
-resolve there. Copy ABI/schema/target information from the freshly packed
-manifest, rather than maintaining another toolkit constant.
+resolve. The script copies `pipelink_abi` from the packed manifest, so no
+toolkit constant is hard-coded.
 
 ```sh
 uv run --project pipec --locked python - <<'PY'
@@ -221,14 +228,14 @@ pipeline.json: sm_103a 2 stages, phase call
 linked: pipelink_kernel threads: 128
 ```
 
-The handle is owned by the pack-derived `claim:call`, but its base is not
-hand-assigned. The linker solves that base and the warp interval. `phases` places
-`call` in the dispatch schedule; `static`, nonpersistent topology needs no host
-scheduler. The remaining empty collections introduce no extra resource domains,
-exclusions, optimization priorities or forced bindings for this example.
+The handle is owned by the pack-derived `claim:call`; the linker solves its
+base and warp interval. `phases` places `call` in the dispatch schedule, and
+static nonpersistent topology needs no host scheduler. The empty collections
+add no domains, exclusions, priorities or forced bindings.
 
-The output is `link/pipeline.cubin` plus `link/link.json` and generated sources.
-Read the metadata rather than selecting your own block size:
+Link writes `link/pipeline.cubin`, `link/link.json` and generated sources. The
+metadata states the launch configuration the cubin requires, so read the block
+size and the other launch parameters from it instead of choosing your own:
 
 ```sh
 python3 - <<'PY'
@@ -264,16 +271,16 @@ generated sources: ['binding_stub.cu', 'dispatch.cu']
 | `kernel_symbol` | CUDA entrypoint to look up in `pipeline.cubin`. |
 | `threads` | Required block size `(128,1,1)`, derived from four warps. |
 | `dyn_smem_bytes` | Required dynamic shared memory, zero here. |
-| `regs_cap` | Link-selected register cap, not a measurement of actual register use. |
+| `regs_cap` | Register cap selected by the link (an upper bound, not measured use). |
 | `cluster` | Cluster dimensions selected by the link, `(1,1,1)` here. |
 | `params.entries` | Each entry is `[stage_id, offset, bytes, align]`; the caller occupies bytes 0–23. The provider's zero-byte entry requires no blob. |
-| `params.total_bytes` / `align` | Aggregate launch parameter image: 64 bytes aligned to 64. The host supplies stage blobs, not their aggregate offsets. |
-| `protocol_expansions` | Resolved call channel and implementation declaration. There is no barrier protocol in T0. |
+| `params.total_bytes` / `align` | Aggregate launch parameter image: 64 bytes aligned to 64. The host supplies per-stage blobs; the launcher places them. |
+| `protocol_expansions` | Resolved call channel and implementation declaration. T0 has no barrier protocol. |
 | `generated/binding_stub.cu` | Resolves the warp handle and binds `pipelink_call_scale` to `hello_scale`. |
 | `generated/dispatch.cu` | Defines the aligned params image and `pipelink_kernel`, dispatching warps `[0,4)` into `hello_call`. |
 
-`generated_hashes` names the generated files; the command prints only its keys.
-Its values and `input_hashes` are provenance, not pinned rebuild identities.
+`generated_hashes` maps generated files to digests; the command prints only
+the names. Those digests and `input_hashes` are provenance records.
 
 ## 5. Find diagnostic clauses
 
@@ -293,20 +300,23 @@ P-IMPORT: artifact imports are declared PipeLink symbols
 T-PLAN: bounded tensor synthesis records exact outcomes and limits
 ```
 
-This is a diagnostic reference, not evidence that a GPU executed correctly.
-[T3](T3-contract-gallery.md) deliberately violates contracts and checks failures
-at their actual pack/link phases. T0's evidence is successful independent
-packing, inspection and GPU-free linking for every profile; numerical and
-sanitizer acceptance starts in T1.
+Each clause ID names a check that pack or link can report, so the catalogue is
+a reference for reading diagnostics; it says nothing about how a kernel behaves
+on a GPU. [T3](T3-contract-gallery.md) breaks contracts on purpose and shows
+each failure at the pack or link phase where it occurs.
+
+What T0 has shown is that both stages pack independently, inspect cleanly and
+link without a GPU on every profile. Numerical and sanitizer checks on a GPU
+start in T1.
 
 ## What you declared vs what was derived
 
 | Declared by this example | Derived by PipeLink |
 |---|---|
-| **8 annotations total**: `PL_STAGE` ×2 names/version-tags the stages. | Separate manifest/object packages and stage-scoped contracts. |
+| **7 annotations total**: `PL_STAGE` ×2 name and version the stages. | Separate manifest/object packages and stage-scoped contracts. |
 | `PL_NO_PARAMS` ×1 promises no provider blob; `PL_PARAMS` ×1 publishes the caller type/fields. | Compiler-observed sizes/alignments; caller `(offset=0, bytes=24, align=8)` in a 64-byte aggregate image. |
 | `PL_ROLE` ×1 promises four warps entering `hello_call`. | Warp claim, solved interval `[0,4)`, 128-thread block and generated dispatch. |
-| `PL_EXPORT` ×1 publishes `scale`; `PL_CALL` ×2 promise matching produce/consume call endpoints. | Signature checks and the generated `pipelink_call_scale` → `hello_scale` binding. |
+| `PL_CALL` ×2 promise matching produce/consume call endpoints; the consuming one publishes export `scale`. | Signature checks and the generated `pipelink_call_scale` → `hello_scale` binding. |
 | Pipeline package paths, one phase, handle ownership and static topology; selected profile. | Legal resource binding, register cap, cluster/shared-memory requirements and target cubin. |
 
 Next: [T1 — Hello, callable seam](T1-hello-callable.md).

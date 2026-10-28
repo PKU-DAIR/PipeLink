@@ -1,14 +1,15 @@
 #ifndef PIPELINK_HOST_ABI_V2_H
 #define PIPELINK_HOST_ABI_V2_H
 
-/* Installed neutral PipeLink host ABI v2; manifest schema 3.0.
- * Owner IDs are group-local; neutral ABI type IDs are pipec-owned below.
- * See pipec/README.md for host ABI semantics; 0 is reserved/absent.
+/* The neutral C ABI, version 2, behind PipeLink host ABI v3 (manifest schema
+ * 3.0). See pipec/README.md for the semantics. Owner IDs are local to a host
+ * group; the neutral ABI type IDs below belong to pipec. ID 0 means reserved
+ * or absent.
  *
- * Owners build their own params bytes (descriptors included) from the
- * caller-supplied resources handed to `build`. The broker never encodes a
- * descriptor; it checks each owner's transfer report against the device
- * endpoint the manifest binds (L-HOSTCHAN@open).
+ * Each owner builds its own params bytes, descriptors included, from the
+ * caller's resources passed to `build`. The broker encodes no descriptors;
+ * it checks each owner's transfer report against the device endpoint the
+ * manifest binds (L-HOSTCHAN@open).
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -40,7 +41,8 @@ extern "C" {
 #define PLK_TRANSFER_TMA_IM2COL 2u  /* cuTensorMapEncodeIm2col */
 #define PLK_TRANSFER_STRIDED 3u     /* plain strided view, no encoder */
 
-/* No C enum, bitfield, packed attribute or language-native tuple crosses ABI. */
+/* ABI structs use only fixed-width integers, pointers and plain structs:
+ * no C enums, bitfields, packed attributes or language-native tuples. */
 typedef struct plk_header_v2 {
     uint32_t abi_version;
     uint32_t struct_bytes;
@@ -50,7 +52,7 @@ typedef struct plk_digest_v2 {
     uint8_t sha256[32];
 } plk_digest_v2;
 
-/* The one scoped profile contract an owner binds to: the dtype table. */
+/* The profile contract an owner binds to; today only the dtype table. */
 typedef struct plk_profile_digest_v2 {
     plk_digest_v2 dtypes;
 } plk_profile_digest_v2;
@@ -67,7 +69,7 @@ typedef struct plk_scalar_v2 {
     uint64_t value_bits;
 } plk_scalar_v2;
 
-/* Device-safe image: record_offset is relative to this header, not a pointer. */
+/* Device-safe image: record_offset is a byte offset from this header. */
 typedef struct plk_shared_scalars_v2 {
     plk_header_v2 header;
     uint64_t image_bytes;
@@ -75,7 +77,7 @@ typedef struct plk_shared_scalars_v2 {
     uint32_t record_offset;
 } plk_shared_scalars_v2;
 
-/* Host-only caller metadata; allocation addresses intentionally absent at query. */
+/* Host-only caller metadata. Allocation addresses arrive later, at `build`. */
 typedef struct plk_tensor_meta_v2 {
     uint32_t channel_id;
     uint32_t dtype_id;
@@ -100,9 +102,10 @@ typedef struct plk_geometry_v2 {
     uint64_t dynamic_smem_bytes;
 } plk_geometry_v2;
 
-/* One caller-named communication domain (e.g. "tp", "ep") the owner declared with
- * PL_HOST_DOMAIN(id, name). rank/world are the caller's facts for this session; domain
- * identity is the name, never inferred from equal (rank, world). */
+/* A communication domain (e.g. "tp", "ep") the owner declared with
+ * PL_HOST_DOMAIN(id, name). The caller supplies rank and world for this session.
+ * Domains are identified by name; two domains with equal (rank, world) are still
+ * distinct. */
 typedef struct plk_domain_v2 {
     uint32_t domain_id;            /* owner-local wire ID */
     uint32_t rank;
@@ -126,9 +129,9 @@ typedef struct plk_common_v2 {
     plk_digest_v2 owner_contract;
 } plk_common_v2;
 
-/* IDs, ranks, pointers and backing-array capacities are broker initialized;
- * the owner states the minimum allocation, alignment, extents and strides it
- * needs from the caller's resource. */
+/* The broker fills IDs, ranks, pointers and backing-array capacities; the
+ * owner fills the minimum allocation, alignment, extents and strides it needs
+ * from the caller's resource. */
 typedef struct plk_channel_demand_v2 {
     uint32_t channel_id;
     uint32_t dtype_id;
@@ -158,15 +161,18 @@ typedef struct plk_demands_v2 {
     plk_geometry_v2 geometry;
 } plk_demands_v2;
 
-/* Host records containing bounded device allocations, never host dereferences.
- * A channel with a domain is one symmetric allocation per domain rank (identical
- * allocation_bytes and origin on every rank); its views are what the channel declared:
- * - peer: peer_addresses[r] is domain rank r's allocation base as addressable from THIS
- *   rank's CUDA context; peer_addresses[domain rank] == allocation_address. Else NULL.
- * - multicast: multicast_address is this allocation's base in the domain's multicast VA
- *   space (multimem.* only); offsets agree with allocation_address and every peer. Else 0.
- * Bytes written through one view and read through another are virtual aliases: the
- * owners need fence.proxy.alias on the synchronization path. */
+/* Host-side record of a bounded device allocation; the host must not dereference
+ * the addresses. A channel with a domain has one symmetric allocation per domain
+ * rank (same allocation_bytes and origin on every rank) and carries the views the
+ * channel declared:
+ * - peer: peer_addresses[r] is domain rank r's allocation base, addressable from
+ *   this rank's CUDA context; peer_addresses[domain rank] == allocation_address.
+ *   NULL without a peer view.
+ * - multicast: multicast_address is this allocation's base in the domain's
+ *   multicast VA space (multimem.* only); offsets match allocation_address and
+ *   every peer. 0 without a multicast view.
+ * Writing through one view and reading through another accesses virtual aliases,
+ * so owners need fence.proxy.alias on the synchronization path. */
 typedef struct plk_device_resource_v2 {
     uint32_t channel_id;
     uint32_t access;
@@ -207,10 +213,10 @@ typedef struct plk_tma_tiled_detail_v2 {
     uint32_t reserved;
 } plk_tma_tiled_detail_v2;
 
-/* One representation-independent self-description per declared TRANSFER,
- * filled by `build`. The broker pre-fills transfer_id (declared order) and
- * zeroes the rest; the owner states what it encoded. Footprint and credit are
- * distinct numbers from the owner's own issue/multicast configuration. */
+/* `build` fills one report per declared TRANSFER, describing what the owner
+ * encoded in representation-independent terms. The broker pre-fills
+ * transfer_id in declared order and zeroes the rest. Footprint and credit can
+ * differ; both follow from the owner's issue and multicast configuration. */
 typedef struct plk_transfer_report_v2 {
     uint32_t transfer_id;              /* declared TRANSFER id (broker initialized) */
     uint32_t access;                   /* PLK_ACCESS_* actually encoded */
@@ -247,9 +253,9 @@ typedef struct plk_abi_report_v2 {
     plk_digest_v2 owner_contract;
 } plk_abi_report_v2;
 
-/* The neutral inventory is owned here, never restated by a stage author.
- * These IDs leave owner-local inventories untouched and fit C11 enum values.
- * Layouts are measured by each compiler; no layout numbers live in this list. */
+/* The neutral type inventory; stage authors use it as is. Its ID range stays
+ * clear of owner-local inventories and fits C11 enum values. Each compiler
+ * measures the layouts, so the list carries field names only. */
 #define PLK_ABI_TYPE_ID_MIN 0x70000000u
 #define PLK_ABI_TYPE_ID_MAX 0x700000ffu
 #define PLK_HOST_ABI_TYPES(X) \
@@ -286,8 +292,8 @@ static inline const plk_domain_v2 *plk_find_domain(const plk_common_v2 *common, 
     return NULL;
 }
 
-/* Incomplete by design: provider-owned host bookkeeping, no shared layout.
- * One session per build; released exactly once by `release`. */
+/* Opaque provider-owned host state. Each `build` creates one session, which
+ * `release` frees exactly once. */
 typedef struct plk_session_v2 plk_session;
 
 typedef int (*plk_abi_fn_v2)(plk_abi_report_v2 *out);

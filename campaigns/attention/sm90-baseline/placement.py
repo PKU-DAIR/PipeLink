@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Join public and slot absolute timings, with independently measured R1 parity."""
+"""Join public and slot absolute timings with the separately measured R1 parity (CPU only)."""
 from __future__ import annotations
 
 import argparse
@@ -8,7 +8,8 @@ from pathlib import Path
 
 from cells import load_cells
 
-RESULTS = Path(__file__).resolve().parents[1] / "results"
+UNLOCKED_BANNER = ("> Unlocked or unrecorded SM clocks: timings are valid as relative comparisons only, "
+                   "not comparable with the paper's locked-clock numbers.")
 
 
 def load(path, optional=False):
@@ -22,12 +23,25 @@ def clock_record(row, report):
     target = (timing.get("clock_mhz") if isinstance(timing, dict)
               else report.get("clock_mhz", report.get("expected_sm_mhz")))
     mhz = row.get("clock_mhz", target if "clock" not in report else None)
-    # Rows recorded before per-row clock modes were measured under a clock lease;
-    # a partial rerun's merge must not relabel them as unlocked.
-    mode = row.get("clock", "locked" if row else "pending")
+    # A row without its own clock mode inherits its report's mode; with neither, the
+    # mode is unknown, never assumed locked.
+    if isinstance(row.get("clock_locked"), bool):
+        mode = "locked" if row["clock_locked"] else "unlocked"
+    else:
+        mode = row.get("clock", report.get("clock", "unknown")) if row else "pending"
     return {"clock": mode, "clock_mhz": mhz,
             "clocks_before": row.get("clocks_before"),
             "clocks_after": row.get("clocks_after")}
+
+
+def lease_clock(execution):
+    """Clock mode of a fixed-count execution record from its own lease fields."""
+    clock = execution.get("clock", {})
+    if execution.get("clock_locked") is False or clock.get("locked") is False:
+        return {"clock": "unlocked", "clock_mhz": None}
+    if clock.get("sm_mhz") and clock.get("healthy"):
+        return {"clock": "locked", "clock_mhz": clock["sm_mhz"]}
+    return {"clock": "unknown", "clock_mhz": None}
 
 
 def clock_label(row):
@@ -55,7 +69,7 @@ def public_measurement(result, report):
         "impl": result["impl"], "role": result["role"], "status": result["status"],
         "latency_us": ms * 1000 if ms is not None else None,
         "useful_tflops": result.get("useful_tflops") if ms is not None else None,
-        # The JIT workspace is a machine-local cache path, not part of the measured configuration.
+        # The JIT workspace is a machine-local cache path and does not describe the configuration.
         "config": {key: value for key, value in result.get("config", {}).items() if key != "jit_workspace"},
         "reason": result.get("reason", result.get("error", "")),
         "prep_ms": result.get("prep_ms"), "lse_returned": result.get("lse_returned"),
@@ -88,8 +102,8 @@ def build_report(public, absolute, definitive, equivalence, stock):
             continue
         source = public_cells[cell["id"]]
         rows = [public_measurement(r, public) for r in source["results"]]
-        # Public results already count the exact W6 selections. Never substitute
-        # the slot's dense/half-dense FLOP count or regenerate a different selection.
+        # Public results already count the exact W6 selections; do not substitute the
+        # slot's dense or half-dense FLOP count or regenerate a different selection.
         flops = source["useful_flops"]
         if cell["workload"] == "W6dense":
             report["ceilings"].append({"id": cell["id"], "pairs": source["pairs"],
@@ -110,7 +124,10 @@ def build_report(public, absolute, definitive, equivalence, stock):
             "pairs": source["pairs"], "useful_flops": flops,
             "linked": linked, "control": control,
             "r1": {"ratio": r1.get("ratio"), "status": r1.get("status", "pending"),
-                   "pair_valid_count": r1.get("pair_valid_count"), **clock_record(r1_case, definitive)},
+                   **({"protocol": "paired-reload-v2", "block_count": len(r1.get("pair", {}).get("blocks", [])),
+                       **lease_clock(r1.get("execution", {}))}
+                      if r1_case.get("protocol") == "paired-reload-v2"
+                      else {"pair_valid_count": r1.get("pair_valid_count"), **clock_record(r1_case, definitive)})},
             "best_expert_label": expert["impl"] if expert else (
                 "none (exception)" if cell["workload"] == "W6" else "none measured"),
             "references": references,
@@ -167,27 +184,47 @@ def summary_table(report):
     return "\n".join(lines)
 
 
+def timed_rows(report):
+    for cell in report["cells"]:
+        yield from (row for row in cell["implementations"] if row["latency_us"] is not None)
+        if cell["r1"]["ratio"] is not None:
+            yield cell["r1"]
+    for cell in report["ceilings"]:
+        yield from (row for row in cell["implementations"] if row["latency_us"] is not None)
+    for row in report["harness_equivalence"]:
+        for label in (row["stock_clock"], row["python_clock"]):
+            if label != "pending":
+                yield {"clock": label.split(" ")[0]}
+
+
 def markdown(report):
-    lines = ["# sm90 attention placement", "", summary_table(report), "",
+    locked = all(row["clock"] == "locked" for row in timed_rows(report))
+    lines = ["# sm90 attention placement", "", *([] if locked else [UNLOCKED_BANNER, ""]),
+             summary_table(report), "",
              "## Reading the columns", "",
-             "Linked and control are absolute median per-call latencies, not parity-timer latencies. "
-             "Useful TFLOP/s = the same cell's public useful_flops / (linked milliseconds × 10⁹). "
-             "L/reference is a throughput ratio = reference latency / linked latency; higher is faster.", "",
-             "R1 is the independently measured linked/control throughput ratio from sm90-definitive.json, "
-             "joined by case ID and pipeline. Missing files or matching rows are pending, never inferred "
-             "from the absolute latencies. Its parity floor remains 0.97.", "",
-             "Clock modes label every timing source; unlocked observations are not clock leases. "
-             "Mixed modes or different requested MHz are not like-for-like performance comparisons.", "",
-             "Exceeding Flex-Triton (L/Flex-Triton > 1) and approaching the best expert "
-             "(L/expert near 1) are reported targets, never placement gates. "
-             "No numeric pass/fail threshold is assigned to 'approach'. "
-             "W6 has best expert 'none (exception)' by the reporting policy, even when an adapter "
-             "labels a measured W6 implementation expert; all such results remain visible below.", "",
+             "Linked and control are median per-call latencies from the slot's absolute timer; the "
+             "parity ratios use a different timer. Useful TFLOP/s is the cell's public useful_flops divided "
+             "by (linked milliseconds × 10⁹). Each L/reference column is reference latency / linked latency, "
+             "a throughput ratio where values above 1 mean the linked image is faster.", "",
+             "R1 is the linked/control throughput ratio measured by the paired parity run "
+             "(sm90-definitive.json), matched to each row by case ID and pipeline; it must reach 0.97. "
+             "When that file or a matching row is absent, R1 shows as pending; it is never derived from the "
+             "absolute latencies.", "",
+             "The clock column labels every timing source. An unlocked run only observes the clock and holds "
+             "no lease. Rows with mixed clock modes or different requested frequencies are not like-for-like "
+             "comparisons.", "",
+             "Beating Flex-Triton (L/Flex-Triton > 1) and coming close to the best expert (L/expert near 1) "
+             "are the goals this table reports against. Neither is a pass/fail gate, and 'close' has no "
+             "numeric threshold. By reporting policy, W6 has no best expert ('none (exception)'), even when "
+             "an adapter labels a measured W6 implementation as expert; those results are still listed "
+             "below.", "",
              "## Harness equivalence", "",
              f"Cross-harness placement: {report['cross_harness_status']}. "
-             "Difference = 100 × (Python fa3-slotcfg / slot stock − 1); bound is |difference| ≤ 3 %. "
-             "A failed check blocks interpretation of cross-harness placement until explained, "
-             "not because of a public-performance target.", "",
+             "This check times FA3 in the Python harness with the C++ slot's stock dispatch (fa3-slotcfg) and "
+             "compares it with the slot's stock image, to confirm that the two harnesses time alike. Difference = 100 × (Python "
+             "fa3-slotcfg / slot stock − 1), and the bound is |difference| ≤ 3 %. If a cell falls outside "
+             "the bound, comparisons between the slot and the public implementations cannot be interpreted "
+             "until the gap is explained.", "",
              "| Cell | Slot clock | Python clock | Slot stock µs | Python fa3-slotcfg µs | Difference % | 3 % bound |",
              "|---|---|---|---:|---:|---:|---|"]
     for row in report["harness_equivalence"]:
@@ -195,22 +232,26 @@ def markdown(report):
         lines.append(f"| {row['id']} | {row['stock_clock']} | {row['python_clock']} | "
                      f"{fmt(row['stock_us'])} | {fmt(row['python_us'])} | {fmt(row['percent_diff'])} | {status} |")
     lines += ["", "## W6dense throughput ceiling", "",
-              "FA3 dense causal uses its own visible-pair count and oracle. This is throughput context "
-              "only, not a W6 sparse expert, latency bound, or speedup denominator.", ""]
+              "FA3 dense causal attention, with its own visible-pair count and oracle, shows the throughput "
+              "this GPU reaches on dense work. It is context only: it does not stand in for a W6 sparse "
+              "expert, a latency bound or a speedup denominator.", ""]
     for c in report["ceilings"]:
         lines.append(f"- {c['id']}: {fmt(c['fa3']['useful_tflops'] if c['fa3'] else None)} useful TFLOP/s "
                      f"(FA3 dense causal; {clock_label(c['fa3']) if c['fa3'] else 'pending'}; "
                      f"{c['pairs']} pairs, {c['useful_flops']} useful FLOPs).")
     lines += ["", "## Per-cell implementation details", "",
-              "Every public entry is listed: run or failed candidates in the table, unsupported ones "
-              "below it with their reasons. Best references use only successful timed results. "
-              "Prep is excluded from headline latency; LSE=false means O-only. Each implementation's "
-              "full configuration (API, dispatch, tiles, autotune choices) is in sm90-placement.json.", ""]
+              "Every public implementation appears for every cell: those that ran or failed in the table, "
+              "and unsupported ones below it with their reasons. Best references are chosen only from "
+              "successful timed results. Prep time is excluded from the headline latency, and LSE=false "
+              "means the implementation returns O only. Each implementation's full configuration (API, "
+              "dispatch, tiles, autotune choices) is recorded in sm90-placement.json.", ""]
     for c in [*report["cells"], *report["ceilings"]]:
         lines += [f"### {c['id']}", "", f"Visible pairs: {c['pairs']}; useful FLOPs: {c['useful_flops']}.", ""]
         if "r1" in c:
-            lines += [f"R1 status: {c['r1']['status']}; clock: {clock_label(c['r1'])}; "
-                      f"valid pairs: {c['r1']['pair_valid_count']}.", ""]
+            count = (f"paired-reload-v2, {c['r1']['block_count']} balanced blocks of ten-call batches"
+                     if c["r1"].get("protocol") == "paired-reload-v2"
+                     else f"legacy valid pairs: {c['r1']['pair_valid_count']}")
+            lines += [f"R1 status: {c['r1']['status']}; clock: {clock_label(c['r1'])}; {count}.", ""]
         rows = [r for r in c["implementations"] if r["status"] != "unsupported"]
         clocks = {clock_label(r) for r in rows}
         shared_clock = len(clocks) == 1
@@ -239,7 +280,7 @@ def markdown(report):
               f"Timing environment: {env.get('gpu_name')}, torch {env.get('torch_version')}, "
               f"CUDA {env.get('cuda_version')}, expected SM clock {env.get('expected_sm_mhz')} MHz. "
               f"Timing contract: {env.get('timing_contract')}.", "",
-              "Inputs (receipts written locally by the collection workflow, not published):", ""]
+              "Inputs, written locally by the collection workflow (the JSON records are not published):", ""]
     for name, source in report["sources"].items():
         lines.append(f"- {name}: `{source['file']}`" + (" (pending: absent)" if not source["present"] else ""))
     lines += ["", "This CPU-only join writes sm90-placement.json and sm90-placement.md; see "
@@ -249,7 +290,7 @@ def markdown(report):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--results", type=Path, default=RESULTS, help="Input and output directory")
+    parser.add_argument("--results", type=Path, required=True, help="Input and output directory")
     args = parser.parse_args(argv)
     names = {"public": "sm90-public-definitive.json", "absolute": "sm90-absolute-final.json",
              "definitive": "sm90-definitive.json", "equivalence": "sm90-public-equivalence.json",

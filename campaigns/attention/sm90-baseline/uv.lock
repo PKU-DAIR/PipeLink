@@ -698,23 +698,24 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "einops" },
+    { name = "einops", specifier = "==0.8.2" },
     { name = "flash-attn-4", directory = "../../../third_party/flash-attention/flash_attn/cute" },
     { name = "flash-msa", git = "https://github.com/nanduruganesh/flash-msa.git?rev=5834d91e43935209408c3a1e974bf0b36de76802" },
     { name = "flashinfer-python", git = "https://github.com/flashinfer-ai/flashinfer.git?rev=f89d15f2c5a5d0036e6b9cafb2b67496106b9ad6" },
-    { name = "ninja" },
-    { name = "numpy" },
+    { name = "ninja", specifier = "==1.13.2" },
+    { name = "numpy", marker = "python_full_version < '3.12'", specifier = "==2.4.6" },
+    { name = "numpy", marker = "python_full_version >= '3.12'", specifier = "==2.5.3" },
     { name = "nvidia-cutlass-dsl", extras = ["cu13"], specifier = "==4.7.0" },
-    { name = "packaging" },
+    { name = "packaging", specifier = "==26.3" },
     { name = "quack-kernels", specifier = "==0.6.5" },
-    { name = "setuptools" },
+    { name = "setuptools", specifier = "==84.0.0" },
     { name = "torch", specifier = "==2.14.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "triton", specifier = "==3.8.0" },
-    { name = "wheel" },
+    { name = "wheel", specifier = "==0.48.0" },
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest" }]
+dev = [{ name = "pytest", specifier = "==9.1.1" }]
 
 [[package]]
 name = "pluggy"

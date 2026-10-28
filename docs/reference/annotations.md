@@ -8,25 +8,27 @@ expands to nothing. Each annotation ends in `;`.
 
 This page covers the device contract. Host-owner declarations are in
 [Host ABI](host-abi.md); tensor imports and exports are in
-[Tensor imports](tensor-imports.md). [T0](../tutorials/T0-pack-link.md) through
-[T3](../tutorials/T3-contract-gallery.md) teach the same vocabulary on runnable examples.
+[Tensor imports](tensor-imports.md).
 
 ## Overview
 
 | Annotation | Declares |
 |---|---|
 | `PL_STAGE(id, version)` | Stage identity, for example `PL_STAGE("org.hello.caller", "1.0.0")`. |
-| `PL_PARAMS(T, members...)`, `PL_NO_PARAMS()`, `PL_PARAMS_OPAQUE(T)` | The stage's private parameter blob. Exactly one per TU. |
-| `PL_TYPE(T, members...)` | A by-value type used in call signatures. |
+| `PL_PARAMS(T, members...)`, `PL_NO_PARAMS()`, `PL_PARAMS_OPAQUE(T)` | The stage's private parameter blob. Exactly one per TU; none in a host-group TU. |
+| `PL_TYPE(T, member_names...)` | A by-value type used in call signatures. |
 | `PL_ROLE(name, fn, warps)` | A scheduled role: entry function and warp count. |
-| `PL_EXPORT(name, fn)` | A device function this stage provides. |
+| `PL_EXPORT(name, fn)` | A device function this stage provides without a provided call channel. |
 | `PL_CALL(channel, fn, direction, ...)` | One side of a call channel. |
+| `PL_INTERFACE(export, pl::interface{...})`, `PL_CALL_SITE(channel, pl::site{...})` | The callable interface of an export and the matching call site. |
+| `PL_ENTRY_RENDEZVOUS(barrier, threads)` | A full-launch barrier every role reaches at entry. |
 | `PL_ENDPOINT(name, builder)` | A non-call channel endpoint: mbarrier, named barrier or counter. |
 | `PL_CLAIM`, `PL_CLAIM_SMEM`, `PL_CLAIM_EX`, `PL_CLAIM_REGS` | Resources the linker must place. |
-| `PL_TOPOLOGY(pl::topology{...})`, `PL_SCHEDULER_STRATEGY(id, inputs)` | CTA group, cluster, persistence and scheduler. |
+| `PL_DOMAIN_CAPACITY(domain, capacity)` | The capacity of a pipeline-sized interpreter domain this stage compiles. |
+| `PL_TOPOLOGY(pl::topology{...})`, `PL_SCHEDULER_STRATEGY(id, inputs)` | CTA group, cluster, persistence and scheduler; optional for role-less stages. |
 | `PL_VARIANT(index, key)`, `PL_VARIANT_ENTRY(index, key, fn)` | Finite specializations the linker selects among. |
 | `PL_DESCRIPTOR(T)` | Descriptor bytes and alignment derived from a C++ type. |
-| `PL_HINT(key, value)` | An unchecked hint; never normative. |
+| `PL_HINT(key, value)` | A free-form hint the linker ignores; it carries no contract. |
 
 The linker derives everything else: bases, warp intervals, ring depths, barrier
 IDs, the params layout and the dispatch code. Stage code reads linker-chosen
@@ -37,7 +39,9 @@ values through `extern "C" __device__` handle functions named after the bound ha
 - `PL_PARAMS(T, members...)` probes 1–32 members of a standard-layout, trivially
   copyable `T`.
 - `PL_NO_PARAMS()` declares zero bytes with alignment 1. Use it for role-less
-  providers and for the outer carrier of a host group.
+  providers. A TU with `PL_HOST_GROUP` or `PL_HOST_DECLARATIONS` has empty
+  params by construction and declares no params record; pack rejects one there
+  (`P-MAP`).
 - `PL_PARAMS_OPAQUE(T)` records only `sizeof(T)` and `alignof(T)` for a raw blob
   (`members: []`, `opaque: true`).
 
@@ -46,14 +50,31 @@ aggregate. Each role entry has the fixed signature
 `void(const void* params, unsigned variant)` and receives a pointer to its own
 stage's segment.
 
-`PL_TYPE(T, members...)`, for example `PL_TYPE(ns::T, float data[16];)`,
-registers a trivially copyable, standard-layout class used by value, reference
-or pointer in call signatures. The members must restate the real layout; a
-shadow struct is checked at compile time for equal size and alignment. Generated
-stubs receive a `struct T { <members> };` prelude guarded by the spelling
-uppercased, with non-alphanumerics replaced by `_`, plus `_DEFINED`
-(`ns::T` → `NS__T_DEFINED`). Define the same guard beside the real definition
-so the two coexist.
+`PL_TYPE(T, member_names...)`, for example `PL_TYPE(ns::T, head, count, data)`,
+registers an aggregate, standard-layout, trivially copyable class used by
+value, reference or pointer in call signatures. List every member exactly once,
+in declaration order (an array member once); omitting, reordering, repeating or
+misspelling a name fails to compile. The compiler captures each member's C type,
+offset, size and alignment (including `alignas`). Member types are those call
+signatures accept: fixed-width integers,
+`bool`, `char`, `float`, `double`, `__half`, `__nv_bfloat16`, pointers,
+one-dimensional arrays and other `PL_TYPE` types (register those first).
+Multi-dimensional arrays, enums and bit-fields are rejected.
+
+The manifest publishes the captured layout as top-level `types`, sorted by name:
+`{"name", "bytes", "align", "members": [{"name", "ctype", "extent", "offset",
+"bytes", "align"}]}`. `extent` is the element count of an array member and 0
+otherwise. `ctype` is the scalar or element type (`uint32_t`, `const void*`,
+`ns::Inner`).
+
+Call declarations that mention `T` get a definition printed from these facts:
+`struct alignas(A) T { alignas(a) ctype name[N]; ... };`. `alignas` appears only
+where the captured alignment exceeds the natural one. After the definition come
+`static_assert`s on `sizeof`/`alignof` and on each member's `offsetof`, all
+inside a guard: the qualified name uppercased, non-alphanumerics replaced by
+`_`, plus `_DEFINED` (`ns::T` → `NS__T_DEFINED`). A TU that holds the real
+definition defines the guard beside it; a TU that compiles the printed
+definition checks the layout through the assertions.
 
 ## Roles, exports and calls
 
@@ -62,7 +83,6 @@ so the two coexist.
 extern "C" __device__ float hello_scale(float value) { return value * 2.0f; }
 PL_STAGE("org.hello.provider", "1.0.0");
 PL_NO_PARAMS();
-PL_EXPORT(scale, hello_scale);
 PL_CALL(scale, hello_scale, pl::consume, "scale");
 
 // Caller stage: one four-warp role calls through a trampoline.
@@ -79,8 +99,18 @@ A call channel pairs a callsite with a provided function:
 - `PL_CALL(channel, trampoline, pl::produce, "caller_role", "export_name")` is the
   callsite. It names the caller's role.
 - `PL_CALL(channel, implementation, pl::consume, "export_name")` is the provided
-  side. It has no role (`owner_role: null` in the manifest), so a callee never
-  needs its caller's role names.
+  side. It has no role (`owner_role: null` in the manifest), so a callee needs
+  none of its caller's role names. It also declares export `export_name` with
+  that implementation; a `PL_EXPORT` restating it is rejected (`P-CALL`). Use
+  `PL_EXPORT` only for exports reached another way, such as tensor-import callees
+  and callees resolved by a caller's view call.
+
+A callsite inside this stage's own exports (a nested call site) names those
+exports in place of a role: `PL_CALL(channel, trampoline, pl::produce,
+pl::in_exports{"export_a", ...}, "export_name")`. It runs in the role of
+whoever called them. In the manifest it is a produce call endpoint with
+`owner_role: null` and `exports: [...]`. Like any endpoint associated with
+exports, it leaves the link when all of those exports are uncalled.
 
 The linker unifies declarations and export identities and generates the
 trampoline. Define exports as plain strong `extern "C" __device__` functions.
@@ -88,32 +118,80 @@ Mark an export `__inline_hint__` to let LTO inline it across packages; it stays
 a strong definition. Avoid `__attribute__((used))`: LTO keeps such a body even
 when nothing calls it (see [unused exports](#unused-exports-and-endpoint-association)).
 
+### Callable interfaces
+
+An export may state the contract its body relies on; every callsite of it then
+states the matching site:
+
+```cpp
+PL_INTERFACE(merge, pl::interface{pl::cohort{32}, pl::collective::warp, {
+    pl::param{0, "smem", "r", "f32", 64, pl::affine{pl::tree{{64}}, pl::tree{{1}}, 32}},
+    pl::param{2, "local", "rw", "f32", 2}}});
+// Caller (a role callsite or a nested one):
+PL_CALL_SITE(merge, pl::site{pl::cohort{32}, {
+    pl::param{0, "smem", "r", "f32", 64, pl::affine{pl::tree{{64}}, pl::tree{{1}}, 32}},
+    pl::param{2, "local", "rw", "f32", 2}}});
+```
+
+- `pl::cohort{N}`: the callers are a converged, contiguous, N-aligned group of N
+  threads.
+- `pl::collective::none | warp | cta | named("pipelink_handle")`: the
+  synchronization the callee performs over its cohort. `warp` requires N = 32.
+  `cta` requires N to equal the launch's threads. `named` requires a
+  `named_barrier` claim of the export's own stage under that handle.
+- `pl::param{index, space, access, dtype, extent[, layout]}`: one pointer
+  parameter, by position in the C signature. `space` is `smem`, `gmem`,
+  `generic`, `local` or `value`; `access` is `r`, `w` or `rw`; `dtype` uses the
+  tile dtype vocabulary; `extent` counts elements; `layout` (smem only) is a
+  `pl::affine` layout. The export lists what it touches; the site lists what it
+  provides.
+
+The manifest carries them as `stage.exports.<name>.interface` and as
+`protocol.site` on the produce call endpoint. Link checks them under `L-CALL`:
+
+- When one side states an interface or site, both must. Cohorts are equal.
+- For every parameter the export touches, the site has a parameter with the same
+  index, space and dtype, at least the extent, and at least the access. Shared
+  layouts, when both sides give one, must be the same canonical pl-layout-v2
+  address function.
+- A nested site's cohort divides the cohort of every export it is made from, and
+  each of those exports states an interface.
+- The pipeline call graph (roles → exports → nested exports) is acyclic.
+- An export is barrier-bearing if it, or any export it reaches, uses a `named`
+  or `cta` collective. Every call path to a barrier-bearing export starts in one
+  role, and every site on those paths keeps its enclosing cohort: the role's
+  width at the root, the enclosing export's cohort below. At most one
+  invocation of each barrier instance is therefore live.
+
+A hand-written CUDA export states its interface as a promise; nothing checks
+the body against it.
+
 ### Params in role-less providers
 
 A role-less provider may still declare nonzero `PL_PARAMS`. For stage
 `provider.a`, declare and call
 `extern "C" __device__ const void* pipelink_params_provider_a();` and cast the
 result to the provider's params type. The suffix is the stage ID with every
-non-alphanumeric character replaced by `_`. Referencing the accessor opts in:
-the linker reserves one 8-byte, 8-aligned, kernel-lifetime shared-memory cell,
-publishes the aggregate's address there before role dispatch and synchronizes
-the CTA (sharing an existing initialization barrier when there is one). Links
-without accessor references pay nothing. Name collisions, references to another
-stage's accessor and accessors of zero-byte params are `L-PARAMS` errors.
+non-alphanumeric character replaced by `_`. Only links that reference the
+accessor pay for it: the linker reserves one 8-byte, 8-aligned, kernel-lifetime
+shared-memory cell, publishes the aggregate's address there before role
+dispatch and synchronizes the CTA (sharing an existing initialization barrier
+when there is one). Name collisions, references to another stage's accessor
+and accessors of zero-byte params are `L-PARAMS` errors.
 
-The accessor is meant for params a provider reads rarely, such as once per tile
-or during setup. The pointer comes from shared memory, so the compiler no longer
-knows it points into the kernel parameters. Every read becomes a per-thread
-generic load, reloaded after each `asm volatile` wait (an mbarrier poll, for
-example). A provider that reads its params in a hot loop should be a member of
-a host params group and receive them through a
+Use the accessor for params a provider reads rarely, such as once per tile or
+during setup. Because the pointer comes from shared memory, the compiler cannot
+tell it points into the kernel parameters: every read is a per-thread generic
+load, reloaded after each `asm volatile` wait (an mbarrier poll, for example).
+A provider that reads its params in a hot loop should join a host params group
+and receive them through a
 [view call](#view-calls-into-host-group-members), whose loads the compiler can
 hoist.
 
 ### View calls into host-group members
 
 A role-less member of a host params group (an op that only exports callables)
-reads its owner's state through a *view call* instead of an accessor. Each of
+reads its owner's state through a *view call* instead of a params accessor. Each of
 its exports takes a leading `const void*` pointing to a `pipelink_host_view`
 (`<pipelink/host_view.h>`): `{residue, scalars}` pointers into the kernel
 parameters, NULL for a record the owner does not declare. The caller's
@@ -161,9 +239,15 @@ proxy, tile, layout, ring and protocol.
 
 `pl::mbarrier{full, empty, init, release}` describes a full/empty barrier ring.
 
-- A side is `pl::side{slots, arrive, tx_bytes}`. Transaction bytes may be
-  `pl::tile`, `pl::sum{...}` or `pl::member{endpoint, tx_bytes}` for completions
-  shared with other endpoints.
+- A side is `pl::side{slots, arrive, tx_bytes}`. The ring implies the slot
+  handle's allocation: when no stage in the assembly claims it, the linker
+  allocates one kernel-lived `mbarrier` extent equal to the producer's ring
+  depth, owned by the producing stage. Pack rejects a plain claim that restates
+  it (`P-CLAIM`); claim the handle explicitly only to add placement: a phase
+  lifetime, `.at`, `.offset`, `.alias` or `.roles`. Endpoints dropped with
+  unreferenced exports allocate nothing. Transaction bytes may be `pl::tile`,
+  `pl::sum{...}` or `pl::member{endpoint, tx_bytes}` for completions shared with
+  other endpoints.
 - Arrival counts are positive integers, the string `"1"`, or `+`-separated role
   terms `[k*]threads(role)` and `[k*]warps(role)`, for example
   `"threads(scheduler)+2*threads(epilogue)+warps(load)"`. Each role uses its
@@ -193,8 +277,8 @@ The default depth is one.
 
 - `release: "never"` is one-shot and requires depth one.
 - `release: "external"` reuses phases at any positive depth without an empty
-  barrier. This is the owners' promise that their other channels enforce
-  arrive/wait alternation; the linker does not prove it.
+  barrier. The owners' other channels must then keep arrivals and waits
+  alternating; the linker takes this on trust.
 
 Either mode accepts stage or dispatch initialization. Dispatch initializes the
 full slot at the declared arrival count and publishes it with a cluster fence
@@ -225,10 +309,11 @@ Counters signal across CTAs or GPUs through a global-memory slot:
 
 A consumer may instead poll relaxed and then fence:
 `pl::counter{slot, "red.release.gpu", "ld.relaxed.gpu+fence.acquire.gpu"}` (or the
-`.sys` spellings). `"system"` scope is admitted only for counters.
+`.sys` spellings). Only counters accept `"system"` scope.
 
 A counter channel takes one or more producers and any number of consumers,
-across stages. Arrivals are additive; a slot no stage acquires is harmless.
+across stages. Arrivals are additive, and a slot that no stage acquires is
+harmless.
 Endpoints agree on scope, slot and release pattern; the acquire pattern is each
 consumer's choice. A consumer without a producer is an `L-PAIR` error. `link.json`
 records one `protocol_expansions[].counter` per channel as
@@ -249,14 +334,14 @@ callers' roles there.
 
 ### Unused exports and endpoint association
 
-As with an ordinary linker, a provided export that no stage calls is not an
-error. Its uncalled channels are dropped before pairing, together with every
-endpoint whose `.exports(...)` are all unreferenced; `link.json` lists them under
+As with an ordinary linker, a provided export that no stage calls is allowed.
+Its uncalled channels are dropped before pairing, together with every endpoint
+whose `.exports(...)` are all unreferenced; `link.json` lists them under
 `dropped_endpoints`. An endpoint without `.exports(...)` is always part of the
 interface, and an endpoint referenced by a host transfer cannot be dropped
 (`L-PAIR`). The association is the author's promise: a wrong one can drop a live
 endpoint. Dropped exports must also leave the device link, which is why exports
-should be plain strong definitions; a kept `__attribute__((used))` body that
+should be plain strong definitions: a kept `__attribute__((used))` body that
 references a dropped endpoint's handles fails `L-LINK` as an unresolved extern.
 
 ## Topology and scheduling
@@ -264,7 +349,23 @@ references a dropped endpoint's handles fails `L-LINK` as an unresolved extern.
 `PL_TOPOLOGY(pl::topology{cta_group, cluster, persistent, scheduler, multicast})`
 declares the scheduling family: `cta_group` 1 or 2, the cluster shape or legal
 set, persistence, and `static`, `stream_k` or `clc` scheduling (profile
-permitting; see [Profiles](profiles.md)).
+permitting; see [Profiles](profiles.md)). A role-bearing stage without it gets
+the default (cta_group 1, cluster 1×1×1, not persistent, static). A role-less
+stage without it has no `topology` in its manifest and constrains nothing. The
+solver intersects only the declared topologies, so a role-less library that does
+declare one (a cluster shape, CLC) still constrains the launch.
+
+### Entry rendezvous
+
+`PL_ENTRY_RENDEZVOUS(0, threads);` declares that every role of the stage
+executes `bar.sync 0, threads` at entry, for example after one role
+materializes stage-owned mbarriers that every other role then uses. The
+manifest records `stage.entry_rendezvous: {"barrier": 0, "threads": N}`. Barrier
+0 is the only id excluded from named-barrier allocation, and `threads` is a
+whole number of warps. Role-less stages cannot declare one. At link, `L-JOIN`
+requires that, if any role-bearing stage declares one, every role-bearing stage
+declares the identical object, with `threads` equal to the solved launch thread
+count.
 
 `PL_SCHEDULER_STRATEGY("clc-sm100-v1",
 R"(["swizzle_size","raster_order","cluster_shape_m","cluster_shape_n"])")` adds a
@@ -291,6 +392,27 @@ jointly; see [Pack and link](pack-and-link.md#resource-solver).
 - `PL_CLAIM_REGS(handle, reg_group, {values...}, roles...)` declares register
   allocation choices for a role group; it has no interval or alignment.
 
+`PL_DOMAIN_CAPACITY(domain, capacity)` states the capacity of a profile domain
+sized by the pipeline (the interpreter `instr_*` domains), for example
+`PL_DOMAIN_CAPACITY("instr_page", mk_config::NUM_PAGES)`. The linker fills
+`pipeline.domains` from it; stages declaring one domain must agree, and a
+pipeline-declared capacity must equal it (`L-HANDLE`).
+
+Any stage, including a role-less callable provider, can constrain the uniform
+kernel launch register cap without naming consumer roles:
+
+```cpp
+PL_CLAIM_REGS("pipelink_launch_regs", "launch", {168});
+```
+
+This reserved handle/group combination takes no roles. Its values cap the
+register count of the whole launch (unit granularity, up to the profile's
+`launch_regs_max`); they are not `setmaxnreg` allocations for a role group, so
+the claim creates no register subgroup and no owner-internal register
+redistribution. The pipeline declares a `pipelink_launch_regs` handle with
+owner `reg_group:launch`; the solver intersects its domain with every stage's
+declared launch-cap choices. An empty intersection is `L-REGS`.
+
 ### Lifetimes
 
 A claim's lifetime is `"kernel"` (the default), `"phase:<name>"`, or a tensor
@@ -306,16 +428,16 @@ PL_CLAIM_EX(pl::claim("pipelink_after", "smem").extent(128).align(16)
 ```
 
 Claims in two phases may share storage when the pipeline lists that phase pair in
-its `exclusive` set. A tensor interval
-names an export or import of the claiming stage itself. Export events are
+its `exclusive` set. A tensor interval names an export or import of the
+claiming stage itself. Export events are
 `identity.work`, `readiness.after` and `readiness.reuse_after`; import events are
 the selected site's invocation, readiness rendezvous and completion. Omitting
 `to` means kernel end. Unknown names and non-increasing bounds reject with
 `L-PHASE`.
 
 Two non-alias shared-memory claims may overlap when one interval ends no later
-than the other begins **on the same tensor connection**. Events resolve per
-connection, never by matching event strings across connections. Ordering needs
+than the other begins **on the same tensor connection**: events resolve per
+connection, not by matching event strings across connections. Ordering needs
 the site's promises:
 
 - Work and readiness ordering require every selected import site to promise
@@ -328,12 +450,13 @@ the site's promises:
 - An unresolved bound conservatively becomes kernel start or end; an unconnected
   endpoint is kernel-lived.
 
-Overlap never extends to TMEM, named barriers or other connections. When the
-solver actually overlaps two claims, the generated event helper executes
+Interval overlap applies only to shared-memory claims on the same connection;
+TMEM and named-barrier claims cannot overlap through tensor events. When the
+solver overlaps two claims, the generated event helper executes
 `fence.proxy.async.shared::cta` in every cohort thread before the event barrier,
 and `link.json` reports the overlap under `tensor.smem_reuse`.
 
-The owner promises, and the linker does not check, that:
+The linker trusts the owner to guarantee that:
 
 - a claim ending at an event has completed every access in every proxy before
   its threads arrive: TMA writes landed and waited, WGMMA/tcgen05 shared reads

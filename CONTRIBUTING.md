@@ -1,40 +1,43 @@
 # Contributing to PipeLink
 
 PipeLink is a research prototype: a linker for separately compiled, opaque partial
-GPU kernels. Contributions must preserve correctness and acceptance evidence;
-never weaken a gate or substitute an easier comparison to make a result pass.
-Prefer clean cutovers over compatibility shims and derive
-facts rather than adding redundant validation or authoring ceremony.
+GPU kernels. A contribution must keep every result correct and keep the acceptance
+evidence behind it intact, so never weaken a gate or swap in an easier comparison to
+make a result pass. Prefer clean cutovers to compatibility shims, and derive facts
+instead of adding redundant validation or authoring ceremony.
 
-Teaching examples live in `examples/`, and the attention and megakernel case
-studies in `campaigns/`. After cloning, run
-`git submodule update --init --recursive` to obtain the pinned `third_party/`
+Teaching examples live in `examples/`; the attention, megakernel and MoE training
+case studies live in `campaigns/`. After cloning, run
+`git submodule update --init --recursive` to fetch the pinned `third_party/`
 sources and their nested dependencies.
 
 ## Evidence records
 
 Campaign tools write machine-readable receipts (`results/*.json`, `evidence/*.json`)
-locally; they are not part of the published tree. The committed Markdown reports
-next to them are rendered from those receipts and are the published evidence.
+locally; they are not published. The committed Markdown reports next to them are
+rendered from those receipts and are the published evidence.
 
 ## Checks and evidence
 
-From the repository root, run the GPU-free tests (see [pipec/README.md](pipec/README.md)
-for environment/toolchain setup; GPU-gated cases skip without hardware):
+From the repository root, run the GPU-free tests (GPU-gated cases skip without
+hardware; see [pipec/README.md](pipec/README.md) for environment and toolchain setup):
 
 ```sh
 uv run --project pipec --locked python -m pytest pipec/tests evaluator
 ```
 
-For every new composition, provide oracle `allclose`, linked/control bitwise
-comparison where deterministic, same-source parity timing with clocks reported,
-and **racecheck + synccheck on both linked and one-TU executions, without an
-opt-out**. Record normalized SASS diagnostics and explain differences.
+Every new composition needs this evidence:
 
-**No hash-pinning of rebuildable artifacts:** no freeze markers, hash ledgers or
-public content-hash literals. Byte identity belongs only where it is the
-hypothesis (declaration/layout identity, package-invariance/source-withholding
-proofs, numerical bitwise comparisons); payload digests may be non-gating
-provenance. Dependency integrity pins remain valid. Preserve third-party notices;
+- an oracle `allclose` check;
+- a bitwise linked/control comparison where the computation is deterministic;
+- same-source parity timing, with clocks reported;
+- **racecheck and synccheck on both the linked and the one-TU executions**, with no opt-out;
+- recorded normalized SASS diagnostics, with any differences explained.
+
+**Do not hash-pin rebuildable artifacts:** no freeze markers, hash ledgers or public
+content-hash literals. Check byte identity only where it is the hypothesis
+(declaration or layout identity, package-invariance and source-withholding proofs,
+bitwise numerical comparisons). Payload digests may be recorded as provenance but
+must not gate. Dependency integrity pins are fine. Preserve third-party notices;
 PipeLink's license and attribution inventory are in [LICENSE](LICENSE) and
 [NOTICE](NOTICE).

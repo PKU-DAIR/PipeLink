@@ -33,7 +33,6 @@ extern "C" __device__ void sm90_signal_consumer_work(const void* raw, unsigned) 
 PL_STAGE("org.sm90.signal.consumer", "1.0.0");
 PL_PARAMS(Params, completions);
 PL_ROLE(consumer, sm90_signal_consumer_work, 1);
-PL_CLAIM_EX(pl::claim("pipelink_signal_full", "mbarrier").extent(1));
 PL_ENDPOINT(completion, pl::signal_endpoint("completion", pl::consume, "consumer")
     .scope(SIGNAL_SCOPE)
     .protocol(pl::mbarrier{

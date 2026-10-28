@@ -34,5 +34,4 @@ PL_HOST_CHANNEL(4, uint32_t, pl::host::channel("gemm.ag.gen", "u32").rank(1).rea
 PL_HOST_SCHEDULER(pl::host::scheduler("gemm.owner", "gemm.static-grid", pl::host::schema()));
 PL_HOST_VARIANTS("gemm.load.ag", pl::host::variants(std::vector<pl::fixed_bindings>{{}}));
 PL_HOST_VARIANTS("gemm.mma", pl::host::variants(std::vector<pl::fixed_bindings>{{}}));
-PL_HOST_TARGET();
 #endif

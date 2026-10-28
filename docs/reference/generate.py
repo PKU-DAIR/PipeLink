@@ -59,10 +59,10 @@ def clauses() -> str:
         "(registered primary phases)",
     )
     text += (
-        "A primary phase names the check inside the compiler, not necessarily the "
-        "CLI command that reports it. For example, `link` also performs load, "
-        "layout, protocol and solve checks. Clause IDs are extensible; this is "
-        "the complete catalogue registered by the current CLI.\n\n"
+        "A primary phase names the compiler check that raises a clause; one CLI "
+        "command can run several phases (`link` also runs load, layout, protocol "
+        "and solve checks). Clause IDs are extensible; this catalogue lists every "
+        "clause the CLI registers.\n\n"
     )
     phases = sorted({CLAUSE_PHASES[key] for key in catalogue}, key=PHASE_ORDER.index)
     for phase in phases:
@@ -82,13 +82,11 @@ def profiles() -> str:
     profiles = [PROFILES[name] for name in sorted(PROFILES)]
     text = header("Target profiles", "[`pipec2.profile`](../../pipec/src/pipec2/profile.py)")
     text += (
-        "These are the compiler's declared target contracts, not a claim that "
-        "every example runs on every profile. `pack --profile` selects one; "
-        "linked packages must agree on the target stamp. See the "
-        "[coverage matrix](../index.md#mechanism--profile-coverage) and "
-        "[compiler admission rules](../../pipec/README.md#target-profiles). "
-        "Values below are taken directly from `PROFILES`, `Profile.arch`, "
-        "`TargetCaps` and `Domain`; `null` means the field is absent.\n\n"
+        "Each profile is a target contract the compiler declares. `pack --profile` "
+        "selects one; linked packages must agree on the target stamp. How pack and "
+        "link enforce profiles is in [pipec](../../pipec/README.md#target-profiles). "
+        "Values come directly from `PROFILES`, `Profile.arch`, `TargetCaps` and "
+        "`Domain`; `null` means the field is absent.\n\n"
     )
     text += "## Names and targets\n\n"
     text += table(

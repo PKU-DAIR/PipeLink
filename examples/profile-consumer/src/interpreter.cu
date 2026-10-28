@@ -37,7 +37,6 @@ extern "C" __device__ void org_pipelink_profile_consumer_0_interpreter_role_sche
 
 namespace pipelink_profile_consumer {
 PL_STAGE("org.pipelink.profile-consumer.0-interpreter", "1.0.0");
-PL_NO_PARAMS();
 PL_HOST_GROUP("org.pipelink.profile-consumer", "org.pipelink.profile-consumer.params",
               "interpreter", plk_header_v2, PLK_ABI_TYPE_ID(plk_header_v2), false);
 PL_HOST_ABI_TYPE(100, InterpreterParams,
@@ -61,7 +60,6 @@ PL_HOST_CHANNEL(6, unsigned,
                 pl::host::channel("org.pipelink.profile-consumer.errors", "u32").rank(1).read_write().caller("errors"));
 PL_HOST_SCHEDULER(pl::host::scheduler("org.pipelink.profile-consumer",
     "org.pipelink.profile-consumer.static-grid.v1", pl::host::schema()));
-PL_HOST_TARGET();
 PL_ROLE(sched, org_pipelink_profile_consumer_0_interpreter_role_sched, kThreads / 3 / 32);
 PL_CLAIM_EX(pl::claim("pipelink_profile_consumer_scheduler_smem_base", "smem")
     .extent(sizeof(SchedulerShared)).align(alignof(SchedulerShared))

@@ -19,7 +19,7 @@ REPEATS = 2
 
 
 class _OracleAdapter:
-    """Expose caller-owned resource loans to the existing cuBLAS oracle."""
+    """Expose caller-owned resource loans to the cuBLAS oracle."""
 
     def __init__(self, backend, resources):
         self.addresses = {name: resource.address for name, resource in resources.items()}
@@ -81,7 +81,7 @@ def _run_image(out, result, image, inputs, config):
         specs = _specs(inputs)
         for name, spec in specs.items():
             fixture.tensor(name, data=poison if name == "output" else inputs[name].tobytes(), **spec)
-        # Oracle storage is caller-owned too, but is not a declared provider resource.
+        # Caller-owned oracle storage, outside the provider's declared resources.
         oracle = fixture.tensor("oracle", data=None, **specs["output"])
         loans = {name: fixture.resources[name] for name in specs}
         # cuBLAS binds the current context; make it this backend's device context.
@@ -98,7 +98,7 @@ def _run_image(out, result, image, inputs, config):
         output = loans["output"]
 
         def launch_readback(launch):
-            # Poison/readback belong to the caller, never to the capture body.
+            # Poison and readback stay outside the captured launch.
             backend.upload(output.address, poison)
             launch(stream)
             backend.synchronize()
@@ -114,8 +114,8 @@ def _run_image(out, result, image, inputs, config):
             def open_session():
                 return open_host(result, _providers(out), {}, loans, scalars, backend, cluster)
 
-            # Scalars are immutable session inputs. Reopen for each alpha, rather
-            # than mutating a pinned params image or building inside CUDA capture.
+            # Scalars are fixed when a session opens, so each alpha opens its own session,
+            # building its params before any CUDA capture.
             with open_session() as session:
                 case["geometry"] = dict(session.geometry)
                 case["transfer_reports"] = session.transfer_reports
@@ -178,7 +178,7 @@ def _cli(out, inputs, expected, baseline):
 
     reports = []
     for index, (alpha, output, invocation) in enumerate(_prepare_cli(out, inputs)):
-        # This is the installed pipec2 CLI entry point, not a custom launcher.
+        # The installed pipec2 CLI launches the link.
         command = [sys.executable, "-m", "pipec2.cli", "launch", str(out / "link/link.json")]
         for group, provider in _providers(out).items():
             command.extend(("--provider", f"{group}={provider}"))
@@ -205,7 +205,7 @@ def main():
     parser.add_argument("--prepare-inputs", action="store_true",
                         help="write caller fixture files and host-inputs JSON without launching")
     parser.add_argument("--single", action="store_true",
-                        help="linked persistent-session/graph checks only; no sanitizer recursion")
+                        help="linked session/graph checks only (sanitizer subprocess)")
     args = parser.parse_args()
     from tools.pipelink_env import load
 
@@ -220,7 +220,7 @@ def main():
     if not config["PIPELINK_CUDA_HOME"]:
         parser.error("set PIPELINK_CUDA_HOME in .env")
     os.environ.update(config)
-    # Set physical selection before importing or constructing any CUDA consumer.
+    # Select the GPU before anything imports or initializes CUDA.
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
     scratch = Path(config["PIPELINK_SCRATCH_ROOT"]) / "hopper-gemm-split" / f"host-{args.profile}"
     scratch.mkdir(parents=True, exist_ok=True)
@@ -252,7 +252,7 @@ def main():
         "stages": {"gemm.load": {"warp": 8}, "gemm.mma": {"warps": list(range(8))},
                    "gemm.epilogue.scaled-store": {"warp": 9}},
     }
-    # Both tools run unconditionally, even if a preceding tool reports failure.
+    # Both tools always run, even if the first reports a failure.
     results["sanitize"] = sanitize(
         [sys.executable, str(HERE / "run_host.py"), "--profile", args.profile,
          "--gpu", str(gpu), "--artifacts", str(out), "--single"],

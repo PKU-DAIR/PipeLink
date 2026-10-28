@@ -63,8 +63,8 @@ struct MsaWorklist {
         }
       }
     }
-    // Eight GQA16 tokens fill a tile. Requiring G=128 shared rows avoids
-    // turning the mostly unique uniform sets into sparsely occupied items.
+    // Eight GQA16 tokens fill a tile. Requiring G=128 shared rows keeps the
+    // mostly unique uniform sets from producing sparsely occupied items.
     constexpr int group_rows = 128;
     struct Group { int head, begin, tokens; };
     std::vector<Group> groups;

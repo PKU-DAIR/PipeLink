@@ -92,9 +92,8 @@ __device__ __forceinline__ void run_warp(
         *reinterpret_cast<const uint128_t*>(q + (row % heads) * head_dim + column),
         *reinterpret_cast<uint128_t*>(shared.q + QLayout{}(make_coord(row, column))));
   }
+  // The first K/V wait also acquires Q; their disjoint copies can overlap.
   cp_async_fence();
-  cp_async_wait<0>();
-  __syncwarp();
 
   Mma mma;
   auto thread_mma = mma.get_slice(lane);

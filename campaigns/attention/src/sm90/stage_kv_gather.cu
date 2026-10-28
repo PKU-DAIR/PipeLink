@@ -1,9 +1,10 @@
-// Comm owner, KV gather for the sm90 attention CTA contract (shared push publication, device-resident launch generation, cross-launch release wait, CTA read-drain).
-// Replaces `empty` on aux warps 2-3: performs empty's initialization join, then
-// both warps drain the rank-local ticket queue. One ticket = one 128-token chunk
-// (K and V, all KV heads) of one owned chunk, pushed by one warp into a
-// peer's gathered buffers, then released on that peer's block counter.
-// The generic copy/queue/counter/generation/release code is push_gather.cuh.
+// KV gather (comm owner) for the sm90 attention CTA contract: push publication,
+// device-resident launch generation, cross-launch release wait, CTA read-drain.
+// Replaces `empty` on aux warps 2-3: it performs empty's initialization join,
+// then both warps drain the rank-local ticket queue. One ticket is one 128-token
+// block (K and V, all KV heads) of an owned chunk: one warp pushes it into a
+// peer's gathered buffers and then releases that peer's block counter.
+// The generic copy/queue/counter/generation/release code is in push_gather.cuh.
 #include "split_context.cuh"
 #include "cp_params.cuh"
 #include "push_gather.cuh"
@@ -46,7 +47,8 @@ extern "C" __device__ void PIPELINK_SM90_SYMBOL(kv_gather_role_gather)(
     int const owner_chunk = high ? 2 * p.world - 1 - p.rank : p.rank;
     int const block = owner_chunk * int(chunk_blocks) + int(chunk % chunk_blocks);
     if (!(cleared & (1u << peer))) {
-      // Cross-launch release wait: the peer finished reading its gathered buffers in every earlier launch.
+      // Cross-launch release wait: the peer has finished reading its gathered
+      // buffers in every earlier launch.
       warp_wait_released(released_local, peer, generation);
       cleared |= 1u << peer;
     }
@@ -64,9 +66,9 @@ extern "C" __device__ void PIPELINK_SM90_SYMBOL(kv_gather_role_gather)(
   // Both comm warps' pushes are fenced; only the comm warps execute this barrier.
   asm volatile("bar.sync %0, %1;" :: "r"(pipelink_cp_comm_barrier()), "n"(64) : "memory");
   if (local_warp != 0) return;
-  // CTA read-drain: join cp-load, whose gathered-buffer TMA reads have all landed. It
-  // signals only after its last issue, so poll with a sleep backoff instead of
-  // occupying an issue slot shared with core warps for the whole launch.
+  // CTA read-drain: wait until cp-load reports that all its gathered-buffer TMA
+  // reads have landed. It signals only after its last issue, so poll with a
+  // sleep backoff to leave the issue slot shared with core warps free.
   uint32_t const reads_done = cute::cast_smem_ptr_to_uint(storage + 16 * pipelink_cp_gather_reads_done());
   for (uint32_t done = 0;;) {
     asm volatile("{ .reg .pred p; mbarrier.test_wait.parity.shared::cta.b64 p, [%1], 0; selp.u32 %0, 1, 0, p; }"
@@ -92,28 +94,11 @@ PL_CLAIM_EX(pl::claim("pipelink_cp_warp_gather", "warp").extent(2).align(1).at(2
 PL_CLAIM_REGS("pipelink_attention_regs_aux_wg", "aux_wg", {40}, "gather");
 PL_CLAIM("pipelink_attention_smem_base", "smem", Facts::shared_bytes, Facts::shared_align, "kernel");
 PL_CLAIM("pipelink_attention_mbarrier_base", "mbarrier", Facts::pipeline_slots, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_q_full", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_q_empty", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_k_full", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_k_empty", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_v_full", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_v_empty", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_work_core_full", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_work_core_empty", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_work_epilogue_full", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_work_epilogue_empty", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_kv_index_full", "mbarrier", 4, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_kv_index_empty", "mbarrier", 4, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_corrected_o_full", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_corrected_o_empty", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_final_stats_full", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_final_stats_empty", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_o_drained_full", "mbarrier", 1, 1, "kernel");
 PL_CLAIM("pipelink_cp_kv_ready_slot", "gmem_counter", kCpMaxChunks, 1, "kernel");
-PL_CLAIM("pipelink_cp_gather_reads_done", "mbarrier", 1, 1, "kernel");
 // Comm-only counted barrier (2 warps) before the CTA-done ticket (push publication, CTA read-drain).
 PL_CLAIM("pipelink_cp_comm_barrier", "named_barrier", 1, 1, "kernel", "gather");
 PL_TOPOLOGY(pl::topology{1, pl::cluster{{1, 1, 1}, pl::launch{1, {1, 1, 1}}}, true, "static", {}});
+PL_ENTRY_RENDEZVOUS(0, Config::kThreads);
 
 PL_ENDPOINT(kv_ready, pl::endpoint("kv_ready", pl::produce, "gather")
     .space("gmem").scope("system").proxy("generic").tile("u32", {1})

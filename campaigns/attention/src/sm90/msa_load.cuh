@@ -48,7 +48,7 @@ CUTLASS_DEVICE void run_msa_load(MsaLoadParams const& params, SplitContext<Confi
   int const lane = threadIdx.x % 32;
   bool const elected = lane == 0;
   c.initialize();  // All roles join the common 384-thread rendezvous.
-  if (!elected) return;  // TMA-only load: no cooperative row-map writers remain.
+  if (!elected) return;  // TMA-only load: one lane issues everything.
   if (elected) {
     prefetch_tma_descriptor(params.tma_load_Q.get_tma_descriptor());
     prefetch_tma_descriptor(params.tma_load_K.get_tma_descriptor());
@@ -125,7 +125,7 @@ CUTLASS_DEVICE void run_msa_load(MsaLoadParams const& params, SplitContext<Confi
               uint64_t(TMA::CacheHintSm90::EVICT_FIRST),
               destination + token * 1024 + plane * 8192, plane * 64, 0, item.kv_head, q);
       }
-      // All sixteen boxes complete the existing 32-KiB Q transaction.
+      // All sixteen boxes complete the 32-KiB Q transaction.
     }
     if (elected) {
       // V stage zero aliases output: only epilogue may grant its next lifetime.

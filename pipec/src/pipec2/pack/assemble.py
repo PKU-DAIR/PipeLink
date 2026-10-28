@@ -1,4 +1,4 @@
-"""Turn the finite annotation registry into the linker's tensor-v2 carrier."""
+"""Turn the emitted annotation registry into a stage manifest with tensor-v2 records for the linker."""
 from __future__ import annotations
 
 from collections import defaultdict
@@ -26,6 +26,7 @@ for _clause, _description in {
     "P-INIT": "A declared initializing warp belongs to its init owner's absolute warp claim.",
     "P-TENSOR-SOURCE": "Tensor source parameters use the opaque tensor source ABI.",
     "P-TENSOR-CALLS": "Tensor exports name their declared source and release call endpoints.",
+    "P-CALL": "Callable interfaces and call sites name declared exports and callsites.",
 }.items():
     register_clause(_clause, phase="pack", description=_description)
 
@@ -36,7 +37,8 @@ def _reject(clause: str, path: str, message: str, **detail: Any) -> None:
 
 def _records(registry: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
     kinds = {"stage", "params", "type", "role", "export", "call", "endpoint", "claim", "claim_smem", "claim_regs",
-             "variant", "descriptor", "topology", "scheduler_strategy", "tensor_export", "tensor_import", "site", "binding", "map", "hint"}
+             "variant", "descriptor", "topology", "scheduler_strategy", "tensor_export", "tensor_import", "site", "binding", "map", "hint",
+             "entry_rendezvous", "interface", "call_site", "domain_capacity"}
     kinds |= HOST_RECORD_KINDS
     if set(registry) != {"records"} or not isinstance(registry["records"], list):
         _reject("P-MAP", "$.records", "expected a registry records array")
@@ -46,7 +48,7 @@ def _records(registry: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
         if not isinstance(record, dict) or record.get("kind") not in kinds:
             _reject("P-MAP", f"$.records[{index}]", "unknown registry record kind")
         kind = record["kind"]
-        name = record.get("name", record.get("handle", record.get("key", "")))
+        name = record.get("name", record.get("handle", record.get("key", record.get("domain", ""))))
         if kind == "variant":
             name = record.get("index")
             if type(name) is not int or name < 0:
@@ -58,6 +60,14 @@ def _records(registry: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
             _reject("P-MAP", f"$.records[{index}]", "duplicate registry record", kind=kind, name=name)
         seen.add(key)
         grouped[kind].append(record)
+    # A host group or providerless declaration passes params through residue and scalars,
+    # so its stage blob is always empty and PL_NO_PARAMS would be redundant.
+    host_owned = bool(grouped["host_group"] or grouped["host_declarations"])
+    if host_owned and grouped["params"]:
+        _reject("P-MAP", "$.records", "PL_HOST_GROUP / PL_HOST_DECLARATIONS imply empty params; "
+                "remove PL_NO_PARAMS / PL_PARAMS")
+    if host_owned:
+        grouped["params"].append({"kind": "params", "type": "void", "bytes": 0, "align": 1, "members": []})
     for kind in ("stage", "params"):
         if len(grouped[kind]) != 1:
             _reject("P-MAP", "$.records", f"expected exactly one {kind} record")
@@ -107,7 +117,7 @@ class _Maps:
             for index, output in enumerate(outputs):
                 fitted_expr = fit_named(rows, inputs, index, sort_env=env)
                 if fitted_expr is None:
-                    # Only the failure path repeats fitting to obtain its exact first-row witness.
+                    # Refit only on failure, to report the first row that does not fit.
                     fitted_expr = fit_named_or_raise(rows, inputs, index, sort_env=env,
                                                     output_name=f"{name}.{output}")
                 fitted[output] = fitted_expr.to_json_obj()
@@ -143,16 +153,21 @@ def _signature(record: Mapping[str, Any]) -> str:
     return f"{match[1]}({match[2]})"
 
 
-def _call(record: dict[str, Any]) -> dict[str, Any]:
+def _call(record: dict[str, Any], site: dict[str, Any] | None) -> dict[str, Any]:
     declaration = _declaration(record)
     export = record.get("export", record["name"])
-    return {
+    protocol = {"kind": "call", "export": export, "signature": _signature(record), **declaration}
+    if site is not None:
+        protocol["site"] = {key: site[key] for key in ("cohort", "params")}
+    endpoint = {
         "name": record["name"], "direction": record["direction"], "owner_role": record["role"],
         "space": "reg", "scope": "cta", "proxy": "generic", "tile": {"dtype": "u64", "shape": [1]},
         "layout": {"encoding": "pl-layout-v2", "shape": [[1]], "stride": [[1]], "elem_bits": 64},
-        "protocol": {"kind": "call", "export": export, "signature": _signature(record), **declaration},
-        "binds": {},
+        "protocol": protocol, "binds": {},
     }
+    if "exports" in record:
+        endpoint["exports"] = record["exports"]
+    return endpoint
 
 
 def _claim_roles(claim: dict[str, Any], roles: dict[str, Any]) -> list[str]:
@@ -196,13 +211,41 @@ def _check_init_warps(manifest: dict[str, Any]) -> None:
                             base=base, extent=size, variant=variant["index"])
 
 
+def _check_slot_restatements(manifest: dict[str, Any]) -> None:
+    """Reject claims that restate a ring's barrier-slot allocation, which the linker synthesizes.
+
+    A slot handle that also backs native barrier storage keeps its local claim.
+    """
+    depths, native = {}, set()
+    for endpoint in manifest["endpoints"]:
+        protocol = endpoint["protocol"]
+        if protocol["kind"] != "mbarrier" or "ring" not in endpoint:
+            continue
+        native.update(protocol[side]["native"]["base"] for side in ("full", "empty")
+                      if "native" in (protocol.get(side) or {}))
+        depth = endpoint["ring"]["depth"]
+        implied = ({"const": depth["fixed"], "per": {}} if "fixed" in depth
+                   else {"const": 0, "per": {depth["handle"]: 1}})
+        for side in ("full", "empty"):
+            if "slots" in (protocol.get(side) or {}):
+                depths[protocol[side]["slots"]] = implied
+    for claim in manifest["claims"]:
+        implied = depths.get(claim["handle"])
+        if (implied is not None and claim["handle"] not in native and claim["domain"] == "mbarrier"
+                and claim["extent"] == implied
+                and claim["align"] == 1 and claim["lifetime"] == "kernel"
+                and not {"roles", "alias", "offset", "absolute_base"} & claim.keys()):
+            _reject("P-CLAIM", f"$.claims.{claim['handle']}",
+                    "the ring depth implies this barrier slot allocation; remove the claim")
+
+
 def assemble(
     registry: Mapping[str, Any], *, profile: str = "sm_103a", toolkit: str = "cuda-13.3.0",
     provenance_inputs: Mapping[str, str] | None = None,
     facts: ObjectFacts | None = None,
     math: MathMode | None = None,
 ) -> dict[str, Any]:
-    """Assemble and fit one registry; optional object facts enforce cross-source checks."""
+    """Assemble and fit one registry into a manifest; with object facts, also run check_sources."""
     records = _records(registry)
     stage = records["stage"][0]
     params = records["params"][0]
@@ -217,6 +260,29 @@ def assemble(
             _reject("P-SYM", f"$.stage.roles.{record['name']}", "role declaration does not implement the fixed v2 entry ABI",
                     signature=signature)
     exports = {record["name"]: {"symbol": record["symbol"], **_declaration(record)} for record in records["export"]}
+    # A provided call names its export, implementation and reflected declaration, so it
+    # implies the export. PL_EXPORT is needed only for exports with no provided call.
+    explicit = set(exports)
+    for record in records["call"]:
+        if record["direction"] != "consume":
+            continue
+        name = record["export"]
+        if name in explicit:
+            _reject("P-CALL", f"$.stage.exports.{name}",
+                    "PL_CALL pl::consume implies this export; remove the PL_EXPORT restatement")
+        implied = {"symbol": record["symbol"], **_declaration(record)}
+        if exports.setdefault(name, implied) != implied:
+            _reject("P-CALL", f"$.stage.exports.{name}", "provided calls of one export name different implementations")
+    for record in records["interface"]:
+        if record["name"] not in exports:
+            _reject("P-CALL", f"$.stage.exports.{record['name']}.interface", "PL_INTERFACE names an export this stage does not declare")
+        exports[record["name"]]["interface"] = {key: record[key] for key in ("cohort", "collectives", "params")}
+    callers = {record["name"]: record for record in records["call"] if record["direction"] == "produce"}
+    sites = {}
+    for record in records["call_site"]:
+        if record["name"] not in callers:
+            _reject("P-CALL", f"$.endpoints.{record['name']}.protocol.site", "PL_CALL_SITE names no PL_CALL produce endpoint")
+        sites[record["name"]] = record
     claims = []
     for record in [*records["claim"], *records["claim_smem"]]:
         typed = record["kind"] == "claim_smem"
@@ -251,10 +317,15 @@ def assemble(
             }:
                 _reject("P-SYM", f"$.stage.variants[{record['index']}].entry",
                         "variant declaration does not implement the fixed v2 entry ABI", signature=signature)
-    topology = records["topology"][0] if records["topology"] else {
-        "cta_group": 1, "cluster": {"compiled": [1, 1, 1], "launch": {"x_multiple_of": 1, "max": [1, 1, 1]}},
-        "persistent": False, "scheduler": "static", "multicast": [],
-    }
+    if records["topology"]:
+        topology = records["topology"][0]
+    elif roles:
+        topology = {
+            "cta_group": 1, "cluster": {"compiled": [1, 1, 1], "launch": {"x_multiple_of": 1, "max": [1, 1, 1]}},
+            "persistent": False, "scheduler": "static", "multicast": [],
+        }
+    else:
+        topology = None  # A role-less stage without PL_TOPOLOGY constrains no launch topology.
     tensor: dict[str, Any] = {"version": "tensor-v2", "exports": [], "imports": [], "sites": [],
                               "bindings": [{key: value for key, value in record.items() if key != "kind"}
                                            for record in records["binding"]]}
@@ -352,17 +423,27 @@ def assemble(
         "stage": {"id": stage["id"], "version": stage["version"], "symbol_prefix": prefix,
                   "entry_abi": "v2", "entry_signature": "void(const void* params, unsigned variant)",
                   "roles": roles, "exports": exports, "variants": variants},
-        "endpoints": [*[_call(record) for record in records["call"]],
+        "endpoints": [*[_call(record, sites.get(record["name"]) if record["direction"] == "produce" else None)
+                        for record in records["call"]],
                       *[{"owner_role": record["role"],
                          **{key: value for key, value in record.items() if key not in {"kind", "role"}}}
                         for record in records["endpoint"]]], "claims": claims,
-        "topology": {**{key: topology[key] for key in ("cluster", "persistent", "scheduler", "multicast")},
-                     "cta_group": {"fixed": topology["cta_group"]}},
         "params": {**{key: params[key] for key in ("type", "bytes", "align")},
                    "sha256_of_layout_probe": sha256_hex(canonical_bytes(params))},
         "payload": {"file": "stage.o"}, "tensor": tensor,
         "provenance": {"mechanism": "pack-cu-v1", "inputs": inputs, "sections": sections},
     }
+    if topology is not None:
+        manifest["topology"] = {**{key: topology[key] for key in ("cluster", "persistent", "scheduler", "multicast")},
+                                "cta_group": {"fixed": topology["cta_group"]}}
+    else:
+        del sections["$.topology"]
+    if records["type"]:
+        manifest["types"] = sorted(({key: record[key] for key in ("name", "bytes", "align", "members")}
+                                    for record in records["type"]), key=lambda item: item["name"])
+        sections["$.types"] = "compiled"
+    if records["entry_rendezvous"]:
+        manifest["stage"]["entry_rendezvous"] = {key: records["entry_rendezvous"][0][key] for key in ("barrier", "threads")}
     if records["scheduler_strategy"]:
         manifest["topology"]["scheduler_strategy"] = {
             key: records["scheduler_strategy"][0][key] for key in ("id", "inputs")
@@ -371,6 +452,9 @@ def assemble(
         manifest["stage"]["descriptor"] = {key: records["descriptor"][0][key] for key in ("bytes", "align")}
         sections["$.stage.descriptor"] = "compiled"
     _check_init_warps(manifest)
+    _check_slot_restatements(manifest)
+    if records["domain_capacity"]:
+        manifest["domain_capacities"] = {record["domain"]: record["capacity"] for record in records["domain_capacity"]}
     if records["hint"]:
         manifest["hints"] = {record["key"]: record["value"] for record in records["hint"]}
     assemble_host(records, manifest)
@@ -380,7 +464,7 @@ def assemble(
 
 
 def check_sources(registry: Mapping[str, Any], manifest: dict[str, Any], facts: ObjectFacts) -> None:
-    """Check independent compiled evidence, without revalidating fitted registry data."""
+    """Check the registry against the compiled object's symbols and ELF attributes."""
     strong = set(facts.symbols.defined_strong)
     undefined = set(facts.symbols.undefined)
     failures = []
@@ -398,7 +482,7 @@ def check_sources(registry: Mapping[str, Any], manifest: dict[str, Any], facts: 
     if facts.max_threads is not None and threads > facts.max_threads:
         failures.append(ClauseFailure("P-LAUNCH", "$.stage.roles", "role threads exceed compiled maximum",
                                       {"threads": threads, "max_threads": facts.max_threads}))
-    declared = manifest["topology"]["cluster"]["compiled"]
+    declared = manifest["topology"]["cluster"]["compiled"] if "topology" in manifest else [1, 1, 1]
     if facts.cluster_dim is not None and declared != "dynamic" and tuple(declared) != facts.cluster_dim:
         failures.append(ClauseFailure("P-TOPO", "$.topology.cluster.compiled", "declared and compiled cluster dimensions differ",
                                       {"declared": declared, "compiled": list(facts.cluster_dim)}))

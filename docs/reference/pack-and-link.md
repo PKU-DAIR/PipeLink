@@ -10,7 +10,7 @@ uv run --project pipec pipec2 pack path/to/stage.cu -o stage.plink \
 
 `pack <stage.cu>` compiles one annotated translation unit into one device object
 and writes a `.plink` container: a manifest plus `stage.o`. Variants are declared
-in the TU, not built from separate define sets.
+in the TU; one pack covers all of them.
 
 | Option | Meaning |
 |---|---|
@@ -39,8 +39,8 @@ in the TU, not built from separate define sets.
 
 `<compute>`, `<sm>` and `<lto>` are the profile's spellings, for example
 `compute_103a`/`sm_103a`/`lto_103a`. Pack uses no GPU. Scratch files go under
-`PIPELINK_SCRATCH_ROOT` when set, otherwise a temporary directory; nothing is
-written beside the source.
+`PIPELINK_SCRATCH_ROOT` when set, otherwise a temporary directory, never beside
+the source.
 
 Floating-point code-generation switches among the nvcc flags (`--use_fast_math`,
 `--ftz=`, `--prec-div=`, `--prec-sqrt=`, `--fmad=`, applied in order) are recorded as
@@ -51,12 +51,13 @@ uses nvcc's defaults.
 
 A pipeline may instead set the image's mode itself:
 `"pipeline": {..., "math": {"ftz": true, "prec_div": false, "prec_sqrt": false, "fmad": true}}`.
-The linker then uses that mode for every stage, whatever modes they were packed
-with, and `link.json` records it under `math_override` (`mode`, plus the `packed`
-mode of each stage that differs). It changes only these four code-generation
-switches: `--use_fast_math` intrinsic substitution (`sinf` to `__sinf` and so on)
-happens in the front end and is already in a stage's IR. Forcing a mode changes
-the owners' numerics, so a same-source control must use the same switches.
+The linker then uses that mode for every stage regardless of its packed mode, and
+`link.json` records it under `math_override` (`mode`, plus the `packed` mode of
+each stage that differs). The override covers only these four code-generation
+switches. It cannot undo `--use_fast_math` intrinsic substitution (`sinf` to
+`__sinf` and so on), which happens in the front end and is already in a stage's
+IR. Forcing a mode changes the owners' numerics, so a same-source control must
+use the same switches.
 
 ### What the manifest records
 
@@ -68,21 +69,21 @@ the owners' numerics, so a same-source control must use the same switches.
 - The target stamp `pipelink_abi.target`: profile, LTO architecture, toolkit, and
   the optional host ABI and math mode.
 
-Fitting certifies that an expression equals the author's enumerated map, not that
-the opaque instructions implement the declaration.
+Fitting certifies only that an expression equals the author's enumerated map. It
+says nothing about whether the opaque instructions implement the declaration.
 
 ## Trust model
 
-**Pack attests the object; link trusts declarations and the packed attestation.**
+Pack attests the object; link trusts the declarations and the packed attestation.
 
 - `pack` checks the declared device-symbol surface against the object and records
   the payload digest and symbol tables.
-- `link` uses those tables for symbol checks instead of probing each object, and
-  still checks declarations, compatibility and resource legality. A package
+- `link` runs symbol checks against those tables without reprobing each object,
+  and checks declarations, compatibility and resource legality. A package
   without `symbols` fails closed; repack it.
-- Ordinary reads do not re-hash `stage.o`. `pipec2 inspect` checks the payload
-  digest explicitly; it is optional and does not strengthen the model.
-- Link does not detect a manifest that lies about its object. This is not
+- Ordinary reads skip re-hashing `stage.o`. `pipec2 inspect` checks the payload
+  digest on request; this is optional and adds no guarantee.
+- Link cannot detect a manifest that lies about its object; there is no
   adversarial verification.
 
 Opaque stages are trusted to honor their declarations. Native numerical checks
@@ -96,8 +97,7 @@ uv run --project pipec pipec2 link pipeline.json --out-dir out/link
 
 The pipeline manifest lists stage packages by `artifact_path` (relative to the
 manifest), pipeline-owned handles, phases, exclusive phase pairs, priorities,
-forced bindings and topology; [T0](../tutorials/T0-pack-link.md#4-describe-the-composition-and-link-it)
-writes one. Link takes the target from the pipeline's `pipelink_abi.target`;
+forced bindings and topology. Link takes the target from the pipeline's `pipelink_abi.target`;
 every stage must carry the same stamp. It then:
 
 1. loads the packages and checks declared symbols against the packed tables;
@@ -109,9 +109,9 @@ every stage must carry the same stamp. It then:
 5. solves resources;
 6. generates handle stubs, call trampolines and the dispatch kernel;
 7. device-links everything with nvJitLink at the profile's architecture and the
-   solved register cap, then audits the observed register allocation. If it does
-   not fit, the link re-solves once with the observed allocation as a bound, and
-   fails `L-REGS` if the second image still does not fit.
+   solved register cap, then audits the observed register allocation. If it
+   overflows, the link re-solves once with the observed allocation as a bound
+   and fails `L-REGS` if the second image still overflows.
 
 Outputs are `pipeline.cubin`, `link.json` and the generated sources. Read the
 kernel symbol, `threads`, `dyn_smem_bytes`, cluster and params layout from
@@ -138,15 +138,15 @@ The objective is lexicographic:
 4. minimize variant indices in sorted stage order;
 5. minimize all remaining finite values in sorted handle order.
 
-Bases are not an objective: once every tier is fixed, the published bases are the
+No tier optimizes bases: once every tier is fixed, the published bases are the
 deterministic model Z3 returns. `dyn_smem_bytes` is the shared-memory tier's value.
 
 Each high-water tier first computes a lower bound from handles that must be
 pairwise disjoint (no alias, phase exclusion or proved lifetime order). If the
 incumbent meets it, no search runs. Otherwise the solver tries first-fit packing
 hints, then gallops from the incumbent, each query capped at a quarter of the
-remaining allowance. The whole solve has 10,000,000 Z3 resource units; no
-wall-clock timeout is used. Exhausting them before any feasible layout fails
+remaining allowance. The whole solve has 10,000,000 Z3 resource units and no
+wall-clock timeout. Exhausting them before any feasible layout fails
 `L-BUDGET`. When a tier stops short of its bound, the feasible incumbent is
 published. `link.json.solver.tiers` reports each tier's `value`, `bound` and
 `status` (`proved`, `bound_met` or `budget_gap`), and `solver.rlimit_used` the

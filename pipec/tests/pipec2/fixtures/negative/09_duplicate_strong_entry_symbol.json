@@ -1,6 +1,5 @@
 {
   "name": "duplicate_strong_entry_symbol",
-  "reference": "design §8.3",
   "description": "Two artifact symbol tables define the same strong entry symbol.",
   "base": "symbols",
   "phase": "symbols.check",

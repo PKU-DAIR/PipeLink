@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "m3-parity-summary-v6",
-  "title": "M3 ex-ante solo-bound gap-row summary",
+  "title": "Parity ex-ante solo-bound gap-row summary",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "utc_time", "case_id", "status", "verdict", "device", "protocol", "protocol_variant", "selection_classifier", "eligibility_ledger_sha256", "score_sha256", "ratio_blind_eligibility", "throughput_read_after_eligibility_seal", "opening_solo_block_id", "opening_solo_sha256", "mid_series_solo_refresh_count", "identity_gating", "policy_sha256", "policy_record_sha256", "attempted_pairs", "gap_pair_valid_target", "gap_pair_valid_pairs_collected", "gap_pair_valid_count", "discarded_pairs", "strict_original_valid_count", "strict_amended_valid_count", "strict_pair_valid_count", "superseded_same_branch_valid_count", "cross_branch_valid_count", "branch_combination_counts", "pair_cap_hit", "gap_pair_valid_ratios_linked_over_reference", "median_ratio_linked_over_reference", "ratio_floor", "cross_half_clock_delta_linked_minus_reference_mhz", "identity_delta_percent", "per_half_power_draw_median_w", "timestamp_coverage_identical", "solo_clock_median_mhz", "solo_throughput", "result_wording", "clock_normalized_efficiency_claimed"],

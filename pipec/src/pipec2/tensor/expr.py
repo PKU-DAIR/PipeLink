@@ -1,8 +1,8 @@
 """Sort-checked expressions and exact analysis over declared finite domains.
 
 Parsing establishes syntax and sorts; domain checking establishes the remaining
-``tobits`` range obligations. Predicates are represented by Expr with the internal
-sort ``pred`` and evaluate to integer truth values, not a third value sort.
+``tobits`` range obligations. Predicates are Expr nodes of the internal sort
+``pred``; they evaluate to integer truth values.
 """
 from __future__ import annotations
 
@@ -244,9 +244,9 @@ def digest(e: Expr) -> str:
 
 
 def evaluate(e: Expr, env: Mapping[str, int]) -> int:
-    """Evaluate exactly; checked inputs require no domain revalidation here.
+    """Evaluate exactly; inputs are already checked, so domains are not revalidated.
 
-    ``tobits`` is a checked conversion, never truncation. Every operand, including
+    ``tobits`` checks its range instead of truncating. Every operand, including
     both select arms, must be defined on the declared domain.
     """
     value = _evaluate(e, env, "$")
@@ -362,7 +362,7 @@ def _check_cap(cap: int) -> None:
 
 
 def domain_check(e: Expr, sort_env: SortEnv, *, cap: int) -> DomainReport:
-    """Check every environment of the referenced domains, never a prefix sample."""
+    """Check every environment of the referenced domains exhaustively."""
     _check_cap(cap)
     names = sorted(_references(e))
     domains = [_domain_values(sort_env[name]) for name in names]

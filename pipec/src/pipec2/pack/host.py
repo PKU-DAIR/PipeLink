@@ -1,8 +1,8 @@
-"""Assemble compiler-reflected host ABI records and semantic declarations.
+"""Assemble the manifest host section from compiler-reflected ABI records and semantic declarations.
 
-The emit projection owns C facts; the public host parser owns the semantic
-language. This module joins those facts and derives their existing digests,
-without introducing an alternate host schema or a JSON overlay.
+The emit program supplies the C layout facts; the public host parser defines the
+semantic language. This module joins the two into the existing host schema and
+computes its digests.
 """
 from __future__ import annotations
 
@@ -88,9 +88,11 @@ def _assemble(records: Mapping[str, list[dict]], manifest: dict) -> dict:
 
     group = single("group")
     declarations = single("declarations")
-    single("target")
+    target_only = single("target") is not None
     if group is not None and declarations is not None:
         _reject("$.host", "PL_HOST_GROUP and PL_HOST_DECLARATIONS are mutually exclusive")
+    if target_only and (group is not None or declarations is not None):
+        _reject("$.host.target", "PL_HOST_GROUP / PL_HOST_DECLARATIONS imply the target section; remove PL_HOST_TARGET")
     profile = manifest["pipelink_abi"]["target"]["profile"]
     target = {"dtypes": dtypes_digest(profile)}
     if group is None and declarations is None:
@@ -120,8 +122,19 @@ def _assemble(records: Mapping[str, list[dict]], manifest: dict) -> dict:
         if any(rows(kind) for kind in ("abi_type", "residue", "scalars", "domain", "channel", "workspace", "transfer", "variants")):
             _reject("$.host", "providerless declarations cannot own runtime state or ABI inventory")
     else:
+        residue = single("residue", required=True)
+        abi_types = list(rows("abi_type"))
+        declared = {record["id"]: record for record in abi_types}
+        published = declared.get(residue["type_id"])
+        if published is None:
+            # An unpublished residue type is opaque: its row carries only the measured layout.
+            abi_types.append({"id": residue["type_id"], "name": residue["type"], "bytes": residue["type_bytes"],
+                              "align": residue["align"], "members": []})
+        elif not published["members"] and published["name"] == residue["type"]:
+            _reject("$.host.provider.abi_types", "PL_HOST_RESIDUE implies its opaque ABI row; remove PL_HOST_ABI_EMPTY",
+                    type=residue["type"], type_id=residue["type_id"])
         inventory = []
-        for record in rows("abi_type"):
+        for record in abi_types:
             if record["name"] not in ABI_TYPES and NEUTRAL_TYPE_ID_MIN <= record["id"] <= NEUTRAL_TYPE_ID_MAX:
                 _reject("$.host.provider.abi_types", "owner ABI type ID is reserved for the neutral inventory", type=record["name"], type_id=record["id"])
             members = {}
@@ -144,7 +157,6 @@ def _assemble(records: Mapping[str, list[dict]], manifest: dict) -> dict:
             "protocol": 2, "args": {key: group[key] for key in ("bytes", "align", "type_id")},
             "abi_types": inventory, "owner_contract_digest": "",
         }
-        residue = single("residue", required=True)
         for record, label in ((group, "owner args"), (residue, "residue")):
             typ = by_id.get(record["type_id"])
             if typ is None or typ["name"] != record["type"]:
@@ -194,7 +206,7 @@ def _assemble(records: Mapping[str, list[dict]], manifest: dict) -> dict:
 
 
 def assemble_host(records: Mapping[str, list[dict]], manifest: dict) -> None:
-    """Attach an optional validated host section, translating failures to P-HOST."""
+    """Validate and attach the host section if the stage has host records; failures raise P-HOST."""
     if not any(records.get(kind) for kind in RECORD_KINDS):
         return
     if manifest["params"]["bytes"]:

@@ -34,15 +34,15 @@ __global__ void attention(const E* q, const E* k, const E* v,
     const ca::Workspace* parts[ca::warps];
 #pragma unroll
     for (int w = 0; w < ca::warps; ++w) parts[w] = &work[w];
+    const int h = lane / 8;
+    float weights[ca::warps];
+    const float logsum = ca::merge_weights(parts, h, weights);
 #pragma unroll
-    for (int h = 0; h < 4; ++h) {
-      float weights[ca::warps];
-      const float logsum = ca::merge_weights(parts, h, weights);
-#pragma unroll
-      for (int d = lane; d < 64; d += 32)
-        out[(blockIdx.x * 4 + h) * 64 + d] = ca::merge_output(parts, weights, h * 64 + d);
-      if (lane == 0) lse[blockIdx.x * 4 + h] = logsum;
+    for (int i = 0; i < 8; ++i) {
+      const int d = ((lane % 8) + 8 * h + 8 * i) % 64;
+      out[(blockIdx.x * 4 + h) * 64 + d] = ca::merge_output(parts, weights, h * 64 + d);
     }
+    if (lane % 8 == 0) lse[blockIdx.x * 4 + h] = logsum;
   }
 }
 

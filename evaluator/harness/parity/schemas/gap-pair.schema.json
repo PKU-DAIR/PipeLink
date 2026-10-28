@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "m3-parity-pair-v6",
-  "title": "M3 ex-ante solo-bound gap-row attempted pair",
+  "title": "Parity ex-ante solo-bound gap-row attempted pair",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "case_id", "attempt", "order", "device", "protocol", "protocol_variant", "selection_classifier", "stream_map_sha256", "stream_classes", "inputs", "arguments", "correctness", "outputs", "strict_classification", "superseded_same_branch_classification", "gap_classification", "eligibility_ledger_sha256", "opening_solo_block_id", "opening_solo_sha256", "mid_series_solo_refresh_count", "identity_gating", "policy_sha256", "ratio_linked_over_reference", "result_wording", "clock_normalized_efficiency_claimed"],

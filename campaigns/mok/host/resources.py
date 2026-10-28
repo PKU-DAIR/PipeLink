@@ -1,4 +1,4 @@
-"""CUDA-free P2 caller inventory, shared by dry-run and real loans."""
+"""CUDA-free caller inventory, shared by dry-run and real loans."""
 from dataclasses import dataclass
 import json
 from pathlib import Path

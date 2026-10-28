@@ -1,6 +1,5 @@
 {
   "name": "non_warpgroup_aligned_regs_claim_roles",
-  "reference": "D-finding",
   "description": "A two-warp role is changed from a complete explicit group to an implicit one-role group.",
   "base": "implicit_register",
   "phase": "solve",

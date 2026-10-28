@@ -2,9 +2,9 @@
 
 Sparse lists contain the union over each 128-row tile, with fully visible tiles
 separated from partial tiles. W5 retains its 64-token, logical-query-head mask.
-W6 converts the supplied selections to a membership bitset during preparation;
-it is Q-outer FA4, not a KV-outer MSA implementation. All metadata construction
-and the configuration's first CuTe compile/launch are outside attention timing.
+W6 converts the supplied selections to a membership bitset during preparation
+and runs on the Q-outer FA4 loop (no KV-outer MSA schedule). Metadata
+construction and the first CuTe compile and launch are outside attention timing.
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def supports(cell):
 
 
 def _static_blocks(cell, device):
-    """Exact union/intersection from subblock extrema, never a dense token mask."""
+    """Exact union/intersection from subblock extrema, without a dense token mask."""
     import torch
     from cells import visible
 
@@ -175,8 +175,8 @@ class _Prepared:
         self._result = None
 
     def run(self):
-        # flash_attn_func exposes neither out= nor lse=. Its upstream allocation
-        # and any internal per-call work stay inside the measured product call.
+        # flash_attn_func takes no out= or lse=, so its allocation and other
+        # per-call work are part of the measured call.
         self._result = self._call(self._q, self._k, self._v, **self._kwargs)
         return self._result
 

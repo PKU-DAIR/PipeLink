@@ -1,6 +1,6 @@
 # Profile consumer
 
-A three-stage interpreter composes two instruction stages using a descriptor, phase-exclusive shared-memory pages, and a grid-scoped release/acquire counter. The linked image launches through a host ABI v3 owner provider `.so`, caller-owned input fixtures, and instruction parameter blobs; a hand-written one-TU control includes the same three stage sources. Hopper/sm90, Blackwell/sm103 and consumer Blackwell/sm120 use the same source. The warp roles use unaligned `barrier.sync` because their named barriers are reached at different instruction sites.
+A three-stage interpreter drives two instruction stages through a descriptor, shared-memory pages owned by one phase at a time, and a grid-scoped release/acquire counter. The linked image launches through a host ABI v3 owner provider `.so`, caller-owned input fixtures and instruction parameter blobs; a hand-written one-TU control includes the same three stage sources. Hopper/sm90, Blackwell/sm103 and consumer Blackwell/sm120 share one source. The warp roles use unaligned `barrier.sync` because they reach their named barriers at different instruction sites.
 
 ## Commands
 
@@ -21,15 +21,15 @@ uv run --project pipec --locked python examples/profile-consumer/build.py --prof
 uv run --project pipec --locked python examples/profile-consumer/run.py --profile sm_90a
 ```
 
-Omit `--gpu` to select the first `PIPELINK_GPUS` entry. Build and run load `.env` through `tools/pipelink_env.py`; temporary compiler files use `PIPELINK_SCRATCH_ROOT`. Artifacts, fixtures, logs, sanitizer reports, SASS diagnostics, and each new `results.json` are written under ignored `build/<profile>/`.
+Omit `--gpu` to select the first `PIPELINK_GPUS` entry. Build and run load `.env` through `tools/pipelink_env.py`; temporary compiler files go to `PIPELINK_SCRATCH_ROOT`. Artifacts, fixtures, logs, sanitizer reports, SASS diagnostics and `results.json` go to the ignored `build/<profile>/`.
 
-`run.py` retains the existing Gate A numerical/byte-comparison and structural checks, runs racecheck and synccheck unconditionally on both launch routes, and exits nonzero if either acceptance or a sanitizer fails. Its linked command is `pipec2 launch ... --provider ...provider.so --host-inputs ... --blob ... --cluster 1,1,1`. Normalized SASS comparison is diagnostic only, never an equality gate.
+`run.py` performs the Gate A checks (numerical results, byte comparison of inputs and outputs, and structural checks), runs racecheck and synccheck on both launch routes, and exits nonzero if any of them fails. Its linked command is `pipec2 launch ... --provider ...provider.so --host-inputs ... --blob ... --cluster 1,1,1`. The normalized SASS comparison is diagnostic and does not affect the exit code.
 
 ## Evidence
 
-Measured with CUDA **13.3** on each profile; clocks are observed, not locked. The scope
-here is Gate A and synchronization correctness, not timing parity. Each run writes
-`build/<profile>/results.json`.
+Measured with CUDA **13.3** on each profile, with clocks observed but not locked.
+This example checks Gate A and synchronization correctness; it does not measure
+timing parity. Each run writes `build/<profile>/results.json`.
 
 | Evidence | Blackwell/sm103 | Hopper/sm90 | Consumer Blackwell/sm120 |
 |---|---|---|---|
@@ -46,4 +46,4 @@ here is Gate A and synchronization correctness, not timing parity. Each run writ
 | Local loads, local stores, calls | 0, 0, 0 in both images | 0, 0, 0 in both images | 0, 0, 0 in both images |
 | Parity timing | Not measured: the hand one-TU control uses a different parameter ABI from the linked host ABI v3 image; this example has no shared-session timing control | Not measured | Not measured |
 
-Start with [T1: Hello, callable seam](../../docs/tutorials/T1-hello-callable.md) for the pack/link/launch workflow; the [launch reference](../../docs/reference/launching.md#host-abi-v3-launch) describes the host ABI v3 provider route.
+[T1: Hello, callable seam](../../docs/tutorials/T1-hello-callable.md) introduces the pack/link/launch workflow; the [launch reference](../../docs/reference/launching.md#host-abi-v3-launch) describes the host ABI v3 provider route.

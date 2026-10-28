@@ -1,11 +1,12 @@
-// Zigzag context-parallel load (attention owner): FA3 tile scheduling and
-// publications, with diagonal-first local-before-remote K/V order, plus
-//  (1) before the first K/V TMA of each remote 128-token block, a system-scope
-//      acquire of that chunk's counter (launch-generation target gen+1) and the generic->async
-//      proxy fence (peers wrote the payload with generic stores; push publication);
-//  (2) after the last issue, a non-consuming wait on the newest full phase of
-//      every K/V slot it filled, then the CTA-local `gather_reads_done` arrival
-//      that lets kv-gather take its done ticket (CTA read-drain).
+// Zigzag context-parallel load (attention owner). FA3 tile scheduling and
+// publications, with K/V visited diagonal first and local before remote. It adds:
+//  (1) push publication: before the first K/V TMA of each remote 128-token
+//      block, a system-scope acquire of that chunk's counter (target gen+1)
+//      and a generic->async proxy fence, because peers wrote the payload with
+//      generic stores;
+//  (2) CTA read-drain: after the last issue, a non-consuming wait on the
+//      newest full phase of every K/V slot it filled, then the CTA-local
+//      `gather_reads_done` arrival that lets kv-gather take its done ticket.
 // Adapted from role_load.cuh (FlashAttention-3 hopper mainloop/tile scheduler;
 // BSD-3-Clause, see role_load.cuh for the upstream notice).
 #pragma once
@@ -198,9 +199,10 @@ CUTLASS_DEVICE void run_cp_load(
     tile.tile_idx = __shfl_sync(1u, next_tile, 0);
   }
 
-  // CTA read-drain: every gathered-buffer TMA read of this CTA has landed once the newest
-  // fill of each K/V slot completed; older fills completed before that fill's
-  // empty wait, so the parity test cannot alias. Non-consuming: core still waits.
+  // CTA read-drain: once the newest fill of each K/V slot has completed, every
+  // gathered-buffer TMA read of this CTA has landed. Older fills completed
+  // before that fill's empty wait, so the parity test cannot alias. The wait
+  // does not consume the phase; core still waits on it.
   for (uint32_t stage = 0; stage < 2u && stage < kv_count; ++stage) {
     uint32_t const last = stage + (kv_count - 1u - stage) / 2u * 2u;
     uint32_t const parity = (last >> 1) & 1u;

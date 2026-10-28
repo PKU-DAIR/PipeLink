@@ -106,7 +106,7 @@ bool inputs(const plk_shared_scalars_v2* shared, uint32_t world, Inputs& out) {
 #else
     const int64_t routed_capacity = P;
 #endif
-    // These are also the i32 ceiling numerators evaluated by the unchanged interpreter.
+    // The interpreter evaluates these same i32 ceiling numerators.
     if (!fits_i32({routed_capacity + B - 1, H + g.DISPATCH_Nb - 1})) return false;
 #if MOK_FRAMEWORK_PASS != MOK_PASS_REC
     if (!fits_i32({P + A - 1})) return false;

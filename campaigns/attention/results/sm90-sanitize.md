@@ -1,21 +1,37 @@
 # sm90-sanitize
 
-R1 = linked/control (scored, >= 0.97); R2 = control/stock and R3 = linked/stock (diagnostic).
-Ratios are medians of paired iterations/s ratios; these are not absolute-placement timings.
-Attempts/discards count timing pairs; pairs that violate the clock lease are discarded.
+7/7 representative cells pass, and 27/27 sanitizer invocations report zero memcheck errors, racecheck hazards or synccheck errors.
 
-| Cell | Pipeline | Comparison | Reference iterations/s | Candidate iterations/s | Ratio | Clock mode | Observed MHz | Valid pairs | Attempts | Discards | Verdict |
-|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|---|
-| W1-32k | selected | sm90-sanitize | | | | not timed | | | | | PASS |
-| W1-8k | selected | sm90-sanitize | | | | not timed | | | | | PASS |
-| W2a-32k | window | sm90-sanitize | | | | not timed | | | | | PASS |
-| W2a-8k | window | sm90-sanitize | | | | not timed | | | | | PASS |
-| W2b-32k | window | sm90-sanitize | | | | not timed | | | | | PASS |
-| W2b-8k | window | sm90-sanitize | | | | not timed | | | | | PASS |
-| W3a-32k | window-softcap | sm90-sanitize | | | | not timed | | | | | PASS |
-| W3a-8k | window-softcap | sm90-sanitize | | | | not timed | | | | | PASS |
-| W3b-8k | softcap | sm90-sanitize | | | | not timed | | | | | PASS |
-| W4-32k | selected | sm90-sanitize | | | | not timed | | | | | PASS |
-| W5-32k | phi | sm90-sanitize | | | | not timed | | | | | PASS |
-| W6-prefix-32k | msa | sm90-sanitize | | | | not timed | | | | | PASS |
-| W6-uniform-32k | msa | sm90-sanitize | | | | not timed | | | | | PASS |
+Each invocation runs the `paired-reload-v2-check` path under compute-sanitizer: the same shared buffers and module reload that definitive timing uses, with two queued complete calls per image in each half instead of the full timed sequence. Numerical checks run before the work, after the reload and after the work. A control-reference run executes the linked and control images; a stock-reference run executes stock as well.
+
+Long cells are too slow to race-check, so the sanitizers run on shorter representative cells. A timed cell without its own record counts as covered when a passing record exists for another cell of the same pipeline with the same executable inputs in the same build; a recorded failure is never covered this way. These are correctness checks and make no timing claim.
+
+| Representative | Pipeline | Paired reference / tool | Hazards or errors | Verdict |
+|---|---|---|---:|---|
+| W1-8k | selected | paired-control/memcheck | 0 | PASS |
+| W1-8k | selected | paired-control/racecheck | 0 | PASS |
+| W1-8k | selected | paired-control/synccheck | 0 | PASS |
+| W1-8k | selected | paired-stock/memcheck | 0 | PASS |
+| W1-8k | selected | paired-stock/racecheck | 0 | PASS |
+| W1-8k | selected | paired-stock/synccheck | 0 | PASS |
+| W2a-8k | window | paired-control/memcheck | 0 | PASS |
+| W2a-8k | window | paired-control/racecheck | 0 | PASS |
+| W2a-8k | window | paired-control/synccheck | 0 | PASS |
+| W2a-8k | window | paired-stock/memcheck | 0 | PASS |
+| W2a-8k | window | paired-stock/racecheck | 0 | PASS |
+| W2a-8k | window | paired-stock/synccheck | 0 | PASS |
+| W3a-8k | window-softcap | paired-control/memcheck | 0 | PASS |
+| W3a-8k | window-softcap | paired-control/racecheck | 0 | PASS |
+| W3a-8k | window-softcap | paired-control/synccheck | 0 | PASS |
+| W3b-8k | softcap | paired-control/memcheck | 0 | PASS |
+| W3b-8k | softcap | paired-control/racecheck | 0 | PASS |
+| W3b-8k | softcap | paired-control/synccheck | 0 | PASS |
+| W4-32k | selected | paired-control/memcheck | 0 | PASS |
+| W4-32k | selected | paired-control/racecheck | 0 | PASS |
+| W4-32k | selected | paired-control/synccheck | 0 | PASS |
+| W5-32k | phi | paired-control/memcheck | 0 | PASS |
+| W5-32k | phi | paired-control/racecheck | 0 | PASS |
+| W5-32k | phi | paired-control/synccheck | 0 | PASS |
+| W6-prefix-32k | msa | paired-control/memcheck | 0 | PASS |
+| W6-prefix-32k | msa | paired-control/racecheck | 0 | PASS |
+| W6-prefix-32k | msa | paired-control/synccheck | 0 | PASS |

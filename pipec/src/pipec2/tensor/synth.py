@@ -1,9 +1,10 @@
-"""Bounded Z3 controller search; a model is a proposal, never a certificate.
+"""Bounded Z3 controller search; a solver model is only a proposal for the checker.
 
 K counts nonterminal controller slots per site; each graph also has a distinguished
-Return node. action_domain restricts primitive *families*, never their semantics.
-The exact model supplies every operand/observation template. Static mode is a
-separate, checked specialization, not an existential approximation to concurrency.
+Return node. action_domain restricts which primitive *families* are available and
+leaves their semantics alone. The exact model supplies every operand/observation
+template. Static mode is a separately checked specialization; it does not
+approximate concurrent execution.
 """
 from __future__ import annotations
 
@@ -112,7 +113,7 @@ def synthesize(instance: Instance, bounds: Bounds, mode: str = "controller") -> 
     """Enumerate bounded controller assignments and exactly check every proposal.
 
     Tool errors propagate as tool errors. Solver unknown, exhausted work, and an
-    incomplete checker remain UNKNOWN; none block a possibly valid controller.
+    incomplete checker yield UNKNOWN, so a possibly valid controller is never ruled out.
     """
     if mode == "static":
         return synthesize_static(instance, bounds)
@@ -237,7 +238,7 @@ def synthesize_static(instance: Instance, bounds: Bounds) -> SynthResult:
     """Exact q[t,s]/action[t] encoding only after the model proves its premise.
 
     The model projection records rendezvous-delimited synchronous ownership and
-    disjoint footprints. Copies read q[t], not a partially updated q[t+1]. NOPs
+    disjoint footprints. Copies read q[t], never a partially updated q[t+1]. NOPs
     preserve every cell and make the horizon an at-most bound. The decoded IR
     is still checked in the full execution model before acceptance.
     """
@@ -316,7 +317,7 @@ def synthesize_static(instance: Instance, bounds: Bounds) -> SynthResult:
 
 
 def _runs(points):
-    """Exact affine runs, preserving gaps rather than interpolating across them."""
+    """Exact affine runs; gaps split runs instead of being interpolated."""
     result = []
     index = 0
     while index < len(points):
@@ -618,7 +619,7 @@ def _constant_bindings(tree, world, domains):
 
 
 def _static_world_obligations(region):
-    """Prove redundant static source constraints; never merge checker worlds."""
+    """Prove redundant static source constraints; checker worlds stay separate."""
     participants, worlds = region["participants"], region["worlds"]
     warp_size = region["warp_size"]
     by_warp = {}
@@ -1241,7 +1242,7 @@ class _NativeStaticProblem:
 
 
     def _bank_product_goals(self, world, bank, locations, history):
-        """Factor a proved tensor-product origin relation, never its action choice."""
+        """Factor a proved tensor-product origin relation; the action choice is left unfactored."""
         width, rows = bank["width"], len(self.participants)
 
         def split(maps):
@@ -1728,8 +1729,8 @@ def _singleton_source_candidates(instance, region, bounds):
     """Cheap exact identity join for one admitted immutable-source action.
 
     This only proposes controllers from the existing finite action domain. Every
-    proposal still passes the independent interleaving checker; failure leaves
-    the entire bounded symbolic search intact.
+    proposal still goes through the independent interleaving checker; if none
+    passes, the full bounded symbolic search still runs.
     """
     if bounds.K < 1:
         return

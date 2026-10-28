@@ -1,6 +1,5 @@
 {
   "name": "duplicate_init_materializer",
-  "reference": "design §8.3",
   "description": "A second channel over the same physical barrier ring selects a different init materializer.",
   "base": "double_barrier",
   "phase": "protocol.expand",

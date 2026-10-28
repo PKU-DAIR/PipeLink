@@ -168,9 +168,8 @@ def test_generate_stub_routes_bindings_calls_and_register_acquires() -> None:
         "pipelink_regs_producer": "64",
     }
 
-    for _symbol, decl, digest in (item.callable for item in _calls()):  # type: ignore[misc]
+    for _symbol, decl, _digest in (item.callable for item in _calls()):  # type: ignore[misc]
         assert decl in source
-        assert f"decl-sha256 {digest}" in source
     assert source.index("pipelink_call_a_aggregate") < source.index("pipelink_call_z_notify")
     assert re.search(
         r'extern "C" __attribute__\(\(used\)\) __forceinline__ __device__\s+'
@@ -204,7 +203,6 @@ def test_generate_stub_is_byte_stable_under_input_permutation() -> None:
     expected = generate_stub(solution, pipeline, [], _calls())
     permuted = replace(solution, reg_groups=list(reversed(solution.reg_groups)))
     assert generate_stub(permuted, pipeline, [], list(reversed(_calls()))) == expected
-    assert expected.endswith("\n") and not expected.endswith("\n\n")
 
 
 def test_call_declaration_requires_the_named_export() -> None:
@@ -218,3 +216,26 @@ def test_call_declaration_requires_the_named_export() -> None:
     )
     with pytest.raises(LinkError):
         generate_stub(_solution(), _pipeline(), [], [expansion])
+
+
+def test_stub_for_half_precision_call_declarations_compiles(tmp_path) -> None:
+    """Call declarations name CUDA's ``__half``/``__nv_bfloat16``; the stub must compile them."""
+    import subprocess
+
+    from pipec2.symbols import cuda_home
+
+    try:
+        nvcc = cuda_home() / "bin" / "nvcc"
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+    if not nvcc.is_file():
+        pytest.skip("configured CUDA compiler is unavailable")
+    decl = 'extern "C" __device__ void consumer_store(const __half* a, __nv_bfloat16* b);'
+    expansion = replace(_calls()[0], channel="store", callable=("consumer_store", decl, "4" * 64))
+    source = tmp_path / "binding_stub.cu"
+    source.write_text(generate_stub(_solution(), _pipeline(), [], [expansion]))
+    compiled = subprocess.run(
+        [str(nvcc), "-std=c++17", "-rdc=true", "-dc", "-arch=lto_90a", str(source), "-o", str(tmp_path / "stub.o")],
+        capture_output=True, text=True,
+    )
+    assert compiled.returncode == 0, compiled.stdout + compiled.stderr

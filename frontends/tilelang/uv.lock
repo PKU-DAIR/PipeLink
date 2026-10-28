@@ -203,18 +203,20 @@ name = "pipec2"
 version = "0.1.0"
 source = { editable = "../../pipec" }
 dependencies = [
+    { name = "ml-dtypes" },
     { name = "numpy" },
     { name = "z3-solver" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "ml-dtypes", specifier = ">=0.5" },
     { name = "numpy", specifier = ">=2" },
     { name = "z3-solver", specifier = "==4.15.4.0" },
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest" }]
+dev = [{ name = "pytest", specifier = "==9.1.1" }]
 
 [[package]]
 name = "pipelink-tilelang"
@@ -243,7 +245,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest" }]
+dev = [{ name = "pytest", specifier = "==9.1.1" }]
 
 [[package]]
 name = "pluggy"

@@ -47,8 +47,8 @@
 namespace pipelink::attention::sm90 {
 using namespace cute;
 
-// Deliberately the upstream kernel type, not a wrapper kernel: its mangled
-// device_kernel symbol and single by-value Params ABI are the stock image.
+// The upstream kernel type itself, unwrapped: its mangled device_kernel symbol
+// and single by-value Params ABI define the stock image.
 template <bool Causal, int ClusterM, bool Is_local = false>
 struct StockKernel {
   static_assert(ClusterM == 1 || ClusterM == 2);

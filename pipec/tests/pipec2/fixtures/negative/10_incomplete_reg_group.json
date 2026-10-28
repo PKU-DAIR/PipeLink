@@ -1,6 +1,5 @@
 {
   "name": "incomplete_reg_group",
-  "reference": "design §8.3",
   "description": "An explicit group covers only the first half of a four-warp warpgroup.",
   "base": "register",
   "phase": "solve",

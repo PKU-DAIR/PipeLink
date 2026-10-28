@@ -1,4 +1,4 @@
-// Valid swap: square each input instead of applying affine ReLU; the seam is unchanged.
+// Valid swap: square each input instead of applying affine ReLU; the seam contract is the same.
 #include <pipelink/stage.hpp>
 #include "../../ring-pipeline/params.h"
 
@@ -34,10 +34,6 @@ PL_PARAMS(ConsumerParams, output, columns, scale, bias);
 PL_ROLE(consumer, ring_consumer, ConsumerWarps);
 PL_CLAIM_EX(pl::claim("pipelink_ring_base", "smem")
     .extent(0, {{"pipelink_ring_depth", TileBytes}}).align(1024));
-PL_CLAIM_EX(pl::claim("pipelink_ring_full", "mbarrier")
-    .extent(0, {{"pipelink_ring_depth", 1}}));
-PL_CLAIM_EX(pl::claim("pipelink_ring_empty", "mbarrier")
-    .extent(0, {{"pipelink_ring_depth", 1}}));
 PL_CLAIM_EX(pl::claim("pipelink_ring_warp_consumer", "warp")
     .extent(ConsumerWarps).at(1).roles({"consumer"}));
 PL_ENDPOINT(tile_ring, pl::endpoint("tile_ring", pl::consume, "consumer")

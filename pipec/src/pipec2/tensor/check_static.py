@@ -1,8 +1,8 @@
-"""Verified straight-line transport quotient; failures retain exact exploration.
+"""Verified straight-line transport quotient; on failure the checker falls back to exact exploration.
 
-The mutable identity bank below is only a canonical execution, never a replacement
-machine semantics: private operands and receipt admission use the machine's
-validators, and shared effects are admitted only after the race/publication proof.
+The mutable identity bank below replays one canonical execution; machine semantics
+stay with the machine. Private operands and receipts go through the machine's
+validators, and shared effects are applied only after the race/publication proof.
 """
 from __future__ import annotations
 
@@ -49,8 +49,8 @@ def _inputs(value, bindings, *, slot=False):
     return True
 
 
-def _shape(model, program):
-    """Ground only static participant branches; retain each actor's phase order."""
+def _shape(model, program, world=0):
+    """Ground immutable branches in one world; retain each actor's phase order."""
     _require(not model.program_errors and not model._invalid_returns, 0,
              "; ".join(model.program_errors) or "return relation differs from the frozen import")
     paths, active = {}, {}
@@ -92,7 +92,7 @@ def _shape(model, program):
                     branch = graph.nodes[node.next]
                     _require((site, node.dest) in model._static_metadata and isinstance(branch, ir.Branch)
                              and branch.observation == node.dest and node.dest not in {"ready", model.export.readiness.after}, 0,
-                             f"{site}:{pc}: static guard must be adjacent Meta(participant-only) / Branch")
+                             f"{site}:{pc}: static guard must be adjacent Meta(participant/bindings) / Branch")
                     _require(node.next not in visited, 0, f"{site}: cyclic static guard")
                     categories[pc] = "metadata"
                     visited.add(node.next)
@@ -100,7 +100,7 @@ def _shape(model, program):
                     dependencies.setdefault(node.next, set()).add(pc)
                     previous = node.next
                     if static_state is None:
-                        static_state = replace(model.initial(), world=0, owner_phase=1)
+                        static_state = replace(model.initial(), world=world, owner_phase=1)
                     value = model._integer(node.expr, static_state, actor)
                     pc = branch.next_true if value else branch.next_false
                     continue
@@ -123,17 +123,17 @@ def _shape(model, program):
                         pending = None
                     categories[pc] = "private"
                 elif primitive in {"reg_copy", "reg_copy_round", "shfl_xor"} or (
-                        primitive == "smem_load_round" and node.operands.get("src") == "@export:smem"):
+                        primitive in {"smem_load_round", "smem_load_scalar"} and node.operands.get("src") == "@export:smem"):
                     _require(phase <= 1, 0, f"{site}:{pc}: private operation follows stores")
                     phase, categories[pc] = 1, "private"
-                elif primitive == "smem_store_round":
+                elif primitive in {"smem_store_round", "smem_store_scalar"}:
                     _require(phase <= 2, 0, f"{site}:{pc}: store follows publication or loads")
                     phase, categories[pc] = 2, "stores"
                 elif primitive == "cta_rendezvous":
                     _require(not rendezvous and phase <= 2, 5, f"{site}: second or misplaced rendezvous")
                     phase, categories[pc] = 3, "rendezvous"
                     rendezvous.append(pc)
-                elif primitive == "smem_load_round":
+                elif primitive in {"smem_load_round", "smem_load_scalar"}:
                     _require(bool(rendezvous), 5, f"{site}: scratch load precedes rendezvous")
                     phase, categories[pc] = 4, "loads"
                 else:
@@ -169,7 +169,7 @@ def _shape(model, program):
 
 
 def certify(instance: Instance, program: ir.Program, *, max_states=None, max_operations=None):
-    """Return (premise record, terminal evidence or None); never certify on failure."""
+    """Return (premise record, terminal evidence or None); evidence is None on any failure."""
     view = instance.demand_kind == "memory_view"
     names = (*_NAMES, "view-results") if view else _NAMES
     premises = [{"name": name, "ok": False, "detail": "not established because another premise failed"}
@@ -196,7 +196,7 @@ def certify(instance: Instance, program: ir.Program, *, max_states=None, max_ope
                  "additional monitor obligations require full exploration")
         model = instance.with_program(program)
         paths, active = _shape(model, program)
-        established(0, "grounded participant-only guards; acyclic per-actor phases and full-warp collective paths")
+        established(0, "grounded immutable guards in every world; acyclic per-actor phases and full-warp collective paths")
         _require(not instance.derived.early_reclaim, 7,
             "admission does not establish immutable source stability through completion")
         established(7, "Instance.build source-stability premise; no early-reclaim owner transition")
@@ -216,6 +216,8 @@ def certify(instance: Instance, program: ir.Program, *, max_states=None, max_ope
                         polling = _at(polling, (actor,), pc)
                         polling = model._apply(polling, Transition(site, "static-poll", None, True, (actor,)))
         for world, initial in enumerate(model.initial_cells):
+            if world:
+                paths, active = _shape(model, program, world)
             vector = IdentityVector(initial)
             state = replace(entry, world=world, owner_phase=1, cells=vector, published=vector)
             bank = list(initial)
@@ -264,9 +266,9 @@ def certify(instance: Instance, program: ir.Program, *, max_states=None, max_ope
                             receipt_capacity[pending.site, pending.warp] = pending
                         for pending in state.outstanding:
                             # Issue already checked full-warp ownership and every
-                            # destination bound. P8 makes deferred completion a
-                            # read of these immutable initial identities. Update
-                            # only touched cells, not a whole vector per packet.
+                            # destination bound. Deferred completion reads these
+                            # immutable initial identities; update only the
+                            # touched cells instead of a whole vector per packet.
                             for destination, source in zip(pending.destinations, pending.sources):
                                 _require(initial[destination] == EMPTY, 2, "receipt destination aliases immutable source storage")
                                 _require(bank[source] != EMPTY and bank[source] == initial[source], 2,
@@ -282,11 +284,11 @@ def certify(instance: Instance, program: ir.Program, *, max_states=None, max_ope
                             _shuffle(model, state, node, members, bank)
                             counters["private"] += len(members)
                     else:
-                        current = 4 if node.primitive == "smem_load_round" else 6
+                        current = 4 if node.primitive in {"smem_load_round", "smem_load_scalar"} else 6
                         _round(model, state, node, chosen, bank, expected, stored, counters)
             current = 2
             # Any interleaving can retain one handle per receipt-bearing warp.
-            # Check their simultaneous high-water mark, not just the serial run.
+            # Check their simultaneous high-water mark as well as the serial run.
             model._check_metadata_capacity(state, state.metadata, tuple(receipt_capacity.values()))
             for phase in ("stores", "loads"):
                 for site, path in paths.items():
@@ -296,7 +298,7 @@ def certify(instance: Instance, program: ir.Program, *, max_states=None, max_ope
                         _round(model, state, node, active[site][pc], bank, expected, stored, counters)
                 if view and phase == "stores":
                     # Replay the actual publication transition on the computed
-                    # bank, not an expected-output vector or a publication flag.
+                    # bank instead of comparing an expected-output vector or flag.
                     state = replace(state, cells=IdentityVector(bank))
                     for site, path in paths.items():
                         for pc in path["rendezvous"]:
@@ -382,12 +384,12 @@ def _round(model, state, node, actors, bank, expected, stored, counters):
     family = _ROUND_SCALARS.get(node.primitive, node.primitive)
     spaces = {"reg_copy": ("reg", "reg"), "smem_store_scalar": ("reg", "smem"), "smem_load_scalar": ("smem", "reg")}
     premise = {"reg_copy": 6, "smem_store_scalar": 3, "smem_load_scalar": 4}[family]
-    width = 1 if node.primitive == "reg_copy" else node.operands["width"]
+    width = node.operands["width"] if node.primitive in _ROUND_SCALARS else 1
     _require(type(width) is int and width > 0, premise, "round width must be a positive scalar count")
     for actor in actors:
         model._permission(actor, node.primitive)
         for slot in range(width):
-            operands = node.operands if node.primitive == "reg_copy" else model._round_operands(node, state, actor, slot)
+            operands = model._round_operands(node, state, actor, slot) if node.primitive in _ROUND_SCALARS else node.operands
             source = model._cell(operands["src"], state, actor)
             destination = model._cell(operands["dst"], state, actor, write=True)
             _require((model._space(operands["src"]), model._space(operands["dst"])) == spaces[family], premise,

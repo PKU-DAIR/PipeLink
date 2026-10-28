@@ -1,10 +1,11 @@
 // Multi-device context-parallel (CP) slot for pipeline d128-sm90-c/cp.
 //
-// One process drives W ranks on visible devices 0..W-1 with lockstep launches
-// (the launch-generation/release-wait caller obligation: every rank runs the same launch sequence).
-// Rank r holds chunks r and 2W-1-r of C = T/(2W) tokens in local [early,late]
-// Q/O/LSE order. Gathered K/V remains in full-sequence global order; kv-gather
-// pushes exactly the remote chunks each rank's causal queries require.
+// One process drives W ranks on visible devices 0..W-1. Every rank runs the
+// same launch sequence in lockstep, as the launch-generation/release-wait
+// protocol requires of its caller. Rank r holds chunks r and 2W-1-r of
+// C = T/(2W) tokens in local [early,late] Q/O/LSE order. Gathered K/V stays in
+// full-sequence global order; kv-gather pushes exactly the remote chunks each
+// rank's causal queries need.
 //
 // Actions:
 //   gate      : >= 5 changing payloads, each launched as linked then control on
@@ -18,7 +19,8 @@
 //               change per launch, the last rank delayed 2 ms each launch, and
 //               per-launch O/LSE copies; all are checked after one final sync.
 //   sanitize  : two launches of --mode's image (run under compute-sanitizer).
-//   parity    : linked/control all-rank timing in alternating balanced blocks.
+//   paired    : EXACT10 all-rank batches in eight balanced blocks, module reload halfway.
+//   paired-check: bounded shared-buffer/reload sanitizer path, two queued calls/arm/half.
 //   placement : CP linked vs sequential peer-copy gather + `selected` (same
 //               shards) vs single-GPU full-sequence `selected` on device 0.
 #include <cuda.h>
@@ -46,9 +48,10 @@
 #define CU_CHECK(expr) do { CUresult e_ = (expr); if (e_ != CUDA_SUCCESS) { const char* s_ = nullptr; cuGetErrorString(e_, &s_); throw std::runtime_error(std::string(#expr) + ": " + (s_ ? s_ : "driver error")); } } while (0)
 #include "slot/timing.cuh"
 #include "slot/family.cuh"
+#include "../../../evaluator/harness/parity/paired_reload.h"
 
-// Named, not anonymous: `using namespace sm90` brings cute's anonymous namespace
-// in, which makes nvcc's host-stub `_NV_ANON_NAMESPACE` references ambiguous.
+// A named namespace: `using namespace sm90` pulls in cute's anonymous namespace,
+// which would make nvcc's host-stub `_NV_ANON_NAMESPACE` references ambiguous.
 namespace cp_slot {
 using namespace pipelink::attention::slot;
 using namespace pipelink::attention::sm90;
@@ -88,6 +91,7 @@ struct Options {
   std::string action, mode = "linked", link_json, linked_cubin, control_cubin;
   std::string selected_link_json, selected_cubin, cells_json, cell;
   int world = 0, payloads = 6, replays = 3, async_launches = 6;
+  bool paired() const { return action == "paired" || action == "paired-check"; }
 };
 
 Options parse_options(int argc, char** argv) {
@@ -116,8 +120,8 @@ Options parse_options(int argc, char** argv) {
     else if (auto v = value("async-launches")) o.async_launches = std::stoi(*v);
     else throw std::runtime_error("unknown option: " + a);
   }
-  if (o.action != "gate" && o.action != "sanitize" && o.action != "parity" && o.action != "placement")
-    throw std::runtime_error("--action must be gate, sanitize, parity or placement");
+  if (o.action != "gate" && o.action != "sanitize" && !o.paired() && o.action != "placement")
+    throw std::runtime_error("--action must be gate, sanitize, paired, paired-check or placement");
   if (o.mode != "linked" && o.mode != "control") throw std::runtime_error("--mode must be linked or control");
   if (o.world < 2 || o.world > kCpMaxWorld) throw std::runtime_error("--world must be in [2, 8]");
   if (o.payloads < 5 || o.replays < 1 || o.async_launches < 5) throw std::runtime_error("gate needs >= 5 payloads, >= 1 replay and >= 5 async launches");
@@ -298,7 +302,8 @@ class Cp {
       rank->device = r; rank->rank = r;
       CUDA_CHECK(cudaStreamCreateWithFlags(&rank->stream, cudaStreamNonBlocking));
       rank->d = std::make_unique<RankData>(c, world, r, uint64_t(ready_slot) + kCpMaxChunks);
-      // Launch-generation/release-wait state is zeroed once; counters and generations are never reset.
+      // Launch-generation/release-wait state is zeroed once here; counters and
+      // generations then keep counting across launches.
       CUDA_CHECK(cudaMemset(rank->d->ready.data, 0, (uint64_t(ready_slot) + kCpMaxChunks) * 4));
       CUDA_CHECK(cudaMemset(rank->d->released.data, 0, kCpMaxWorld * 4));
       CUDA_CHECK(cudaMemset(rank->d->gen.data, 0, 4));
@@ -376,8 +381,9 @@ class Cp {
     d.linked = std::make_unique<FamilyKernel>(opts.linked_cubin, meta, grid, d.resets.data, 3 * sizeof(int));
     d.control = std::make_unique<FamilyKernel>(opts.control_cubin, meta, grid, d.resets.data, 3 * sizeof(int));
     if (opts.action == "placement") {
-      // Two unchanged selected launches, one per Q segment, over exactly-needed
-      // gathered K/V. Q/O keep shard batch strides; LSE needs segment storage.
+      // Two unchanged `selected` launches, one per Q segment, over exactly the
+      // gathered K/V each needs. Q/O keep shard batch strides; LSE gets
+      // per-segment storage.
       for (int segment = 0; segment < 2; ++segment) {
         int const global_chunk = segment == 0 ? r : 2 * world - 1 - r;
         uint64_t const offset = uint64_t(segment) * chunk * c.heads_q * 128;
@@ -453,16 +459,16 @@ class Cp {
     sync_all();
   }
 
-  // Cross-launch release-wait and CTA read-drain coverage without any host or global synchronization between launches.
-  // Per launch and per rank, on that rank's stream only: a fresh payload is written
-  // into the local chunks, the last rank is delayed 2 ms, the image
-  // runs (directly or as a graph replay), and O/LSE are copied into per-launch
-  // buffers. Faster ranks run ahead into launch e+1 and push into a peer whose
-  // launch e is still pending or reading; only the released/done protocol keeps
-  // those pushes from overwriting data launch e reads. The linked sequence and the
-  // control sequence are queued back to back; after the single final
-  // synchronization every launch of both is checked against its own payload's
-  // oracle, and same-payload launches must be bitwise equal.
+  // Exercises the cross-launch release wait and CTA read-drain with no host or
+  // global synchronization between launches. For each launch, each rank's
+  // stream writes a new payload into the local chunks, delays the last rank by
+  // 2 ms, runs the image (directly or as a graph replay) and copies O/LSE into
+  // per-launch buffers. Faster ranks run ahead into launch e+1 and push into a
+  // peer whose launch e is still pending or reading; only the released/done
+  // protocol keeps those pushes from overwriting data that launch e reads. The
+  // linked and control sequences are queued back to back. After one final
+  // synchronization every launch is checked against its payload's oracle, and
+  // same-payload launches must be bitwise equal.
   int async_sequences(bool graphs, int launches, int first_payload) {
     uint64_t const q_count = RankData::q_count(c, world);
     uint64_t const lse_count = uint64_t(c.batch) * c.heads_q * shard;
@@ -540,7 +546,7 @@ class Cp {
       poison_rows(d.kg.data + offset, c.batch, c.total, chunk, kv_elems, rank.stream);
       poison_rows(d.vg.data + offset, c.batch, c.total, chunk, kv_elems, rank.stream);
     }
-    bool const control = next == Image::control;
+    bool const control = next == Image::control && !opts.paired();
     uint64_t const lse_bytes = uint64_t(c.batch) * c.heads_q * shard * sizeof(float);
     CUDA_CHECK(cudaMemsetAsync(control ? d.o_ctl.data : d.o.data, 0xff,
                                RankData::q_count(c, world) * sizeof(Element), rank.stream));
@@ -561,7 +567,8 @@ class Cp {
   void launch(Rank& rank, Image image) {
     auto& d = *rank.d;
     if (image == Image::linked) d.linked->launch(*d.linked_params, rank.stream);
-    else if (image == Image::control) d.control->launch(*d.control_params, rank.stream);
+    else if (image == Image::control)
+      d.control->launch(opts.paired() ? *d.linked_params : *d.control_params, rank.stream);
     else {
       // Pull each needed remote chunk once, then run both Q segments. Each
       // FamilyKernel launch resets its scheduler inside this timed boundary.
@@ -617,8 +624,8 @@ class Cp {
     for (auto& rank : ranks) {
       CUDA_CHECK(cudaSetDevice(rank->device));
       auto& d = *rank->d;
-      bool const control = image == Image::control;
-      // Only correctness assembles the separate segment LSEs into CP layout.
+      bool const control = image == Image::control && !opts.paired();
+      // Correctness checks alone assemble the two segment LSEs into CP layout.
       if (image == Image::selected)
         for (int segment = 0; segment < 2; ++segment)
           CUDA_CHECK(cudaMemcpy2DAsync(d.lse.data + segment * chunk, shard * sizeof(float),
@@ -651,6 +658,27 @@ class Cp {
   // One payload: linked then control on every rank, each preceded by poisoning.
   void gate_payload(int payload, bool graphs, int skew_linked, int skew_control) {
     std::string const tag = (graphs ? "graph-replay payload " : "payload ") + std::to_string(payload);
+    if (opts.paired()) {
+      if (graphs) throw std::runtime_error("paired reload must not retain live graphs");
+      prepare(payload, true, true);
+      launch_all(Image::control, skew_control);
+      sync_all();
+      check(Image::control, "control " + tag);
+      for (auto& rank : ranks) {
+        CUDA_CHECK(cudaSetDevice(rank->device));
+        auto& d = *rank->d;
+        CUDA_CHECK(cudaMemcpyAsync(d.o_ctl.data, d.o.data, RankData::q_count(c, world) * sizeof(Element),
+                                   cudaMemcpyDeviceToDevice, rank->stream));
+        CUDA_CHECK(cudaMemcpyAsync(d.lse_ctl.data, d.lse.data, uint64_t(c.batch) * c.heads_q * shard * sizeof(float),
+                                   cudaMemcpyDeviceToDevice, rank->stream));
+      }
+      poison_all(Image::linked);
+      launch_all(Image::linked, skew_linked);
+      sync_all();
+      check(Image::linked, "linked " + tag);
+      check_bitwise(tag);
+      return;
+    }
     prepare(payload, true, true);
     if (graphs) replay_all(Image::linked); else launch_all(Image::linked, skew_linked);
     sync_all();
@@ -772,7 +800,9 @@ void write_vector(std::ostream& out, std::vector<double> const& v) {
 }
 
 void prefix(std::ostream& out, Options const& o, Cell const& c, Cp const& cp) {
-  out << std::setprecision(17) << "{\"schema\":\"pipelink-attention-cp-slot-v1\",\"action\":" << json_quote(o.action)
+  out << std::setprecision(17) << "{\"schema\":"
+      << json_quote(o.paired() ? "pipelink-attention-cp-paired-v2" : "pipelink-attention-cp-slot-v1")
+      << ",\"action\":" << json_quote(o.action)
       << ",\"cell\":" << json_quote(c.id) << ",\"world\":" << o.world << ",\"total_tokens\":" << c.total
       << ",\"sharding\":\"zigzag\",\"chunk_tokens\":" << cp.chunk
       << ",\"shard_tokens\":" << cp.shard << ",\"batch\":" << c.batch << ",\"heads_q\":" << c.heads_q
@@ -797,8 +827,8 @@ int run(Options const& o) {
     return 0;
   }
   if (o.action == "gate") {
-    // Lockstep launches with changing payloads. Skews: one rank starts 2 ms late
-    // (rank 0 and rank W-1 exercise opposite ownership extremes) on alternate payloads.
+    // Lockstep launches with changing payloads. On alternate payloads one rank
+    // starts 2 ms late; rank 0 and rank W-1 cover the two ownership extremes.
     int launches = 0;
     for (int payload = 0; payload < o.payloads; ++payload) {
       int const skew = payload % 4 == 1 ? 0 : payload % 4 == 3 ? o.world - 1 : -1;
@@ -834,41 +864,84 @@ int run(Options const& o) {
     out << "}\n";
     return 0;
   }
-  // Timing actions: one correct, poisoned check first, then warm L2 and payload 0.
+  // Timing actions: one poisoned correctness check, then warm L2 with payload 0.
   cp.gate_payload(0, false, -1, -1);
   cp.prepare(0, false, false);
-  if (o.action == "parity") {
-    for (int i = 0; i < 10; ++i) { cp.launch_all(Image::linked); cp.launch_all(Image::control); }
-    cp.sync_all();
-    uint64_t n = std::max(cp.size_block(Image::linked), cp.size_block(Image::control));
-    std::vector<Cp::Block> linked, control;
-    std::vector<double> ratios;
-    for (int pair = 0; pair < 10; ++pair) {
-      Cp::Block a, b;
-      if (pair % 2 == 0) { a = cp.run_block(Image::linked, n); b = cp.run_block(Image::control, n); }
-      else { b = cp.run_block(Image::control, n); a = cp.run_block(Image::linked, n); }
-      linked.push_back(a); control.push_back(b);
-      ratios.push_back(b.step_ms / a.step_ms);  // linked throughput / control throughput
+  if (o.paired()) {
+    auto reload = [&] {
+      cp.sync_all();
+      for (auto& rank : cp.ranks) {
+        CUDA_CHECK(cudaSetDevice(rank->device));
+        for (auto graph : rank->graphs)
+          if (graph) throw std::runtime_error("cannot reload modules with live graphs");
+        rank->d->linked->unload();
+        rank->d->control->unload();
+      }
+      for (auto& rank : cp.ranks) {
+        CUDA_CHECK(cudaSetDevice(rank->device));
+        rank->d->control->load();
+        rank->d->linked->load();
+      }
+      cp.gate_payload(0, false, -1, -1);
+      cp.prepare(0, false, false);
+    };
+    if (o.action == "paired-check") {
+      for (int half = 0; half < 2; ++half) {
+        for (int i = 0; i < 2; ++i) cp.launch_all(Image::linked);
+        for (int i = 0; i < 2; ++i) cp.launch_all(Image::control);
+        cp.sync_all();
+        if (half == 0) reload();
+      }
+      cp.gate_payload(0, false, -1, -1);
+      prefix(out, o, c, cp);
+      out << "\"protocol\":\"paired-reload-v2\",\"reference_kind\":\"control\",\"timing\":false,"
+          << "\"queued_calls_per_arm_per_half\":2,\"halves\":2,"
+          << "\"images_executed\":[\"linked\",\"control\"],"
+          << "\"correctness\":{\"all_true\":true,\"checked_before_work\":true,"
+          << "\"checked_after_reload\":true,\"checked_after_work\":true,\"gate_a_bitwise\":true,"
+          << "\"gate_b_linked\":true,\"gate_b_control\":true,\"gate_c_lse\":true},"
+          << "\"generation\":" << cp.generation() << "}\n";
+      return 0;
     }
-    auto rank_linked = cp.rank_launch_ms(Image::linked, 10);
-    auto rank_control = cp.rank_launch_ms(Image::control, 10);
-    double const ratio = Cp::median(ratios);
+    std::vector<cudaEvent_t> begin(o.world), end(o.world);
+    for (int r = 0; r < o.world; ++r) {
+      CUDA_CHECK(cudaSetDevice(r));
+      CUDA_CHECK(cudaEventCreate(&begin[r]));
+      CUDA_CHECK(cudaEventCreate(&end[r]));
+    }
+    auto pair = pipelink::parity::time_pair([&](bool candidate, int n) {
+      for (int r = 0; r < o.world; ++r) {
+        CUDA_CHECK(cudaSetDevice(r));
+        CUDA_CHECK(cudaEventRecord(begin[r], cp.ranks[r]->stream));
+      }
+      for (int i = 0; i < n; ++i) cp.launch_all(candidate ? Image::linked : Image::control);
+      for (int r = 0; r < o.world; ++r) {
+        CUDA_CHECK(cudaSetDevice(r));
+        CUDA_CHECK(cudaEventRecord(end[r], cp.ranks[r]->stream));
+      }
+      double total = 0;
+      for (int r = 0; r < o.world; ++r) {
+        CUDA_CHECK(cudaSetDevice(r));
+        CUDA_CHECK(cudaEventSynchronize(end[r]));
+        float ms = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, begin[r], end[r]));
+        total = std::max(total, double(ms));
+      }
+      return total;
+    }, reload);
+    for (int r = 0; r < o.world; ++r) {
+      CUDA_CHECK(cudaSetDevice(r));
+      CUDA_CHECK(cudaEventDestroy(begin[r]));
+      CUDA_CHECK(cudaEventDestroy(end[r]));
+    }
     prefix(out, o, c, cp);
-    out << "\"correctness\":{\"checked_before_timing\":true,\"gate_a_bitwise\":true},"
-        << "\"timing_method\":\"all-rank-boundary\",\"step\":\"max_r(elapsed_r)/n\","
-        << "\"order\":\"alternating-linked-first-control-first\",\"pairs\":10,";
-    write_block_series(out, "linked", linked, n);
-    out << ',';
-    write_block_series(out, "control", control, n);
-    out << ",\"pair_ratios\":";
-    write_vector(out, ratios);
-    out << ",\"ratio\":" << ratio << ",\"ratio_definition\":\"median(control_step/linked_step) = linked/control throughput\","
-        << "\"ratio_floor\":0.97,\"verdict\":" << (ratio >= 0.97 ? "\"PASS\"" : "\"FAIL\"")
-        << ",\"rank_launch_ms\":{\"linked\":";
-    write_vector(out, rank_linked);
-    out << ",\"control\":";
-    write_vector(out, rank_control);
-    out << "}}\n";
+    out << "\"reference_kind\":\"control\",\"correctness\":{\"all_true\":true,"
+        << "\"checked_before_warmup\":true,\"checked_after_reload\":true,\"gate_a_bitwise\":true,"
+        << "\"gate_b_linked\":true,\"gate_b_control\":true,\"gate_c_lse\":true},"
+        << "\"timing_method\":\"all-rank-boundary\",\"batch\":\"max_r(elapsed_r)\","
+        << "\"generation\":" << cp.generation() << ",\"pair\":";
+    pipelink::parity::write_json(out, pair);
+    out << "}\n";
     return 0;
   }
   // placement (descriptive)

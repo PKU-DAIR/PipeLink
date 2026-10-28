@@ -33,8 +33,7 @@ def main():
                     value = metric.value()
                 except Exception:
                     value = None
-                # Numerical counters only: device names and host identifiers are
-                # not necessary evidence and are deliberately not copied.
+                # Copy numerical counters only, leaving out device names and host identifiers.
                 if isinstance(value, (int, float)):
                     row["metrics"][name] = {"value": value, "unit": metric.unit()}
                 if name.startswith("pmsampling:") and metric.num_instances():

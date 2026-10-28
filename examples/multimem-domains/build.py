@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """GPU-free packages, providers, linked image, and same-source controls.
 
-The build also repacks dp.red with an intentionally conflicting domain and
-requires the public linker to reject that composition with L-HOSTCHAN. Logs
-and the negative result are retained beneath the selected artifact root.
+The build also repacks dp.red with a deliberately conflicting domain and
+requires the linker to reject that composition with L-HOSTCHAN. Logs and the
+rejection result are written beneath the selected artifact root.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ REPO = HERE.parents[1]
 sys.path.insert(0, str(REPO))
 from tools.pipelink_env import load  # noqa: E402
 
-# Match the public CLI's diagnostic prefix, not its explanatory prose.
+# Read clause IDs from the CLI's structured diagnostic prefix; its prose may change.
 CLAUSE = re.compile(r"(?:^pipec2: |; )\[([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)\] ", re.MULTILINE)
 
 
@@ -113,8 +113,8 @@ def main() -> None:
     command([*cli, "link", link_dir / "pipeline.json", "--out-dir", link_dir], "link.log")
     link = json.loads((link_dir / "link.json").read_text())
 
-    # As in comm-overlap, namespace dispatch's generated owner-view declarations
-    # so the control includes the exact device sources without redefining views.
+    # Same-source control: namespace the generated dispatch, whose owner-view structs
+    # would otherwise redefine the ones in the included device sources.
     generated = link_dir / "generated"
     control = link_dir / "one-tu.cu"
     control.write_text(
@@ -138,8 +138,8 @@ def main() -> None:
     command([nvcc, "-std=c++17", "-O3", f"-arch={args.profile}", "--cubin",
              HERE / "helpers.cu", "-o", out / "helpers.cubin"], "helpers.log")
 
-    # A real repack preserves the ordinary owner contract machinery: only the
-    # dp.red annotation switches its domain, while its caller source stays red.
+    # Repack dp through the ordinary pack path with one define: only the dp.red
+    # annotation changes domain, and its caller source is still red.
     negative = out / "negative-domain"
     negative.mkdir(parents=True, exist_ok=True)
     pack("dp", negative / "dp.plink", defines=("MULTIMEM_DOMAINS_BAD_DP_RED=1",))

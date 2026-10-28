@@ -1,6 +1,5 @@
 {
  "name": "mismatched_call_declaration_hash",
- "reference": "design \u00a78.3",
  "description": "The consumer carries a self-consistent declaration/hash pair that differs from its own export.",
  "base": "call",
  "phase": "protocol.expand",

@@ -607,7 +607,7 @@ def generate_dispatch(
             f"{indent}}}",
         ]
 
-    # Register groups and their roles form ONE nested region each: the group's
+    # Each register group and its roles form one nested region: the group's
     # setmaxnreg immediate is followed by that group's role branches without a
     # control-flow join. ptxas derives per-region register budgets from
     # setmaxnreg; a join after mixed .inc/.dec branches makes it compile every

@@ -2,8 +2,8 @@
 #include <cuda.h>
 #include <stdint.h>
 
-// The load owner's descriptor-bearing blob is separate from user epilogue args.
-// Only load needs the CUDA tensor-map type; no CuTe templates cross this seam.
+// Each stage has its own params blob. Only load's carries CUDA tensor maps, and
+// no CuTe types cross the seam.
 struct alignas(128) GemmLoadParams {
   CUtensorMap a;
   CUtensorMap b;

@@ -1,0 +1,477 @@
+{
+ "claims": [
+  {
+   "align": 1,
+   "domain": "mbarrier",
+   "extent": {
+    "const": 16,
+    "per": {}
+   },
+   "handle": "pipelink_attention_mbarrier_base",
+   "lifetime": "kernel"
+  },
+  {
+   "domain": "regs",
+   "handle": "pipelink_attention_regs_aux_wg",
+   "reg_group": "aux_wg",
+   "roles": [
+    "load"
+   ],
+   "values": [
+    40
+   ]
+  },
+  {
+   "align": 1,
+   "domain": "mbarrier",
+   "extent": {
+    "const": 1,
+    "per": {}
+   },
+   "handle": "pipelink_attention_slots_corrected_o_empty",
+   "lifetime": "kernel"
+  },
+  {
+   "align": 1,
+   "domain": "mbarrier",
+   "extent": {
+    "const": 1,
+    "per": {}
+   },
+   "handle": "pipelink_attention_slots_corrected_o_full",
+   "lifetime": "kernel"
+  },
+  {
+   "align": 1,
+   "domain": "mbarrier",
+   "extent": {
+    "const": 1,
+    "per": {}
+   },
+   "handle": "pipelink_attention_slots_final_stats_empty",
+   "lifetime": "kernel"
+  },
+  {
+   "align": 1,
+   "domain": "mbarrier",
+   "extent": {
+    "const": 1,
+    "per": {}
+   },
+   "handle": "pipelink_attention_slots_final_stats_full",
+   "lifetime": "kernel"
+  },
+  {
+   "align": 1,
+   "domain": "mbarrier",
+   "extent": {
+    "const": 1,
+    "per": {}
+   },
+   "handle": "pipelink_attention_slots_o_drained_full",
+   "lifetime": "kernel"
+  },
+  {
+   "align": 1,
+   "domain": "mbarrier",
+   "extent": {
+    "const": 2,
+    "per": {}
+   },
+   "handle": "pipelink_attention_slots_work_epilogue_empty",
+   "lifetime": "kernel"
+  },
+  {
+   "align": 1,
+   "domain": "mbarrier",
+   "extent": {
+    "const": 2,
+    "per": {}
+   },
+   "handle": "pipelink_attention_slots_work_epilogue_full",
+   "lifetime": "kernel"
+  },
+  {
+   "align": 1024,
+   "domain": "smem",
+   "extent": {
+    "const": 166912,
+    "per": {}
+   },
+   "handle": "pipelink_attention_smem_base",
+   "lifetime": "kernel"
+  },
+  {
+   "absolute_base": 4,
+   "align": 4,
+   "domain": "warp",
+   "extent": {
+    "const": 8,
+    "per": {}
+   },
+   "handle": "pipelink_attention_warp_core",
+   "lifetime": "kernel",
+   "roles": [
+    "core"
+   ]
+  },
+  {
+   "absolute_base": 0,
+   "align": 1,
+   "domain": "warp",
+   "extent": {
+    "const": 1,
+    "per": {}
+   },
+   "handle": "pipelink_attention_warp_load",
+   "lifetime": "kernel",
+   "roles": [
+    "load"
+   ]
+  }
+ ],
+ "endpoints": [
+  {
+   "binds": {
+    "full": "pipelink_attention_slots_o_drained_full"
+   },
+   "direction": "consume",
+   "name": "o_drained",
+   "owner_role": "load",
+   "protocol": {
+    "full": {
+     "arrive": {
+      "by": "epilogue",
+      "count": 1
+     },
+     "native": {
+      "base": "pipelink_attention_mbarrier_base",
+      "offset_bytes": 240,
+      "stride_bytes": 8
+     },
+     "slots": "pipelink_attention_slots_o_drained_full",
+     "tx_bytes": 0
+    },
+    "init": {
+     "materializer": "stage",
+     "owner": "load",
+     "phase": 0,
+     "warp": 0
+    },
+    "kind": "mbarrier",
+    "release": "external"
+   },
+   "proxy": "generic",
+   "ring": {
+    "depth": {
+     "fixed": 1
+    },
+    "stage_stride_bytes": 0
+   },
+   "scope": "cta",
+   "space": "none"
+  },
+  {
+   "binds": {
+    "base": "pipelink_attention_smem_base",
+    "empty": "pipelink_attention_slots_work_epilogue_empty",
+    "full": "pipelink_attention_slots_work_epilogue_full"
+   },
+   "direction": "produce",
+   "layout": {
+    "elem_bits": 32,
+    "encoding": "pl-layout-v2",
+    "origin_bits": 1319744,
+    "shape": [
+     13
+    ],
+    "stride": [
+     1
+    ]
+   },
+   "name": "work_epilogue",
+   "owner_role": "load",
+   "protocol": {
+    "empty": {
+     "arrive": {
+      "by": "epilogue",
+      "count": 32
+     },
+     "native": {
+      "base": "pipelink_attention_mbarrier_base",
+      "offset_bytes": 128,
+      "stride_bytes": 8
+     },
+     "slots": "pipelink_attention_slots_work_epilogue_empty",
+     "tx_bytes": 0
+    },
+    "full": {
+     "arrive": {
+      "by": "load",
+      "count": 1
+     },
+     "native": {
+      "base": "pipelink_attention_mbarrier_base",
+      "offset_bytes": 112,
+      "stride_bytes": 8
+     },
+     "slots": "pipelink_attention_slots_work_epilogue_full",
+     "tx_bytes": 0
+    },
+    "init": {
+     "materializer": "stage",
+     "owner": "load",
+     "phase": 0,
+     "warp": 0
+    },
+    "kind": "mbarrier",
+    "release": "once-per-acquire"
+   },
+   "proxy": "generic",
+   "ring": {
+    "depth": {
+     "fixed": 2
+    },
+    "stage_stride_bytes": 52
+   },
+   "scope": "cta",
+   "space": "smem",
+   "tile": {
+    "dtype": "s32",
+    "shape": [
+     13
+    ]
+   }
+  },
+  {
+   "binds": {
+    "base": "pipelink_attention_smem_base",
+    "empty": "pipelink_attention_slots_corrected_o_empty",
+    "full": "pipelink_attention_slots_corrected_o_full"
+   },
+   "direction": "produce",
+   "layout": {
+    "elem_bits": 16,
+    "encoding": "pl-layout-v2",
+    "origin_bits": 0,
+    "shape": [
+     128,
+     64,
+     2
+    ],
+    "stride": [
+     64,
+     1,
+     8192
+    ],
+    "swizzle": {
+     "B": 3,
+     "M": 4,
+     "S": 3,
+     "unit": "byte"
+    }
+   },
+   "name": "corrected_o",
+   "owner_role": "core",
+   "protocol": {
+    "empty": {
+     "arrive": {
+      "by": "epilogue",
+      "count": 1
+     },
+     "native": {
+      "base": "pipelink_attention_mbarrier_base",
+      "offset_bytes": 216,
+      "stride_bytes": 8
+     },
+     "slots": "pipelink_attention_slots_corrected_o_empty",
+     "tx_bytes": 0
+    },
+    "full": {
+     "arrive": {
+      "by": "core",
+      "count": 256
+     },
+     "native": {
+      "base": "pipelink_attention_mbarrier_base",
+      "offset_bytes": 208,
+      "stride_bytes": 8
+     },
+     "slots": "pipelink_attention_slots_corrected_o_full",
+     "tx_bytes": 0
+    },
+    "init": {
+     "materializer": "stage",
+     "owner": "load",
+     "phase": 0,
+     "warp": 0
+    },
+    "kind": "mbarrier",
+    "release": "once-per-acquire"
+   },
+   "proxy": "async",
+   "ring": {
+    "depth": {
+     "fixed": 1
+    },
+    "stage_stride_bytes": 32768
+   },
+   "scope": "cta",
+   "space": "smem",
+   "tile": {
+    "dtype": "bf16",
+    "shape": [
+     128,
+     64,
+     2
+    ]
+   }
+  },
+  {
+   "binds": {
+    "base": "pipelink_attention_smem_base",
+    "empty": "pipelink_attention_slots_final_stats_empty",
+    "full": "pipelink_attention_slots_final_stats_full"
+   },
+   "direction": "produce",
+   "layout": {
+    "elem_bits": 32,
+    "encoding": "pl-layout-v2",
+    "origin_bits": 1322240,
+    "shape": [
+     2,
+     128
+    ],
+    "stride": [
+     128,
+     1
+    ]
+   },
+   "name": "final_stats",
+   "owner_role": "core",
+   "protocol": {
+    "empty": {
+     "arrive": {
+      "by": "epilogue",
+      "count": 32
+     },
+     "native": {
+      "base": "pipelink_attention_mbarrier_base",
+      "offset_bytes": 232,
+      "stride_bytes": 8
+     },
+     "slots": "pipelink_attention_slots_final_stats_empty",
+     "tx_bytes": 0
+    },
+    "full": {
+     "arrive": {
+      "by": "core",
+      "count": 256
+     },
+     "native": {
+      "base": "pipelink_attention_mbarrier_base",
+      "offset_bytes": 224,
+      "stride_bytes": 8
+     },
+     "slots": "pipelink_attention_slots_final_stats_full",
+     "tx_bytes": 0
+    },
+    "init": {
+     "materializer": "stage",
+     "owner": "load",
+     "phase": 0,
+     "warp": 0
+    },
+    "kind": "mbarrier",
+    "release": "once-per-acquire"
+   },
+   "proxy": "generic",
+   "ring": {
+    "depth": {
+     "fixed": 1
+    },
+    "stage_stride_bytes": 1024
+   },
+   "scope": "cta",
+   "space": "smem",
+   "tile": {
+    "dtype": "f32",
+    "shape": [
+     2,
+     128
+    ]
+   }
+  }
+ ],
+ "params": {
+  "align": 128,
+  "bytes": 1024,
+  "sha256_of_layout_probe": "f37d37dc1a7e2bbe6133ee39f0290d2fef434221037104fd5fb037049f55ac3b",
+  "type": "StageParams"
+ },
+ "pipelink_abi": {
+  "schema": "3.0",
+  "target": {
+   "lto_arch": "lto_90a",
+   "math": {
+    "fmad": true,
+    "ftz": true,
+    "prec_div": false,
+    "prec_sqrt": false
+   },
+   "profile": "sm_90a",
+   "toolkit": "cuda-13.3.0"
+  }
+ },
+ "stage": {
+  "entry_abi": "v2",
+  "entry_rendezvous": {
+   "barrier": 0,
+   "threads": 384
+  },
+  "entry_signature": "void(const void* params, unsigned variant)",
+  "exports": {},
+  "id": "test.attention.partner",
+  "roles": {
+   "core": {
+    "entry": "test_attention_partner_role_core",
+    "warps": 8
+   },
+   "load": {
+    "entry": "test_attention_partner_role_load",
+    "warps": 1
+   }
+  },
+  "symbol_prefix": "test_attention_partner_",
+  "variants": [
+   {
+    "index": 0,
+    "key": {}
+   }
+  ],
+  "version": "1.0.0+pipelink.attention"
+ },
+ "topology": {
+  "cluster": {
+   "compiled": [
+    1,
+    1,
+    1
+   ],
+   "launch": {
+    "max": [
+     1,
+     1,
+     1
+    ],
+    "x_multiple_of": 1
+   }
+  },
+  "cta_group": {
+   "fixed": 1
+  },
+  "multicast": [],
+  "persistent": true,
+  "scheduler": "static"
+ }
+}

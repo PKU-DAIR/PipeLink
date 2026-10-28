@@ -1,4 +1,4 @@
-"""Select unchanged upstream test-loop entries for a reproducible diagnostic."""
+"""Narrow upstream test loops to one existing entry each, for a reproducible diagnostic."""
 import os
 
 

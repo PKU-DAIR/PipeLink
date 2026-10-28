@@ -4,23 +4,25 @@
 One process drives one CudaBackend per rank (device), opens one host session per rank,
 and issues every launch to every rank in lockstep. Modes:
 
-  check     correctness at TP2/TP3/TP4 on a small shape, both images (CTA read-drain coverage)
+  check     correctness at TP2/TP3/TP4 on a small shape, both images (covers the CTA read-drain)
   sanitize  racecheck + synccheck on both images of both compositions at TP2
-  time      seam-parity linked/one-TU per-step ratio with the all-rank boundary, the large-shape
-            oracle check, and descriptive placement against the sequential baselines
+  time      one-TU/linked per-step speedup timed across all ranks, the large-shape oracle
+            check, and a descriptive comparison with the sequential baselines
   sass      normalized SASS diagnostic (GPU-free)
 
---artifacts selects a build root containing index.json without replacing out/PROFILE.
-RS outputs are rank-local, including distinct saved pipelined-generation outputs;
-wrap coverage includes W-1 parity counters and the u64 epoch at TP2/TP3/TP4.
-Timing reports retain scored rank-event arrays and host wall durations for both
-images and the descriptive sequential baseline. A failed requested clock-lock
-health check makes the overall timing result FAIL.
-An RS build declaring rs_completion launches its owner-local completion kernel
-on the same rank stream after either push image; graphs and timings cover both.
-Follow-on timing additionally scores balanced push-only event intervals in a
-separate instrumented trial; both step and push linked/control ratios must be
-at most 1.03. The uninstrumented end-to-end trial remains the step metric.
+--artifacts selects a build root containing index.json instead of out/PROFILE.
+Each RS rank checks its own output, including one saved output per pipelined
+generation. Wrap tests cover the W-1 parity counters and the u64 epoch at TP2/TP3/TP4.
+
+Timing reports keep the per-rank event times and host wall times of the timed
+batches for both images and the sequential baseline. If a requested clock lock
+fails its health check, the timing result is FAIL.
+
+An RS build that declares rs_completion launches its owner-local completion kernel
+on the same rank stream after either push image; graphs and timings include it.
+The step metric is the uninstrumented end-to-end trial. A separate instrumented
+trial times only the push intervals. Both the step and the push one-TU/linked
+speedups must be at least 1/1.03; each is the median of per-block speedups.
 """
 from __future__ import annotations
 
@@ -47,9 +49,9 @@ CAP = 512  # ready-counter slots (the comm owner's gmem_counter claim)
 LAUNCHES = 6  # synchronized direct launches per image (>= 5)
 REPLAYS = 3
 FREE = 6  # pipelined generations enqueued without host synchronization or cross-rank joins
-# TP3 presets: AG retains its original ready-counter/epoch coverage; RS counters
-# now receive W-1 arrivals per parity use. TP2/TP4 also exercise odd contributor
-# counts at the u32 generation boundary, where narrowing before shifting is wrong.
+# Wrap presets. AG covers the ready counters and the generation; RS counters receive
+# W-1 arrivals per parity use, so TP2/TP4 also exercise odd contributor counts at the
+# u32 generation boundary, where narrowing before shifting is wrong.
 WRAP = {"ag": (2**31 - 3, 2**32 - 3), "rs": (2**32 - 3, 2 * (2**32 // 2) - 4)}
 
 
@@ -190,8 +192,8 @@ class World:
                         out / completion["cubin"], completion["symbol"], device=r,
                         dynamic_smem_bytes=0, cluster=(1, 1, 1), block=(threads, 1, 1)))
                 observed = reducer.observations
-                # Unit clusters: this is the driver's device-wide simultaneous
-                # CTA capacity, not just SM count. Use the fully resident grid.
+                # With unit clusters this is the device-wide count of co-resident CTAs;
+                # cap the grid there so every CTA is resident.
                 blocks = min(owner_tiles, observed["max_active_clusters"])
                 if blocks < 1:
                     raise RuntimeError("RS completion has no resident launch capacity")
@@ -432,7 +434,7 @@ def bitwise(left, right):
 
 
 def coverage(world: World, oracle: Oracle, image: str, launches=LAUNCHES, replays=REPLAYS, free=FREE):
-    """CTA read-drain coverage for one image. Every checked output is compared with the oracle."""
+    """Exercise the CTA read-drain on one image, comparing every output with the oracle."""
     W = world.world
     record = {"image": image, "direct": [], "graph": []}
     outputs = {}
@@ -457,7 +459,7 @@ def coverage(world: World, oracle: Oracle, image: str, launches=LAUNCHES, replay
         result["skewed_rank"] = e % W if skew else None
         record["direct"].append(result)
 
-    # 2. Per-rank graphs replayed in lockstep (payload of launch 0, which a direct launch saw).
+    # 2. Per-rank graphs replayed in lockstep on launch 0's payload, so they can match direct-0.
     graphs = []
     for r in range(W):
         world.fill(r, 0)
@@ -474,12 +476,12 @@ def coverage(world: World, oracle: Oracle, image: str, launches=LAUNCHES, replay
         result["bitwise_vs_direct_0"] = bitwise(outputs[f"graph-{i}"], outputs["direct-0"])
         record["graph"].append(result)
 
-    # 3. Pipelined generations: `free` changing-payload launches per rank enqueued with no host
-    #    synchronization and no cross-rank joins on the launch streams. Generations 1 and 3 start
-    #    one rank late; during generations 2 and 4 one rank's SMs are mostly occupied by concurrent
-    #    caller work (a side stream), so its peers run ahead into the next generation mid-launch.
-    #    Every generation has its own session and output storage (shared counters, slots,
-    #    released flags and generation), so each output is kept and checked after the batch.
+    # 3. Pipelined generations: each rank enqueues `free` launches with changing payloads,
+    #    with no host synchronization or cross-rank joins on the launch streams. In generations
+    #    1 and 3 one rank starts late; in generations 2 and 4 caller work on a side stream
+    #    occupies most of one rank's SMs, so its peers run ahead into the next generation.
+    #    Each generation has its own session and output storage (counters, slots, released
+    #    flags and generation are shared), so every output is checked after the batch.
     #    The same sequence is then captured as one graph per rank and replayed in lockstep.
     generations = world.open_generations(free)
 
@@ -593,10 +595,10 @@ class AllRank:
 
 
 class PushPhase(AllRank):
-    """Separate instrumented trial; score max_r(sum of that rank's push intervals).
+    """Instrumented trial timed as max_r(sum of rank r's push intervals).
 
-    Resets and the completion kernel are outside each interval. Keep whole-step
-    event totals and wall time too; ordinary seam-parity trials remain uninstrumented.
+    Resets and the completion kernel fall outside each interval. Whole-step event
+    totals and wall time are recorded too; the ordinary parity trials carry no push events.
     """
 
     def __init__(self, world, image):
@@ -611,7 +613,7 @@ class PushPhase(AllRank):
         self.position += 1
 
     def time(self, n):
-        # Allocate/reuse event pools before the timed batch, never in World.launch.
+        # Create event pairs before the timed batch so World.launch allocates nothing.
         for backend, pairs in zip(self.backends, self.pairs):
             while len(pairs) < n:
                 pairs.append((backend.event_create(), backend.event_create()))
@@ -696,12 +698,12 @@ def time_world(out, index, composition, world_size, cuda_home, gpus):
                                  "one_tu": summarize(push_control, scored_batches)}
             phase["linked_mean_push_ms"] = phase["all_rank"]["linked"]["mean_step_ms"]
             phase["control_mean_push_ms"] = phase["all_rank"]["one_tu"]["mean_step_ms"]
-            push_passed = phase["status"] == "PASS" and phase["ratio_linked_over_onetu"] <= 1.03
+            push_passed = phase["status"] == "PASS" and phase["ratio_onetu_over_linked"] >= 1 / 1.03
         world.synchronize()
         after = world.outputs()
         report["after_timing_bitwise"] = bitwise(after, results["linked"])
 
-        # Sequential baselines: the unchanged hopper-gemm-split GEMM (base link) per rank.
+        # Sequential baselines: the hopper-gemm-split GEMM (base link) on each rank.
         if composition == "ag":
             rows = M // W
             # Each rank's base A buffer holds its own shard; peers' shards are pulled per step.
@@ -772,7 +774,7 @@ def time_world(out, index, composition, world_size, cuda_home, gpus):
             adapter.close()
         report["status"] = "PASS" if (report["oracle"]["status"] == "PASS" and report["linked_vs_one_tu_bitwise"]
                                       and report["after_timing_bitwise"] and report["o2"]["status"] == "PASS"
-                                      and report["o2"]["ratio_linked_over_onetu"] <= 1.03
+                                      and report["o2"]["ratio_onetu_over_linked"] >= 1 / 1.03
                                       and push_passed) else "FAIL"
         return report
 
@@ -785,7 +787,7 @@ def main():
     parser.add_argument("--tp", type=int, nargs="+", default=None)
     parser.add_argument("--composition", choices=("ag", "rs"), nargs="+", default=["ag", "rs"])
     parser.add_argument("--image", choices=("linked", "one-tu"), default="linked", help="single mode only")
-    parser.add_argument("--lock-mhz", type=int, default=None, help="time: hold a gpulockd lease at N MHz")
+    parser.add_argument("--lock-mhz", type=int, default=None, help="time: lock SM clocks at N MHz through gpulockd")
     parser.add_argument("--artifacts", type=Path, default=None,
                         help="artifact root containing index.json (default out/PROFILE)")
     args = parser.parse_args()
@@ -860,8 +862,8 @@ def main():
                     print(json.dumps({k: cell[k] for k in ("composition", "world", "initial_generation", "status")}),
                           flush=True)
                     report["cells"].append(cell)
-            # The timing shapes: long mainloops let SM contention push ranks a generation apart,
-            # which the small shapes cannot (the AG cross-launch release-wait negative control passes at small shapes).
+            # Timing shapes too: only their long mainloops let SM contention push ranks a
+            # generation apart. At small shapes, AG passes even without its cross-launch release wait.
             for world in [w for w in (args.tp or (2, 3, 4)) if w in (2, 4)]:
                 cell = check_world(out, index, composition, world, large(composition, world), cuda_home,
                                    launches=2, replays=2)
@@ -886,9 +888,9 @@ def main():
             for world in args.tp or (2, 4):
                 cell = time_world(out, index, composition, world, cuda_home, gpus[:world])
                 print(json.dumps({"composition": composition, "world": world, "status": cell["status"],
-                                  "ratio": cell["o2"]["ratio_linked_over_onetu"],
-                                  "push_ratio": cell.get("o2_push", {}).get("ratio_linked_over_onetu"),
-                                  "placement_linked_over_sequential": cell["placement"]["ratio_linked_over_onetu"]}),
+                                  "ratio_onetu_over_linked": cell["o2"]["ratio_onetu_over_linked"],
+                                  "push_ratio_onetu_over_linked": cell.get("o2_push", {}).get("ratio_onetu_over_linked"),
+                                  "placement_sequential_over_linked": cell["placement"]["ratio_onetu_over_linked"]}),
                       flush=True)
                 report["cells"].append(cell)
         if args.lock_mhz:

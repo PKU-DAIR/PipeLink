@@ -2,7 +2,7 @@
 #include "../../src/params.h"
 #include <pipelink_host_abi_v2.h>
 
-// This descriptor-bearing layout is compiled by the owner, never distributed.
+// The owner compiles this descriptor-bearing layout into its provider; the header itself is not distributed.
 struct GemmOwnerResidue {
   GemmLoadParams load;
   GemmMmaParams mma;

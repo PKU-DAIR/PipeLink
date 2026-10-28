@@ -11,7 +11,10 @@ REGISTER = re.compile(r"(?<![A-Za-z0-9_])(?:[U]?R<[0-9]+>|[U]?P<[0-9]+>|URZ|RZ|U
 
 
 def instruction_parts(line):
-    """Keep exact operand spans; commas nested in SASS operands do not split them."""
+    """Split a SASS line into predicate, opcode and exact operand spans.
+
+    Commas nested inside an operand do not split it.
+    """
     head = re.match(r"(?:(@\S+)\s+)?([^\s;]+)", line)
     if head is None or not line.endswith(";"):
         raise ValueError(f"unsupported normalized instruction: {line!r}")
@@ -41,11 +44,10 @@ def instruction_parts(line):
 
 
 def compare_streams(control, linked):
-    """Exact ordered comparison, exempting only individually located integer operands.
+    """Compare two SASS streams in order, exempting only individually located integer operands.
 
-    The caller must separately account for every exempted delta. This is not an
-    opcode-histogram comparison or a broadened normalization policy: predicates,
-    modifiers, registers, punctuation and all non-integer operands stay exact.
+    Predicates, modifiers, registers, punctuation and non-integer operands must
+    match exactly. The caller must account for every exempted integer delta.
     """
     checks = {
         "function_identity_order_equal": [name for name, _ in control] == [name for name, _ in linked],

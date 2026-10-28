@@ -22,8 +22,7 @@ from .profile import Profile
 
 
 ALLOWLIST_VERSION = "cuda-13.3-device-runtime-v1"
-# Carried byte-for-byte from the legacy symbol probe. These are
-# regular-expression patterns because the CUDA device-runtime surface includes symbol families.
+# Regular expressions, because the CUDA device-runtime surface includes symbol families.
 TOOLCHAIN_ALLOWLIST = (
     r"^__nv_",
     r"^__device_builtin__",
@@ -270,9 +269,8 @@ def _external_definitions(
         name, symbol_type = fields[0], fields[1]
         if _HOST_STUB_RE.search(name) or name.startswith("_GLOBAL__sub_I_"):
             continue
-        # Legacy device-companion rule: external CUDA device functions have a
-        # companion global text symbol; weak/linkonce companions use W. Host-side
-        # V/D/B metadata is deliberately excluded.
+        # External CUDA device functions have a companion global text symbol (T);
+        # weak/linkonce companions use W. Host-side V/D/B metadata is excluded.
         if symbol_type == "T":
             strong.add(name)
         elif symbol_type == "W":
@@ -522,8 +520,8 @@ def check_pack(table: SymbolTable, manifest: StageManifest) -> list[ClauseFailur
     """Require prefixes except for the stage's explicitly declared callable surface.
 
     ``manifest`` has passed schema validation, including export declaration
-    digests. Export symbols and role entries are exact-name admissions; other
-    strong globals still require the stage or PipeLink namespace prefix.
+    digests. Export symbols and role entries are admitted by exact name; other
+    strong globals require the stage or PipeLink namespace prefix.
     """
 
     symbol_prefix = manifest.symbol_prefix
@@ -545,7 +543,7 @@ def check_pack(table: SymbolTable, manifest: StageManifest) -> list[ClauseFailur
 
 
 def advisory_report(table: SymbolTable) -> dict[str, Any]:
-    """Return the disclosed, non-gating weak/COMDAT ODR boundary."""
+    """Return the weak/COMDAT definitions as an advisory ODR report."""
 
     return {
         "weak_comdat": [
@@ -588,7 +586,7 @@ def declared_imports(manifest: StageManifest) -> tuple[str, ...]:
 
 
 def import_seed(manifest: StageManifest) -> dict[str, str]:
-    """Return only declared imports and namespace handles admitted at pack."""
+    """Return the declared imports and namespace handles admitted at pack."""
     from .stubgen import reg_config_symbol
 
     admitted = declared_imports(manifest)
@@ -743,7 +741,7 @@ def check_generated_providers(
     tensor-import callable symbol to its importing stage ID. Each required symbol
     needs exactly one generated provider. All generated definitions must be
     unique and must not collide with packed strong globals.
-    Declaration matching is the lowering caller's separate obligation.
+    The lowering caller checks declaration matching.
     """
 
     failures: list[ClauseFailure] = []

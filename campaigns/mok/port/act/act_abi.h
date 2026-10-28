@@ -14,12 +14,7 @@ typedef struct MokActTask {
         d_gate_up_row_block_ready_base_index, buffer_done_index;
 } MokActTask;
 #endif
-#define MOK_ACT_TASK_PL_TYPE PL_TYPE(MokActTask, \
-    int32_t op, num_tokens, macrobatch_size, minibatch_size, macrobatch_idx, \
-        minibatch_idx, task_idx, cta_rank, gate_up_tile_ready_base_index, \
-        hidden_row_block_ready_base_index; uint32_t flags; \
-    int32_t d_hidden_tile_ready_base_index, replayed_gate_up_tile_ready_base_index, \
-        d_gate_up_row_block_ready_base_index, buffer_done_index;)
+#define MOK_ACT_TASK_PL_TYPE PL_TYPE(MokActTask, op, num_tokens, macrobatch_size, minibatch_size, macrobatch_idx, minibatch_idx, task_idx, cta_rank, gate_up_tile_ready_base_index, hidden_row_block_ready_base_index, flags, d_hidden_tile_ready_base_index, replayed_gate_up_tile_ready_base_index, d_gate_up_row_block_ready_base_index, buffer_done_index)
 
 enum {
     MOK_ACT_FWD_SHARED = 0, MOK_ACT_FWD_ROUTED = 1,

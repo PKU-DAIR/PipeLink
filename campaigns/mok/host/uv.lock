@@ -126,6 +126,18 @@ wheels = [
 ]
 
 [[package]]
+name = "ml-dtypes"
+version = "0.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/12/72/307d7c4bd0600601c7133fba5cb78af7db968152951c1cd473abb1cda782/ml_dtypes-0.6.0.tar.gz", hash = "sha256:5e60251d32ced5598972e4d5e06a2f044341f9291402551a3f6f0ec44f9299b0", size = 3032327, upload-time = "2026-08-13T14:14:40.215Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c7/f9/7d76c1eae866f5d4636401b31b6d6dd90e4b4ced1fa7cfdfcca9c60e4bd3/ml_dtypes-0.6.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3b4a480aa8fd54a1805b8ac10f3f91763926a74f73c0c364c10f9231854f4170", size = 409890, upload-time = "2026-08-13T14:14:04.248Z" },
+]
+
+[[package]]
 name = "mpmath"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -314,18 +326,20 @@ name = "pipec2"
 version = "0.1.0"
 source = { editable = "../../../pipec" }
 dependencies = [
+    { name = "ml-dtypes" },
     { name = "numpy" },
     { name = "z3-solver" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "ml-dtypes", specifier = ">=0.5" },
     { name = "numpy", specifier = ">=2" },
     { name = "z3-solver", specifier = "==4.15.4.0" },
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest" }]
+dev = [{ name = "pytest", specifier = "==9.1.1" }]
 
 [[package]]
 name = "pipelink-mok-host"
@@ -347,16 +361,16 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ninja" },
-    { name = "numpy" },
+    { name = "ninja", specifier = "==1.13.2" },
+    { name = "numpy", specifier = "==2.5.3" },
     { name = "pipec2", editable = "../../../pipec" },
-    { name = "setuptools", specifier = ">=80" },
+    { name = "setuptools", specifier = "==84.0.0" },
     { name = "torch", specifier = "==2.14.0", index = "https://download.pytorch.org/whl/cu130" },
-    { name = "wheel" },
+    { name = "wheel", specifier = "==0.48.0" },
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=9,<10" }]
+dev = [{ name = "pytest", specifier = "==9.1.1" }]
 
 [[package]]
 name = "pluggy"

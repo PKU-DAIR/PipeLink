@@ -1,0 +1,54 @@
+{
+  "natives": {
+    "fused": {
+      "source": "campaigns/coda/natives/sm90/native.cu",
+      "kernel": "coda_sm90_fused",
+      "std": "c++20",
+      "compile_flags": [
+        "--expt-relaxed-constexpr",
+        "--expt-extended-lambda",
+        "-maxrregcount=168"
+      ],
+      "includes": [
+        "third_party/mixture-of-kittens/third_party/ThunderKittens/include",
+        "pipec/src/pipec2/host/include"
+      ],
+      "defines": {
+        "KITTENS_HOPPER": 1
+      },
+      "grid": "((M // 128) * (N // 256), 1, 1)",
+      "threads": 384,
+      "cluster": [
+        1,
+        1,
+        1
+      ],
+      "dyn_smem": 230400
+    },
+    "unfused_gemm": {
+      "source": "campaigns/coda/natives/sm90/native.cu",
+      "kernel": "coda_sm90_unfused_gemm",
+      "std": "c++20",
+      "compile_flags": [
+        "--expt-relaxed-constexpr",
+        "--expt-extended-lambda",
+        "-maxrregcount=168"
+      ],
+      "includes": [
+        "third_party/mixture-of-kittens/third_party/ThunderKittens/include",
+        "pipec/src/pipec2/host/include"
+      ],
+      "defines": {
+        "KITTENS_HOPPER": 1
+      },
+      "grid": "((M // 128) * (N // 256), 1, 1)",
+      "threads": 384,
+      "cluster": [
+        1,
+        1,
+        1
+      ],
+      "dyn_smem": 197632
+    }
+  }
+}

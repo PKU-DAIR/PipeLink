@@ -1,6 +1,5 @@
 {
   "name": "params_overflow",
-  "reference": "D-finding",
   "description": "The stage parameter blob is one byte larger than the profile limit of 32764 bytes.",
   "base": "schema",
   "phase": "schema.stage",

@@ -1,12 +1,13 @@
-"""Native owner-provider broker for host ABI v3: open / launch* / close.
+"""Host ABI v3 broker for native owner providers: open, launch (repeatable), close.
 
-``open_host`` loads every provider (RTLD_LOCAL), proves its ABI, resolves shared
-scalars, queries demands, selects geometry, allocates one workspace, assembles
-the params image and runs every ``build`` once; the returned ``HostSession`` is
-pinned to those addresses, scalars, cluster and geometry. ``HostSession.launch``
-issues only stream work on the caller's stream (per-launch zero fills, kernel
-launch) and is CUDA-graph capture safe. ``close`` drains the context, releases
-every attempted build in reverse, frees the workspace and unloads the providers.
+``open_host`` loads every provider (RTLD_LOCAL), checks its ABI report, resolves
+shared scalars, queries demands, selects geometry, allocates one workspace,
+assembles the params image and runs every ``build`` once. The returned
+``HostSession`` keeps those addresses, scalars, cluster and geometry fixed.
+``HostSession.launch`` enqueues only stream work on the caller's stream
+(per-launch zero fills and the kernel), so it is safe under CUDA graph capture.
+``close`` drains the context, releases every attempted build in reverse order,
+frees the workspace and unloads the providers.
 """
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ def _fail(reason: str, path: str, message: str, *, abi: bool = False, **details:
 
 def _write_stage_blobs(image: A.aligned_buffer, entries: Sequence[ParamsEntry],
                        blobs: Mapping[str, bytes], fail: Callable[..., LinkError]) -> None:
-    """Copy opaque stage blobs into the common by-value kernel params image."""
+    """Copy opaque stage blobs into the shared by-value kernel params image."""
     for name, offset, size, _align in entries:
         if name in blobs:
             data = blobs[name]
@@ -375,7 +376,8 @@ def _check_resource(channel: dict[str, Any], resource: Resource, domains: Mappin
                         expected=resource.address, actual=resource.peers[rank])
     if "multicast" in channel["views"] and resource.allocation_bytes and not resource.multicast:
         raise _fail("domain", path, "multicast view requires a multicast address")
-    # Symmetric allocations: the bit-interval check above bounds every peer and the multicast view.
+    # The allocation is symmetric, so the bit-interval check above also bounds every peer and
+    # the multicast view; only the base addresses need checking.
     for key, base in (*((f"peers[{i}]", peer) for i, peer in enumerate(resource.peers)),
                       *((("multicast", resource.multicast),) if resource.multicast else ())):
         _integer(base, 64, path=f"{path}.{key}")
@@ -388,7 +390,7 @@ def _check_resource(channel: dict[str, Any], resource: Resource, domains: Mappin
 
 
 def _bases(resource: Resource) -> tuple[int, ...]:
-    """Every address of one resource's allocation base: local, then peers, then multicast."""
+    """All base addresses of one resource's allocation: local, then peers, then multicast."""
     return (resource.address, *resource.peers, *((resource.multicast,) if resource.multicast else ()))
 
 
@@ -567,7 +569,7 @@ def _aliases(owners: list[_Owner], values: dict[str, Any], host: dict[str, Any],
             offset = (_evaluate(alias["byte_offset"], values, host) * 8 +
                       _evaluate(alias["bit_offset"], values, host))
             source, destination = all_resources[name], all_resources[target]
-            # Aliases hold on every view of the allocation: local, each peer and multicast.
+            # An alias must hold on every view of the allocation: local, each peer and multicast.
             source_bases, target_bases = _bases(source), _bases(destination)
             if len(source_bases) != len(target_bases):
                 raise _fail("alias", name, "alias and target carry different symmetric views", other=target)
@@ -724,7 +726,7 @@ def _check_transfers(owner: _Owner, params: Any) -> list[dict[str, Any]]:
 
 @dataclass
 class HostSession:
-    """An immutable invocation: geometry, provenance, reports, params, launch and close."""
+    """One opened invocation with fixed geometry, provenance, transfer reports and params."""
     backend: Any
     geometry: dict[str, Any] = field(default_factory=dict)
     toolchain_provenance: dict[str, Any] = field(default_factory=dict)
@@ -739,11 +741,12 @@ class HostSession:
     _geometry: Any = None
 
     def launch(self, stream: int, image: Any = None) -> None:
-        """Enqueue launch resets and the kernel on `stream`.
+        """Enqueue the per-launch resets and the kernel on `stream`.
 
-        `image` is an optional second backend on the same context holding a same-source control
-        image of this link (same symbol, threads, shared memory and params layout); it launches
-        with this session's params, geometry and resets.
+        `image` optionally names a second backend in the same context that holds a control
+        image built from the same sources (same symbol, threads, shared memory and params
+        layout). That kernel then launches in place of this one, with this session's params,
+        geometry and resets.
         """
         for address, size in self.resets:
             self.backend.zero(address, size, stream)
@@ -766,7 +769,10 @@ class HostSession:
 
 
 def _teardown(session: HostSession) -> list[Exception]:
-    """The only release path: drain (or abandon), reverse release, free, dlclose."""
+    """Release everything, collecting errors: drain (or abandon), release in reverse, free, dlclose.
+
+    Both close() and a failed open_host use this path.
+    """
     backend = session.backend
     errors: list[Exception] = []
     if session.attempted or session.allocations:
@@ -791,8 +797,8 @@ def _teardown(session: HostSession) -> list[Exception]:
                 backend.free(address)
             except Exception as exc:
                 errors.append(exc)
-    # Owners, their CDLL handles, metadata, args, scalar image and the
-    # aggregate remain reachable until all release calls above have returned.
+    # Unload only now: owners, their CDLL handles, metadata, args, the scalar image and
+    # the aggregate must stay alive until every release call above has returned.
     for owner in reversed(session.owners):
         try:
             dlclose(owner.library._handle)
@@ -806,14 +812,15 @@ def open_host(result: Any, provider_paths: Mapping[str, Path], provider_args: Ma
               cluster: tuple[int, int, int] | None = None, *,
               blobs: Mapping[str, bytes] | None = None,
               domains: Mapping[str, Domain] | None = None) -> HostSession:
-    """Report/query/build once, check transfer reports, and return the pinned session.
+    """Run every provider's report, query and build once, check the transfer reports, and
+    return the open session.
 
-    Providers and args are keyed by params_group; blobs by host-less stage ID.
+    Providers and args are keyed by params_group, blobs by host-less stage ID.
     ``domains`` maps every communication domain an owner declared to this rank's
     ``Domain(rank, world)``. Caller resources must be ready on the stream later passed
-    to launch(); symmetric resources on every rank of their domain. Providers run with
-    ``backend.current()`` pushed.
-    The session owns intermediate buffers and workspaces through reverse release.
+    to launch(), and symmetric resources on every rank of their domain. Providers run
+    inside ``backend.current()``. The session owns its intermediate buffers and
+    workspaces until close() releases them.
     """
     host = result.host
     if not host or host["protocol"] != 2:
@@ -843,7 +850,6 @@ def open_host(result: Any, provider_paths: Mapping[str, Path], provider_args: Ma
         for group in groups:
             name = group["params_group"]
             owners.append(_load_owner(group, Path(provider_paths[name]), provider_args.get(name, b"")))
-        # Providers (report/query/build) run in the backend's context, current on this thread.
         with backend.current():
             for owner in owners:
                 _report(owner, host["target"])
@@ -875,7 +881,7 @@ def open_host(result: Any, provider_paths: Mapping[str, Path], provider_args: Ma
             for owner in owners:
                 _query(owner)
             geometry = _select_geometry(owners, host, block, cluster, result.dyn_smem_bytes, backend)
-            # Allocate once and slice by owner demand, including legal zero slices.
+            # One allocation, sliced by owner demand; zero-byte slices are allowed.
             cursor, workspace_align = 0, 1
             slices: dict[str, tuple[int, int, int]] = {}
             for owner in owners:
@@ -913,7 +919,7 @@ def open_host(result: Any, provider_paths: Mapping[str, Path], provider_args: Ma
                 C.memmove(params.address + scalar["offset"], shared.address, shared.size)
             _write_stage_blobs(params, result.params.entries, blobs,
                                lambda name, message, **detail: _fail("resource_range", name, message, **detail))
-            # Open-time zero fills precede build. Per-launch resets stay on the launch stream.
+            # Open-time zero fills run before build; per-launch resets run on the launch stream.
             for owner in owners:
                 for workspace in sorted(owner.group["workspaces"], key=lambda w: w["id"]):
                     resource = workspaces[workspace["name"]]

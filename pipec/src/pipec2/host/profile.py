@@ -1,4 +1,4 @@
-"""Public host contract inventories and non-gating toolchain provenance."""
+"""Public host contract inventories (ABI name, dtypes, hardware scalars) and informational toolchain provenance."""
 
 from __future__ import annotations
 

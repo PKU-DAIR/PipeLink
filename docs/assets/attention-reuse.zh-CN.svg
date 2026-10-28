@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 494" role="img" aria-labelledby="ar-title ar-desc">
   <title id="ar-title">一个注意力核心，七种组合</title>
-  <desc id="ar-desc">七种 Hopper 注意力组合链接同一个未经修改的核心包。每一行只替换核心周围的少量小阶段：滑动窗口用一个 28 行的掩码，softcap 用一个 29 行的打分被调函数，Phi-3 块稀疏用一个块加载阶段和一个掩码，MiniMax-M3 稀疏注意力用一个选块加载阶段和一个部分结果 epilogue，多 GPU 注意力则用一个上下文并行加载阶段加上通信所有者的 KV-gather warp。</desc>
+  <desc id="ar-desc">七种 Hopper 注意力组合链接同一个未经修改的核心包。每一行只替换核心周围的少量小阶段：滑动窗口用一个 19 行的掩码，softcap 用一个 20 行的打分被调函数，Phi-3 块稀疏用一个块加载阶段和一个掩码，MiniMax-M3 稀疏注意力用一个选块加载阶段和一个部分结果 epilogue，多 GPU 注意力则用一个上下文并行加载阶段加上通信所有者的 KV-gather warp。</desc>
   <defs>
     <style>
       text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", sans-serif; fill: #1f2328; }
@@ -59,7 +59,7 @@
   <text class="mono pkg" x="319" y="142" text-anchor="middle">tma-load</text>
   <rect class="new" x="544" y="116.0" width="140" height="42" rx="8"/>
   <text class="mono pkg newtext" x="614" y="134.0" text-anchor="middle">mask-window</text>
-  <text class="lines" x="614" y="150.0" text-anchor="middle">28 行</text>
+  <text class="lines" x="614" y="150.0" text-anchor="middle">19 行</text>
   <rect class="base" x="694" y="116.0" width="140" height="42" rx="8"/>
   <text class="mono pkg" x="764" y="142" text-anchor="middle">score-identity</text>
   <rect class="base" x="844" y="116.0" width="160" height="42" rx="8"/>
@@ -74,7 +74,7 @@
   <text class="mono pkg" x="614" y="196" text-anchor="middle">mask-default</text>
   <rect class="new" x="694" y="170.0" width="140" height="42" rx="8"/>
   <text class="mono pkg newtext" x="764" y="188.0" text-anchor="middle">score-softcap</text>
-  <text class="lines" x="764" y="204.0" text-anchor="middle">29 行</text>
+  <text class="lines" x="764" y="204.0" text-anchor="middle">20 行</text>
   <rect class="base" x="844" y="170.0" width="160" height="42" rx="8"/>
   <text class="mono pkg" x="924" y="196" text-anchor="middle">epilogue</text>
   <rect class="base" x="1014" y="170.0" width="140" height="42" rx="8"/>
@@ -85,10 +85,10 @@
   <text class="mono pkg" x="319" y="250" text-anchor="middle">tma-load</text>
   <rect class="new" x="544" y="224.0" width="140" height="42" rx="8"/>
   <text class="mono pkg newtext" x="614" y="242.0" text-anchor="middle">mask-window</text>
-  <text class="lines" x="614" y="258.0" text-anchor="middle">28 行</text>
+  <text class="lines" x="614" y="258.0" text-anchor="middle">19 行</text>
   <rect class="new" x="694" y="224.0" width="140" height="42" rx="8"/>
   <text class="mono pkg newtext" x="764" y="242.0" text-anchor="middle">score-softcap</text>
-  <text class="lines" x="764" y="258.0" text-anchor="middle">29 行</text>
+  <text class="lines" x="764" y="258.0" text-anchor="middle">20 行</text>
   <rect class="base" x="844" y="224.0" width="160" height="42" rx="8"/>
   <text class="mono pkg" x="924" y="250" text-anchor="middle">epilogue</text>
   <rect class="base" x="1014" y="224.0" width="140" height="42" rx="8"/>
@@ -97,10 +97,10 @@
   <text class="work" x="24" y="314">Phi-3-small</text>
   <rect class="new" x="244" y="278.0" width="150" height="42" rx="8"/>
   <text class="mono pkg newtext" x="319" y="296.0" text-anchor="middle">block-load</text>
-  <text class="lines" x="319" y="312.0" text-anchor="middle">395 行</text>
+  <text class="lines" x="319" y="312.0" text-anchor="middle">378 行</text>
   <rect class="new" x="544" y="278.0" width="140" height="42" rx="8"/>
   <text class="mono pkg newtext" x="614" y="296.0" text-anchor="middle">mask-phi</text>
-  <text class="lines" x="614" y="312.0" text-anchor="middle">31 行</text>
+  <text class="lines" x="614" y="312.0" text-anchor="middle">26 行</text>
   <rect class="base" x="694" y="278.0" width="140" height="42" rx="8"/>
   <text class="mono pkg" x="764" y="304" text-anchor="middle">score-identity</text>
   <rect class="base" x="844" y="278.0" width="160" height="42" rx="8"/>
@@ -111,21 +111,21 @@
   <text class="work" x="24" y="368">MiniMax-M3（MSA）</text>
   <rect class="new" x="244" y="332.0" width="150" height="42" rx="8"/>
   <text class="mono pkg newtext" x="319" y="350.0" text-anchor="middle">msa-load</text>
-  <text class="lines" x="319" y="366.0" text-anchor="middle">351 行</text>
+  <text class="lines" x="319" y="366.0" text-anchor="middle">334 行</text>
   <rect class="base" x="544" y="332.0" width="140" height="42" rx="8"/>
   <text class="mono pkg" x="614" y="358" text-anchor="middle">mask-default</text>
   <rect class="base" x="694" y="332.0" width="140" height="42" rx="8"/>
   <text class="mono pkg" x="764" y="358" text-anchor="middle">score-identity</text>
   <rect class="new" x="844" y="332.0" width="160" height="42" rx="8"/>
   <text class="mono pkg newtext" x="924" y="350.0" text-anchor="middle">epilogue-partial</text>
-  <text class="lines" x="924" y="366.0" text-anchor="middle">155 行</text>
+  <text class="lines" x="924" y="366.0" text-anchor="middle">138 行</text>
   <rect class="base" x="1014" y="332.0" width="140" height="42" rx="8"/>
   <text class="mono pkg" x="1084" y="358" text-anchor="middle">empty</text>
   <text class="name" x="24" y="403">上下文并行</text>
   <text class="work" x="24" y="422">因果，2–4 块 GPU</text>
   <rect class="new" x="244" y="386.0" width="150" height="42" rx="8"/>
   <text class="mono pkg newtext" x="319" y="404.0" text-anchor="middle">cp-load</text>
-  <text class="lines" x="319" y="420.0" text-anchor="middle">435 行</text>
+  <text class="lines" x="319" y="420.0" text-anchor="middle">417 行</text>
   <rect class="base" x="544" y="386.0" width="140" height="42" rx="8"/>
   <text class="mono pkg" x="614" y="412" text-anchor="middle">mask-default</text>
   <rect class="base" x="694" y="386.0" width="140" height="42" rx="8"/>
@@ -134,7 +134,7 @@
   <text class="mono pkg" x="924" y="412" text-anchor="middle">epilogue</text>
   <rect class="comm" x="1014" y="386.0" width="140" height="42" rx="8"/>
   <text class="mono pkg commtext" x="1084" y="404.0" text-anchor="middle">kv-gather</text>
-  <text class="lines" x="1084" y="420.0" text-anchor="middle">279 行</text>
+  <text class="lines" x="1084" y="420.0" text-anchor="middle">261 行</text>
   <rect class="core" x="404" y="62" width="130" height="366" rx="10"/>
   <text class="mono coretext" x="469" y="231" text-anchor="middle">core</text>
   <text class="coresub" x="469" y="253" text-anchor="middle">同一个包，</text>

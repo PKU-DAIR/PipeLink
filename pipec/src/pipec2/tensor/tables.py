@@ -70,7 +70,8 @@ def encode_component(
 
     Prefer a single-axis identity, constant, or bit permutation. Otherwise build
     nested piecewise selections in declared value order, using each final value
-    as the fallback anchor. No owner address interpretation belongs here.
+    as the fallback anchor. Values are encoded as given; owner addresses are not
+    interpreted.
     """
     names = tuple(sorted(domains))
     axes = tuple(_values(domains, name) for name in names)
@@ -92,7 +93,7 @@ def encode_component(
             }
             if all(values_by_coord[prefix + point] == values[point[axis_index]] for point in product(*remaining)):
                 return _encode_axis([values[value] for value in axis], names[depth + axis_index], axis)
-        # Nonseparable maps remain expressible through nested finite selections.
+        # Nonseparable map: fall back to nested finite selections.
         axis = axes[depth]
         rows = [encode(prefix + (value,), depth + 1)[0] for value in axis]
         result = rows[-1]

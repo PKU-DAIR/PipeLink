@@ -2,43 +2,46 @@
 
 ## Goal and prerequisites
 
-Author T4's row-scale + bias + ReLU epilogue in TileLang, using **two opaque
-partner packages**: an accumulator provider and a row-scale provider. The
-[recipe](../../examples/one-epilogue-many-producers/consumer-tilelang/epilogue_contract.py)
-contains **0 hand-written `PL_*` macros** and includes no provider header. Its
-arithmetic remains:
+In this tutorial you author T4's SwiGLU consumer in TileLang against an
+**opaque GEMM producer package**. The
+[recipe](../../campaigns/coda/consumer-tilelang/swiglu.py) has **0 hand-written
+`PL_*` macros** and includes no producer header. It computes the same function
+as the hand-CUDA consumer of [T4](T4-tensor-import.md):
 
 ```text
-out[m,n] = max(accumulator[m,n] * row_scale[m] + bias[m], 0)
+out[m, j] = bf16(silu(acc[m, 2j]) * acc[m, 2j + 1])
 ```
 
-First read and replay that shipped recipe, then author a scratch **ReLU6**
-variant in §4 by changing its elementwise operation and stage identity. The
-exercise distinguishes inherited declarations from the changes you write.
+You first read and replay the shipped recipe, then in §4 write a scratch
+**GeGLU** variant by changing its activation and stage identity. That way you
+can tell what you inherit from what you write.
 
-One recipe is re-lowered against each partner, rather than specialized by
-hand for TMEM, shared memory or registers. The generated `roles.cu` is
-byte-identical across this example's admitted partners on every profile;
-`build.py` checks that property. This is a source-invariance claim, not a claim
-that separately rebuilt `.plink` archives have identical bytes.
+The recipe never writes a demand map: the frontend reads the import's demand
+from the lowered layout of its destination fragment. A recipe can also
+specialize to its producer, much as profile-guided optimization specializes a
+build. The shipped recipe adopts the producer's delivery layout, so the
+accumulator arrives by a direct register copy or TMEM receipt with no adapter
+staging. Specialization affects only performance; correctness never depends on
+it. Its cost is one consumer package per producer: `build.py` lowers the recipe
+against each profile's producer package.
 
-Complete [T0](T0-pack-link.md)'s CUDA **13.3**, `uv`, `.env` and scratch setup
-and read [T4](T4-tensor-import.md) for tensor identity, demand, caller frames
-and rendezvous. Lowering is CPU-only; packing and linking also need no GPU.
-Runtime acceptance needs a matching Hopper/sm90, Blackwell/sm103 or sm120 GPU, a
-compatible driver and Compute Sanitizer. Keep the repository CUTLASS headers
-at `third_party/cutlass/include`.
+Before you start, complete [T0](T0-pack-link.md)'s CUDA **13.3**, `uv`, `.env`
+and scratch setup, and read [T4](T4-tensor-import.md) for tensor identity,
+demand, caller frames and rendezvous. Lowering, packing and linking are
+CPU-only. Running the result needs a Hopper/sm90, Blackwell/sm103 or sm120 GPU
+matching the profile, a compatible driver and Compute Sanitizer. Keep the
+repository submodules initialized as in T4.
 
-Use the pinned **Linux x86_64-only** frontend environment: Python 3.11, CPU
-Torch 2.8.0 and patched TileLang 0.1.14. The wheel is a **local path**,
+The frontend needs its pinned **Linux x86_64-only** environment: Python 3.11,
+CPU Torch 2.8.0 and patched TileLang 0.1.14. Stock TileLang does not work.
+Until the owner uploads the GitHub release asset, the wheel is a **local path**,
 `frontends/tilelang/env/wheels/tilelang-0.1.14-cp39-abi3-linux_x86_64.whl`,
-until the owner uploads the GitHub release asset. A fresh clone must build it
-with [`build-tilelang.sh`](../../frontends/tilelang/env/build-tilelang.sh)
-before a locked sync; an arbitrary stock TileLang installation is not a
-substitute. Follow the [environment instructions](../../frontends/tilelang/env/README.md)
-for the pinned upstream source, two patches, bundled licenses and lock-refresh
-rule. Other-platform rebuilds are unvalidated and unsupported. Build the wheel
-once, not for each partner:
+which a new clone builds with
+[`build-tilelang.sh`](../../frontends/tilelang/env/build-tilelang.sh) before a
+locked sync. The [environment instructions](../../frontends/tilelang/env/README.md)
+cover the pinned upstream source, the two patches, bundled licenses and the
+lock-refresh rule. Other platforms are unsupported. Build the wheel once for
+all partners:
 
 ```sh
 source tools/env.sh
@@ -48,405 +51,394 @@ uv lock --project frontends/tilelang --refresh-package tilelang
 uv sync --project frontends/tilelang --locked
 ```
 
-Until the GitHub release asset exists, the lock pins the owner's local wheel
-hash; source rebuilds can differ in bytes, so refresh that entry before syncing.
-If the local wheel already matches the lock and the environment exists, only
-the locked sync is needed. Do not impose one global `UV_PROJECT_ENVIRONMENT`:
-the compiler and frontend have separate projects.
+The lock pins the owner's local wheel hash, and a source rebuild can differ in
+bytes, so refresh that entry before syncing. If your wheel already matches the
+lock and the environment exists, run only the locked sync. The compiler and the
+frontend are separate uv projects, so do not set one global
+`UV_PROJECT_ENVIRONMENT`.
 
 ## 1. Read the contract-authored recipe
 
-The [frontend's recipe tracks](../../frontends/tilelang/README.md#recipe-tracks)
-distinguish manually annotated stages, contract-authored stages and tensor
-exporters. This tutorial uses the **contract-authored** track:
+The frontend has three [recipe tracks](../../frontends/tilelang/README.md#recipe-tracks):
+manually annotated stages, contract-authored stages and tensor exporters. This
+tutorial uses the **contract-authored** track. The recipe's skeleton:
 
 ```python
-acc_partner = Partner.load(os.environ["PIPELINK_ACC_PARTNER"])
-scale_partner = Partner.load(os.environ["PIPELINK_SCALE_PARTNER"])
+import pipelink_tilelang as pl
+
+partner = pl.Partner.load(os.environ["PIPELINK_ACC_PARTNER"])
+acc = pl.import_tensor(partner, "accumulator", outputs=("m0", "n0"), scratch_bytes=0)
+
+def program():
+    @T.prim_func
+    def swiglu(a: T.handle, b: T.handle, output_handle: T.handle, M: T.int32, N: T.int32, K: T.int32):
+        with T.Kernel(..., threads=THREADS):
+            frag = acc.fragment(specialize=True, chunk=("n", 32))
+            with acc.produced(completion="final"):
+                m0, n0 = acc.args.m0, acc.args.n0
+                staging = acc.staging((128, 128), "bfloat16")
+                for chunk in T.serial(8):
+                    with acc.imported(frag, chunk=chunk):
+                        ...  # SwiGLU on frag, write bf16 into staging
+                T.copy(staging, output[m0:m0 + 128, n0 // 2:n0 // 2 + 128], ...)
+    return swiglu
+
+STAGE = pl.contract_stage("coda.consumer.tilelang-swiglu", "1.0.0", program,
+                          host=pl.HostParams(".../consumer/host_annotations.cuh", "CodaEpilogueParams", {...}))
 ```
 
-`Partner.load(.plink)` reads the package's manifest. The helper `channel(...)`
-in the recipe calls `import_tensor(partner, export_name, ...)` twice: once for
-`accumulator`, once for `row_scale`. In other words, this is
-`import_tensor(Partner.load(...), ...)` with each loaded partner named for reuse.
-The consumer does not open provider CUDA sources or headers.
+The excerpt shows the interface; the linked recipe is the runnable version.
+`Partner.load` reads only the packed manifest. You choose the partner and
+export, the stage identity, the arithmetic, the launch geometry, the chunking
+and whether to specialize. The frontend supplies the rest:
 
-### What the Python declarations promise
-
-| Recipe declaration | What the author promises |
+| Fact | Source |
 |---|---|
-| Two `Partner.load(...)` calls | Select independently packed accumulator and row-scale contracts for the chosen profile. |
-| Two `import_tensor(...)` calls | Select the public tensor names and consumer-owned import symbols, both owned by role `epilogue`. |
-| `TensorDemand((("t",0,128),("p",0,128)), ("t","p","t","p"))` | For the accumulator, logical `(m,n)=(t,p)` is demanded by participant `t` at destination position `p`: a complete row per thread. |
-| `TensorDemand((("t",0,128),), ("t","t",0))` | For the scale, logical row `m=t` is demanded by participant `t` at destination position 0. |
-| The demand defaults | An all-thread site entered once, converged, with full warps and no early return. These are promises, not facts inferred from arbitrary arithmetic. |
-| Five accumulator lends | 65,536 shared scratch bytes aligned to 128 bytes, 128 destination positions, one CTA barrier, a 128-position caller frame and two metadata words. |
-| Three scale lends | 1,024 shared scratch bytes aligned to 128 bytes, one destination position and one CTA barrier. |
-| Two `TensorRendezvous` values per import | The partner's ready and reusable events use the import's `outer` barrier with an all-thread cohort. |
-| Two `arguments` maps | Populate published GEMM fields `a,b,M,N,K` and scale fields `a,M,K,eps` from this consumer's own params. |
+| Tensor identity, shape/dtype, ready/done events and produce/release endpoints | Partner manifest, including its published `PL_TYPE` argument members. |
+| Producer-written argument members | `outputs=("m0", "n0")` names published members that the producer writes; `acc.args.m0` reads each thread's own copy after produce returns. |
+| Destination demand and register extent | Every lowered fragment element and replica, captured from TileLang. With `chunk=("n", 32)` the fragment covers one 128×32 chunk and the import binds the chunk index. |
+| Source caller frame | Published register position extent when evaluable; otherwise a capacity based on identity size and participants, still checked by `T-PLAN-FRAME`. |
+| Shared adapter scratch | `scratch_bytes=0` lends none, so the linker may select only routes without adapter staging. The default is the dense bytes of one chunk. |
+| Barrier/rendezvous | Generated all-thread ready/done calls, using one lent CTA barrier. |
+| Metadata capacity | One warp-scoped slot by default. |
+| Params and role | PrimFunc parameters and `T.match_buffer` dtypes; one role spanning `T.Kernel` at warp zero. |
+| Host contract | `pl.HostParams` reuses the hand consumer's [`host_annotations.cuh`](../../campaigns/coda/consumer/host_annotations.cuh), with this stage's reader role and role-view type substituted. |
+| Argument binding | Published member names and matching C types; `arguments=` explicitly overrides the member-to-param convention. |
+| Site guarantees | Structural checks over the final TIR. |
+| Seed, pass configuration, depths, emitter, register cap | Overridable frontend defaults. |
 
-The mapping tuple in `TensorDemand` contains **logical coordinates first,
-then participant and local position**. It is not the provider's physical
-layout. The caller frame is per-thread storage passed into produce; it is not
-the shared scratch used by a generated adapter. Capacities are authored and
-checked against the selected export at link time, as T4's insufficient-frame
-rejection demonstrates.
+`acc.produced(completion="final")` emits **produce → ready** on entry and
+**done → release** on exit; each `acc.imported(frag, chunk=chunk)` imports one
+chunk into the fragment. Final completion runs the done rendezvous once, after
+the last chunk and the output drain; it requires chunked imports with
+`scratch_bytes=0`, because no adapter scratch needs to be guarded between
+chunks. With the default `completion="each"`, every chunk completes separately.
+Lowering records these guarantees only if the scopes are entered once, outside
+branches, with whole warps participating, no early return and no use of the
+fragment or scratch after completion.
 
-The stage itself is explicit:
+The frontend can state these facts because it generates the storage and calls
+itself. An opaque CUDA consumer still writes its own frame and scratch lends
+and its rendezvous, since the packer cannot see the arrays and schedule behind
+`PL_IMPORT_TENSOR`. The two tracks differ on purpose: PipeLink records
+guarantees only where it generated the code that keeps them.
+
+For recipes with explicit channels, authored role placement and params (such
+as attention epilogues), use `ContractStage`. `contract_stage` is the smaller
+interface for a single whole-kernel tensor-import role.
+
+In `projection.json`, facts taken from the partner carry `contract` provenance;
+checked schedule and captured fragment facts carry `captured` provenance. The
+generated CUDA reaches the packer through the same typed `PL_CALL`, `PL_TYPE`,
+`PL_SITE` and `PL_IMPORT_TENSOR` macros as hand-written code.
+
+The linker, not the frontend, selects the transport. It combines the export's
+placement and capabilities with the captured demand and the lends, then
+generates adapters, ready/done fences, waits and resource bindings.
+
+### Specialize to the producer
+
+Like profile-guided optimization, specialization tunes a build for the
+environment it expects without changing what it computes, and skipping it
+costs no correctness. Its input is exact: the producer's published contract.
+
+`acc.fragment(specialize=True, ...)` asks pipec for the export's **delivery
+layout**:
+
+- A single unguarded `reg`/`scalar` export keeps its published integer map.
+- A supported 32-bit TMEM export uses the model's receipt map: each lane
+  receives its data-path row, and consecutive 16-column packets fill
+  consecutive private slots. This requires complete aligned packets under every
+  binding the linker may choose, data-path coordinates that do not depend on
+  bindings, and one issuing warp per used data-path slice.
+
+Producer and profile names play no part. The frontend renders the returned map
+when TileLang can express it; unsupported maps fall back to the profile's
+coalesced row-slice map. In CODA, every profile's export is expressible:
+
+| Profile | Delivery layout adopted | Selected route | Adapter scratch |
+|---|---|---|---:|
+| sm103 | TMEM receipt rows across 256 threads, 16 positions per thread per chunk | `tmem>receipt>reg` | 0 B |
+| sm90 | WGMMA fragment of the math warpgroups: physical threads 128–383 of the 384-thread role, 16 positions per thread per chunk | `reg>copy>reg` | 0 B |
+| sm120 | `mma.sync` fragment; each chunk is owned by a different 64-thread subset, 64 positions per active thread | `reg>copy>reg` | 0 B |
+
+The hand consumer of T4 keeps its own fixed demand, so on sm90 and sm120 the
+linker stages its chunks through 16 KiB of shared scratch. Linked to a
+different producer, a specialized package still gets an ordinary checked
+adapter (or a link-time rejection if no route fits its lends), so
+specialization makes no compatibility promise. Call `acc.delivery_layout()`
+and `acc.delivery_layout_is_narrow()` only inside `T.Kernel`: they take
+participants from its active launch frame.
+
+### Arithmetic and event-lived staging
+
+The fragment follows the producer's layout, which is not a good layout for
+global stores. The recipe therefore writes each chunk's bf16 results into a
+128×128 output tile and drains it once, with coalesced 16-byte stores:
 
 ```python
-STAGE = ContractStage(
-    stage_id="tensor.consumer.tilelang-epilogue",
-    version="1.0.0",
-    launch_register_cap=255,
-    params=ParamsSpec("EpilogueParams", (
-        ParamField("a", "const uint16_t*"), ParamField("b", "const uint16_t*"),
-        ParamField("bias", "const float*"), ParamField("output", "float*"),
-        ParamField("M", "int32_t"), ParamField("N", "int32_t"), ParamField("K", "int32_t"),
-        ParamField("eps", "float"),
-    ), alignas=8),
-    roles={"epilogue": RoleSpec((0, 4), (acc.args_param, scale.args_param, "bias", "output", "M", "N"))},
-    channels=[acc, scale],
-)
-EMITTER = emit
+staging = acc.staging((128, 128), "bfloat16")
+T.annotate_layout({staging: ...})        # XOR swizzle against bank conflicts
+for chunk in T.serial(8):
+    with acc.imported(frag, chunk=chunk):
+        ...                               # staging[i, chunk * 16 + j] = bf16(silu(gate) * up)
+T.copy(staging, output[...], coalesced_width=8, loop_layout=...)
 ```
 
-`ContractStage` retains the author's identity, version, register cap, params
-and role placement. `ParamsSpec` declares eight host fields and alignment;
-`RoleSpec((0,4), ...)` places one four-warp role and maps its entry arguments.
-It does not ask the frontend to discover an epilogue schedule.
-
-### What comes from the partner manifests
-
-[`contract.py`](../../frontends/tilelang/src/pipelink_tilelang/contract.py) and
-[`explicit.py`](../../frontends/tilelang/src/pipelink_tilelang/explicit.py)
-derive the following without provider headers:
-
-1. **Tensor identity:** result name, work identity, snapshot/version, element
-   dtype, numerical interpretation and logical coordinate extents. Here the
-   accumulator is f32 `accumulator` / `tensor_work` / `completed_k` /
-   `fp16_dot_fp32_completed`, over 128×128; the f32 scale is `row_scale` /
-   `tensor_work` / `completed` / `rms_row_scale`, over 128 rows.
-2. **Readiness names:** `tensor_ready` → `import_done` for the accumulator and
-   `scale_ready` → `scale_done` for the scale. The recipe reads these rather
-   than restating them; the emitter also defaults each lend's lifetime to its
-   import's ready/done events.
-3. **Published produce/release endpoints:** explicit `calls.produce` and
-   `calls.release` references select endpoints. The frontend does not choose a
-   callable by a name guess or by searching for a matching prototype.
-4. **Callable declarations and argument types:** the manifest's published
-   `PL_TYPE` struct definitions provide `pl_gemm_tile_args` and
-   `pl_rowscale_args`, their members and the opaque `pipelink_tensor_source`
-   return ABI. The generated role constructs those public structs locally
-   from the authored `arguments` maps; it never passes its private params blob
-   to a provider.
-5. **Consistent emitted contracts:** generated `PL_CALL`, `PL_TYPE` and
-   `PL_IMPORT_TENSOR` declarations retain those facts. Unique call-channel
-   names survive unchanged; colliding names from different partners are
-   qualified by the import symbol. The shared `tensor_import_site` merges
-   both ready events and requires agreement on role, participation, work and
-   guarantees.
-6. **Target compatibility:** partner target profiles must agree with the CLI
-   profile; a package packed for the other profile is rejected. Partner-derived
-   identity/call/readiness facts have `contract` provenance in `projection.json`,
-   distinct from authored demand/lends and compiler-captured facts.
-
-The frontend does **not** copy a provider placement into the recipe or select
-its transport. The linker later combines the export's placement/capabilities
-with the consumer's demand and lends, then generates adapters, ready/done
-fences, waits and resource bindings. Consequently changing the provider can
-change the linked adapter while leaving the emitted consumer source unchanged.
-
-### Arithmetic and sequencing remain authored
-
-`program()` creates 128-thread tiles. `T.alloc_fragment` supplies a
-128-element frame, 128-element destination fragment and one scale value per
-thread. `acc.scratch("scratch")` and `scale.scratch("scratch")` allocate the
-declared shared lends; externalization replaces their addresses with
-link-resolved handles. The body explicitly calls:
-
-```text
-produce accumulator → ready → import accumulator
-produce row scale   → ready → import row scale
-TileLang row-scale + bias + ReLU
-scale done → release scale → accumulator done → release accumulator
-```
-
-TIR has no C struct scalar type. Two inlined representation helpers carry the
-opaque source's 64-bit word through TIR; the actual CUDA produce/import calls
-still use `pipelink_tensor_source`. `channel.args(...)` restores the manifest's
-published C++ pointer type at each external call. Neither bridge chooses
-placement nor performs tensor arithmetic.
-
-The recipe sets `PASS_CONFIGS = {"tl.disable_warp_specialized": True}`.
-**Automatic warp specialization against a foreign partner is not supported**;
-use the explicit/contract-authored path rather than assuming TileLang can
-invent the other owner's protocol. The [frontend boundary](../../frontends/tilelang/README.md#recipe-tracks)
-explains why automatic `T.Pipelined` WS and contract-driven explicit/scheduled
-roles are different paths.
+`acc.staging` is owner storage, not adapter scratch: the claim names the local
+import and lives from the partner's ready event to done. Every access must fall
+inside that interval and be synchronous and non-aliased. Plain loads/stores,
+synchronous `T.copy` and ordinary element loops are allowed; explicit
+async/TMA operations, buffer views, pointer escapes and opaque calls that touch
+staging are rejected. The solver may overlap this claim with dead producer
+operands on the same connection and emit the proxy fence: `link.json` →
+`tensor.smem_reuse.overlaps` lists the pair, and on sm103, for example, the
+32 KiB tile sits at the start of the producer's 96 KiB operand ring. Adapter
+scratch, in contrast, is a capacity the owner
+cannot use as spare storage. Automatic warp specialization with a foreign
+partner is unsupported: it would need a synchronization protocol the partner
+never published, so the frontend disables it by default instead of inventing
+one.
 
 ## 2. Lower, pack and link every profile
 
-Run from the repository root, in one Bash shell. This is the same complete
-recipe as [T4 §3](T4-tensor-import.md#3-build-the-six-cells-per-profile), not a
-second build convention:
+Run [T4 §3](T4-tensor-import.md#3-build-the-cells-of-a-profile)'s environment
+setup and build from the repository root in one Bash shell:
 
 ```sh
 source tools/env.sh
-uv lock --project frontends/tilelang --refresh-package tilelang
-uv sync --project frontends/tilelang --locked
-mkdir -p "$PIPELINK_SCRATCH_ROOT/one-epilogue"
-export TMPDIR="$PIPELINK_SCRATCH_ROOT/one-epilogue"
 export PIPELINK_TILELANG_PYTHON="$PWD/frontends/tilelang/.venv/bin/python"
 export TILELANG_INCLUDE_DIR="$PWD/frontends/tilelang/.venv/lib/python3.11/site-packages/tilelang/src"
 export CUTLASS_INCLUDE_DIR="$PWD/third_party/cutlass/include"
-export EX=examples/one-epilogue-many-producers
-
-for P in sm_103a sm_90a sm_120a; do
-  O="$PWD/$EX/out/$P"
-  uv run --project pipec --locked python "$EX/build.py" --profile "$P"
-  "$PIPELINK_TILELANG_PYTHON" -m pipelink_tilelang \
-    --kernel "$EX/providers/tilelang/gemm_provider.py" --profile "$P" --out "$O/tilelang/provider"
-  uv run --project pipec --locked pipec2 pack "$O/tilelang/provider/roles.cu" \
-    -o "$O/packed/tl-reg.plink" -I "$CUTLASS_INCLUDE_DIR" -I "$TILELANG_INCLUDE_DIR" --profile "$P"
-  PIPELINK_ACC_PARTNER="$O/packed/tl-reg.plink" PIPELINK_SCALE_PARTNER="$O/packed/rowscale.plink" \
-    "$PIPELINK_TILELANG_PYTHON" -m pipelink_tilelang \
-    --kernel "$EX/consumer-tilelang/epilogue_contract.py" --profile "$P" --out "$O/tilelang/consumer"
-  uv run --project pipec --locked pipec2 pack \
-    "$O/tilelang/consumer/generation/tilelang-epilogue/roles.cu" -o "$O/packed/tl-epilogue.plink" \
-    -I "$CUTLASS_INCLUDE_DIR" -I "$TILELANG_INCLUDE_DIR" --profile "$P"
-  uv run --project pipec --locked python "$EX/pipelines/extra_cells.py" "$P"
-  uv run --project pipec --locked python "$EX/build.py" \
-    --profile "$P" --extra-cells "$O/extra-cells.json"
+export CODA=campaigns/coda
+for P in sm103 sm90 sm120; do
+  uv run --project pipec --locked python "$CODA/build.py" --profile "$P"
 done
 ```
 
-The first build packs native accumulator/row-scale providers and the hand
-consumer. The provider's tensor-export track puts `roles.cu` directly under
-its `--out`; the contract consumer puts it under
-`generation/tilelang-epilogue/`. Lowering emits CUDA and facts, **not a package**;
-`pipec2 pack` performs declaration extraction, device compilation and symbol
-attestation. The final build links six cells per profile with same-source
-one-TU and backend-matched LTO controls.
-
-The `-tlc` cells use the contract-authored consumer:
-
-| Profile | Cells | Accumulator placement |
-|---|---|---|
-| Blackwell/sm103 (`sm_103a`) | `tmem-tlc`, `smem-tlc`, `tl-reg-tlc` | TMEM, shared memory, TileLang registers (mma_sync provider) |
-| Hopper/sm90 (`sm_90a`) | `reg-tlc`, `smem-tlc`, `tl-reg-tlc` | CuTe WGMMA registers, shared memory, TileLang registers (WGMMA provider) |
-| Consumer Blackwell/sm120 (`sm_120a`) | `reg-tlc`, `smem-tlc`, `tl-reg-tlc` | CuTe mma.sync registers, shared memory, TileLang registers (mma_sync provider) |
-
-There is no Hopper or sm120 TMEM cell. Every cell also imports the row-scale provider.
-[`build.py`](../../examples/one-epilogue-many-producers/build.py)'s
-`assert_consumer_invariance` re-lowers this recipe for each `-tlc` accumulator
-partner, retaining the scale partner. It compares each `roles.cu` **on bytes**
-with the packed consumer's source, then with the other generated partners and
-any existing other-profile partner sources. A mismatch raises, rather than
-silently substituting a provider-specific consumer. All `-tlc` links within a
-profile name the same `packed/tl-epilogue.plink`.
+For the `tilelang` cell, `build.py` runs the frontend with
+`PIPELINK_ACC_PARTNER` set to the profile's `packed/producer.plink`, writing
+`out/<profile>/tilelang/generation/tilelang-swiglu/roles.cu`, then packs it to
+`packed/tilelang.plink` and links it against the same producer package as the
+hand cell. Lowering emits CUDA and facts; `pipec2 pack` then extracts
+declarations, compiles device code and attests symbols to produce the package.
+The generated directory also holds `params.h`, `facts.cuh`, `facts.json`,
+`projection.json` and TIR snapshots. T4 §3 prints the selected routes.
 
 ## 3. GPU-free lowering evidence
 
-With the Blackwell packages from §2 available, this small replay keeps all new
-output under `$PIPELINK_SCRATCH_ROOT/t6` and hides device visibility. It does
-not touch the recorded runtime results:
+With the sm103 and sm90 producer packages from §2 in place, this replay writes
+only under `$PIPELINK_SCRATCH_ROOT/t6`, hides the GPUs and leaves the build
+outputs alone:
 
 ```sh
 export TMPDIR="$PIPELINK_SCRATCH_ROOT/t6"
 mkdir -p "$TMPDIR"
-O="$PWD/$EX/out/sm_103a"
-for A in tmem smem tl-reg; do
-  PIPELINK_ACC_PARTNER="$O/packed/$A.plink" PIPELINK_SCALE_PARTNER="$O/packed/rowscale.plink" \
+for P in sm103 sm90; do
+  PIPELINK_ACC_PARTNER="$PWD/$CODA/out/$P/packed/producer.plink" CUDA_VISIBLE_DEVICES= \
     "$PIPELINK_TILELANG_PYTHON" -m pipelink_tilelang \
-    --kernel "$EX/consumer-tilelang/epilogue_contract.py" --profile sm_103a --out "$TMPDIR/sm_103a/$A" \
+    --kernel "$CODA/consumer-tilelang/swiglu.py" --profile "sm_${P#sm}a" --out "$TMPDIR/$P" \
     | python3 -c 'import os,sys; from pathlib import Path; print("lowered:", Path(sys.stdin.read().strip()).relative_to(Path(os.environ["TMPDIR"])))'
 done
 python3 - <<'PY'
-import os
+import os, re
 from pathlib import Path
-root = Path(os.environ["TMPDIR"]) / "sm_103a"
-sources = [root / a / "generation/tilelang-epilogue/roles.cu" for a in ("tmem", "smem", "tl-reg")]
-assert all(source.read_bytes() == sources[0].read_bytes() for source in sources[1:])
-print("roles.cu identical across 3 sm_103a partners: True")
+root = Path(os.environ["TMPDIR"])
+for profile in ("sm103", "sm90"):
+    source = (root / profile / "generation/tilelang-swiglu/roles.cu").read_text()
+    lends = dict(re.findall(r'pl::(regs|frame|smem)\("pl_import_accumulator\.\w+", (\d+)', source))
+    print(profile, "generated annotations:", sum(line.startswith("PL_") for line in source.splitlines()),
+          "destination:", lends["regs"], "frame:", lends["frame"], "adapter scratch:", lends.get("smem", "none"))
 PY
-uv run --project pipec --locked pipec2 pack \
-  "$TMPDIR/sm_103a/tl-reg/generation/tilelang-epilogue/roles.cu" \
-  -o "$TMPDIR/sm_103a/tl-epilogue.plink" \
-  -I "$CUTLASS_INCLUDE_DIR" -I "$TILELANG_INCLUDE_DIR" --profile sm_103a \
+CUDA_VISIBLE_DEVICES= uv run --project pipec --locked pipec2 pack \
+  "$TMPDIR/sm103/generation/tilelang-swiglu/roles.cu" -o "$TMPDIR/sm103/tilelang.plink" --profile sm_103a \
+  -I "$TILELANG_INCLUDE_DIR" -I "$CUTLASS_INCLUDE_DIR" -I pipec/src/pipec2/pack/include \
+  -I pipec/src/pipec2/host/include -I "$CODA/consumer" --nvcc-flag=-std=c++20 \
   | python3 -c 'import json,sys; p=json.load(sys.stdin); print("packed:", p["stage_id"], p["symbol_mechanism"])'
 ```
 
-Observed with the pinned environment and CUDA 13.3; paths are
-projected relative to scratch and provenance digests are not printed:
+Output with the pinned environment and CUDA 13.3:
 
 ```text
-lowered: sm_103a/tmem
-lowered: sm_103a/smem
-lowered: sm_103a/tl-reg
-roles.cu identical across 3 sm_103a partners: True
-packed: tensor.consumer.tilelang-epilogue nm-external-text+nvjitlink-seeded-v2
+lowered: sm103
+lowered: sm90
+sm103 generated annotations: 12 destination: 16 frame: 128 adapter scratch: none
+sm90 generated annotations: 11 destination: 16 frame: 128 adapter scratch: none
+packed: coda.consumer.tilelang-swiglu nm-external-text+nvjitlink-seeded-v2
 ```
 
-All three lowerings and the pack exited successfully. The generated directory
-also contains `params.h`, `facts.cuh`, `facts.json`, `projection.json` and TIR
-snapshots. This smoke checks lowering, source invariance and packing; it is
-**not** a new GPU numeric/performance/sanitizer run.
+Both lowerings and the pack succeed. Each data thread receives 16 accumulator
+words per chunk, and no adapter scratch is lent. The 128-word frame is the sm90
+producer's published register extent; for the sm103 TMEM export it is the
+identity size divided by the 256 participants. The frontend generated every
+`PL_*` line; sm103 has one more, `PL_TOPOLOGY`, for its 2-CTA cluster. This
+replay checks lowering, captured demands and packing only; it runs nothing on a
+GPU.
 
-## 4. Author your own bounded epilogue
+## 4. Author your own activation
 
-Starting from the shipped recipe, make a scratch copy that computes
-`min(max(accumulator * row_scale + bias, 0), 6)` instead of unbounded ReLU.
-Give it a new stage identity, `tensor.consumer.tilelang-relu6`. Keep the
-partner contracts, demand, resource lends and synchronization unchanged:
-clipping a value does not change which logical values the epilogue imports.
+Make a scratch copy of the shipped recipe that applies GeGLU (tanh-approximated
+GELU on the gate) instead of SwiGLU:
+`bf16(gelu(gate) * up)`. Give it the new stage identity
+`coda.consumer.tilelang-geglu`. Leave the partner contract, chunking,
+specialization, staging and synchronization as they are: an elementwise
+activation imports the same logical values.
 
-After §2 has prepared the `sm_103a` accumulator and row-scale packages, execute
-this block from the repository root. It writes only under
-`$PIPELINK_SCRATCH_ROOT/t6-author`, leaving the shipped recipe, standard
-packages and recorded runtime evidence untouched. The Python copy/edit step
-spells out both changes; you can make the same two edits in an editor.
+Three edits are needed. The activation changes. The stage identity changes in
+three places, because the host contract names its reader role
+(`CODA_READER`) and role-view type (`CODA_ROLE_VIEW`) after the stage. And the
+copy lives outside the campaign, so the host-header path that the recipe
+derives from its own location becomes absolute.
+
+After §2 has built the sm103 and sm90 producer packages, run this block from
+the repository root. It writes only under `$PIPELINK_SCRATCH_ROOT/t6-author`,
+then lowers, packs and links the new consumer against each producer. The Python
+step makes the edits; you can make them in an editor instead.
 
 ```sh
 set -e
 set -o pipefail
-source tools/env.sh
-export EX=examples/one-epilogue-many-producers
 export AUTHOR_OUT="$PIPELINK_SCRATCH_ROOT/t6-author"
 export TMPDIR="$AUTHOR_OUT/tmp"
 mkdir -p "$TMPDIR"
-export PIPELINK_TILELANG_PYTHON="$PWD/frontends/tilelang/.venv/bin/python"
-export TILELANG_INCLUDE_DIR="$PWD/frontends/tilelang/.venv/lib/python3.11/site-packages/tilelang/src"
-export CUTLASS_INCLUDE_DIR="$PWD/third_party/cutlass/include"
 python3 - <<'PY'
 import os
 from pathlib import Path
-source = Path(os.environ["EX"]) / "consumer-tilelang/epilogue_contract.py"
-recipe = source.read_text()
-old_op = "T.max(fragment[p] * scales[0] + bias[bx * 128 + tx], 0)"
-new_op = "T.min(T.max(fragment[p] * scales[0] + bias[bx * 128 + tx], 0), 6)"
-old_id = 'stage_id="tensor.consumer.tilelang-epilogue"'
-new_id = 'stage_id="tensor.consumer.tilelang-relu6"'
-assert recipe.count(old_op) == recipe.count(old_id) == 1
-recipe = recipe.replace(old_op, new_op).replace(old_id, new_id)
-(Path(os.environ["AUTHOR_OUT"]) / "epilogue_relu6.py").write_text(recipe)
-print("authored: epilogue_relu6.py (ReLU6; new stage identity)")
+coda = Path(os.environ["CODA"]).resolve()
+recipe = (coda / "consumer-tilelang/swiglu.py").read_text()
+old_activation = """                                T.call_pure_extern("float32", "__fdividef", gate[i, j],
+                                    1.0 + T.call_pure_extern("float32", "__expf", -gate[i, j]))
+                                * up[i, j], "bfloat16")"""
+new_activation = """                                0.5 * gate[i, j] * (1.0 + T.tanh(0.7978845608 * (
+                                    gate[i, j] + 0.044715 * gate[i, j] * gate[i, j] * gate[i, j])))
+                                * up[i, j], "bfloat16")"""
+old_host = 'str(Path(__file__).resolve().parents[1] / "consumer/host_annotations.cuh")'
+new_host = repr(str(coda / "consumer/host_annotations.cuh"))
+assert recipe.count(old_activation) == recipe.count(old_host) == 1
+assert recipe.count("tilelang-swiglu") == 2 and recipe.count("tilelang_swiglu") == 1
+recipe = (recipe.replace(old_activation, new_activation).replace(old_host, new_host)
+          .replace("tilelang-swiglu", "tilelang-geglu").replace("tilelang_swiglu", "tilelang_geglu"))
+(Path(os.environ["AUTHOR_OUT"]) / "geglu.py").write_text(recipe)
+print("authored: geglu.py (GeGLU; new stage identity)")
 PY
-O="$PWD/$EX/out/sm_103a"
-for A in tmem smem; do
-  PIPELINK_ACC_PARTNER="$O/packed/$A.plink" PIPELINK_SCALE_PARTNER="$O/packed/rowscale.plink" \
+for P in sm103 sm90; do
+  A="sm_${P#sm}a"
+  PIPELINK_ACC_PARTNER="$PWD/$CODA/out/$P/packed/producer.plink" CUDA_VISIBLE_DEVICES= \
     "$PIPELINK_TILELANG_PYTHON" -m pipelink_tilelang \
-    --kernel "$AUTHOR_OUT/epilogue_relu6.py" --profile sm_103a --out "$AUTHOR_OUT/$A" \
+    --kernel "$AUTHOR_OUT/geglu.py" --profile "$A" --out "$AUTHOR_OUT/$P" \
     | python3 -c 'import os,sys; from pathlib import Path; print("lowered:", Path(sys.stdin.read().strip()).relative_to(Path(os.environ["AUTHOR_OUT"])))'
-done
-python3 - <<'PY'
-import os
+  CUDA_VISIBLE_DEVICES= uv run --project pipec --locked pipec2 pack \
+    "$AUTHOR_OUT/$P/generation/tilelang-geglu/roles.cu" -o "$AUTHOR_OUT/$P/geglu.plink" --profile "$A" \
+    -I "$TILELANG_INCLUDE_DIR" -I "$CUTLASS_INCLUDE_DIR" -I pipec/src/pipec2/pack/include \
+    -I pipec/src/pipec2/host/include -I "$CODA/consumer" --nvcc-flag=-std=c++20 \
+    | python3 -c 'import json,sys; p=json.load(sys.stdin); print("packed:", p["stage_id"], p["symbol_mechanism"])'
+  uv run --project pipec --locked python - "$PWD/$CODA/out/$P/packed/producer.plink" \
+      "$AUTHOR_OUT/$P/geglu.plink" "$AUTHOR_OUT/$P/pipeline.json" <<'PY'
+import sys
 from pathlib import Path
-root = Path(os.environ["AUTHOR_OUT"])
-sources = [root / a / "generation/tilelang-relu6/roles.cu" for a in ("tmem", "smem")]
-assert sources[0].read_bytes() == sources[1].read_bytes()
-print("ReLU6 roles.cu identical across 2 sm_103a partners: True")
+sys.path.insert(0, "campaigns/coda")
+from pipelines.generate import generate
+generate("geglu", [Path(sys.argv[1]), Path(sys.argv[2])], Path(sys.argv[3]))
 PY
-uv run --project pipec --locked pipec2 pack \
-  "$AUTHOR_OUT/tmem/generation/tilelang-relu6/roles.cu" \
-  -o "$AUTHOR_OUT/relu6.plink" --profile sm_103a \
-  -I "$CUTLASS_INCLUDE_DIR" -I "$TILELANG_INCLUDE_DIR" \
-  | python3 -c 'import json,sys; p=json.load(sys.stdin); print("packed:", p["stage_id"], p["symbol_mechanism"])'
+  CUDA_VISIBLE_DEVICES= uv run --project pipec --locked pipec2 link "$AUTHOR_OUT/$P/pipeline.json" \
+    --out-dir "$AUTHOR_OUT/$P/link" > /dev/null
+  python3 - "$AUTHOR_OUT/$P/link/link.json" <<'PY'
+import json, sys
+link = json.load(open(sys.argv[1]))
+connection, = link["tensor"]["connections"]
+print("linked:", connection["bounds"][connection["selected"]]["scope"]["route"]["id"],
+      "threads", link["threads"], "dyn_smem", link["dyn_smem_bytes"])
+PY
+done
 ```
 
-Observed with CUDA 13.3 and the pinned frontend environment;
-every command above completed successfully with GPU visibility empty for
-lowering and packing:
+Output with CUDA 13.3 and the pinned frontend environment, with no GPU visible:
 
 ```text
-authored: epilogue_relu6.py (ReLU6; new stage identity)
-lowered: tmem
-lowered: smem
-ReLU6 roles.cu identical across 2 sm_103a partners: True
-packed: tensor.consumer.tilelang-relu6 nm-external-text+nvjitlink-seeded-v2
+authored: geglu.py (GeGLU; new stage identity)
+lowered: sm103
+packed: coda.consumer.tilelang-geglu nm-external-text+nvjitlink-seeded-v2
+linked: tmem>receipt>reg threads 256 dyn_smem 98416
+lowered: sm90
+packed: coda.consumer.tilelang-geglu nm-external-text+nvjitlink-seeded-v2
+linked: reg>copy>reg threads 384 dyn_smem 197632
 ```
 
-The result is a newly named, independently packable consumer with changed
-arithmetic, not just a replay of the shipped stage. This exercise stops at
-packing: no GPU correctness, timing or sanitizer claim is made for ReLU6.
-The standard `run.py` oracle checks unbounded ReLU; it is not an acceptance
-oracle for this new operation. The matrix in §5 describes the
-**unchanged shipped recipe**, not this scratch variant.
+You now have a newly named consumer with different arithmetic, packed and
+linked once against a TMEM producer and once against a register producer. The
+activation leaves the import alone: each link selects the same route, geometry
+and shared memory as the shipped recipe's `tilelang` cell on that profile. The
+exercise stops at linking and makes no GPU correctness, timing or sanitizer
+claim for GeGLU. CODA's `run.py` oracle checks only SwiGLU, so it cannot accept
+the new operation; a deployed GeGLU stage would need its own oracle and host
+provider build. The runtime evidence in §5 is for the shipped recipe.
 
 ### Count what you actually authored
 
 | Category | Reader's work in this exercise |
 |---|---|
-| Hand-written `PL_*` macros | **0**. The frontend's generated CUDA annotations are not reader-authored macros. |
-| Edited recipe-level declaration | **1**: the `ContractStage.stage_id` value becomes `tensor.consumer.tilelang-relu6`. |
-| Edited arithmetic expression | **1**: an outer `T.min(..., 6)` clips the existing ReLU. This is computation, not a contract annotation. |
-| Copied partner/import declarations | Two `Partner.load` selections, two `import_tensor` instances, two demands, eight lends, four rendezvous instances and two argument-member maps. None is newly designed by this exercise. |
-| Copied stage/launch declarations | One `ContractStage` (with the identity edit above), one `ParamsSpec` with eight `ParamField`s, one four-warp `RoleSpec`, and disabled auto-WS. Their remaining promises are unchanged. |
+| Hand-written `PL_*` macros | **0**; the frontend generates the CUDA annotations. |
+| Edited operation | **1**: tanh-approximated GELU on the gate, times up, before bf16 conversion. |
+| Edited identity | **1** stage identity, which the shared host contract's reader role and role-view type repeat (3 string edits). |
+| Edited location | **1**: the absolute host-header path of the scratch copy. |
+| Copied partner/import selections | One partner package, one tensor name, the producer-written members, `scratch_bytes=0`, the chunked specialized fragment and the `produced`/`imported` scopes. |
+| Copied stage/launch declarations | One `contract_stage` call with its host parameters, the PrimFunc signature, the launch geometry and the staging tile. No separate ParamsSpec, RoleSpec, demand, lends, rendezvous or argument-member map. |
 
-This is a measured **incremental authoring** exercise, not a claim that the
-reader independently designed all the inherited contracts from a blank file.
+The count measures what you changed on top of inherited contracts; you did not
+design those contracts from a blank file.
 
 ## 5. Runtime evidence and replay
 
-`run.py` runs every `-tlc` cell with the rest of the matrix and writes
-`examples/one-epilogue-many-producers/out/<profile>/results.json`, replaced on rerun.
-The [example evidence](../../examples/one-epilogue-many-producers/README.md#evidence)
-records the run conditions: CUDA 13.3, observed (not locked) SM clocks, and linked and
-one-TU timings on the same buffers.
-
-Each cell passes the f64 NumPy oracle at 256×256×K with K = 64, 256, 1024
-(`rtol=1e-3`, `atol=1e-2`) with **0, 0, 0 mismatches**. Linked/one-TU outputs
-are bitwise-equal, including the 4096×8192×4096 benchmark. Each passes all twelve
-sanitizer invocations: `memcheck`, `racecheck` and `synccheck` on **both** images at
-128×128×64 and 256×256×512. Timing uses eight paired ABBA/BAAB blocks and 20
-repetitions per measurement; ratios below are median **one-TU/linked**, not absolute
-speedup against a different implementation.
-
-| Profile | Cell | Median one-TU/linked | Sanitizers |
-|---|---|---:|---|
-| Blackwell/sm103 | `tmem-tlc` | 0.999648 | 12/12 PASS |
-| Blackwell/sm103 | `smem-tlc` | 1.000079 | 12/12 PASS |
-| Blackwell/sm103 | `tl-reg-tlc` | 0.999943 | 12/12 PASS |
-| Hopper/sm90 | `reg-tlc` | 1.000134 | 12/12 PASS |
-| Hopper/sm90 | `smem-tlc` | 0.999694 | 12/12 PASS |
-| Hopper/sm90 | `tl-reg-tlc` | 1.017501 | 12/12 PASS |
-| Consumer Blackwell/sm120 | `reg-tlc` | 1.000081 | 12/12 PASS |
-| Consumer Blackwell/sm120 | `smem-tlc` | 0.999832 | 12/12 PASS |
-| Consumer Blackwell/sm120 | `tl-reg-tlc` | 0.999991 | 12/12 PASS |
-
-These are measured values, not expected rebuild constants. For sm90 `tl-reg-tlc` the
-direct-nvcc one-TU is slower, and the sm120 `reg-tlc`/`smem-tlc` instruction streams
-differ from it; in each case the linked image matches the backend-matched LTO one-TU. SASS equality and the calls/local-traffic check are
-non-gating diagnostics; they do not replace numerical or sanitizer acceptance.
-
-To repeat acceptance after §2, run only on a matching GPU. `--gpu` selects an
-available physical GPU and otherwise defaults to the first `.env`
-`PIPELINK_GPUS` entry:
+`run.py` runs the `tilelang` cell together with the hand cell, as described in
+[T4 §4](T4-tensor-import.md#4-run-acceptance-on-the-matching-gpu):
 
 ```sh
-# On Blackwell/sm103:
-uv run --project pipec --locked python examples/one-epilogue-many-producers/run.py --profile sm_103a
-# On Hopper/sm90 with the matching outputs:
-uv run --project pipec --locked python examples/one-epilogue-many-producers/run.py --profile sm_90a
-# On consumer Blackwell/sm120 with the matching outputs:
-uv run --project pipec --locked python examples/one-epilogue-many-producers/run.py --profile sm_120a
+# On Blackwell/sm103; use --profile sm90 or sm120 on the matching GPU.
+uv run --project pipec --locked python campaigns/coda/run.py --profile sm103
 ```
 
-The runner checks all six cells of the selected profile, including its three
-hand-consumer cells, and writes fresh `out/<profile>/results.json` plus
-per-cell evidence. The shared launcher obtains block/shared-memory requirements
-from the link; the params builder fills device addresses after allocation.
+The [CODA README](../../campaigns/coda/README.md) publishes the results of
+every profile at its machine-qualified locked clock. For the TileLang cell, the
+numerical matrix, bitwise linked/control equality, the memcheck/racecheck/synccheck
+matrix and the source-withheld link and launch pass on all three profiles.
+Same-source parity (one-TU / linked time, higher is better):
+
+| Profile | M = 16384 | M = 4096 |
+|---|---:|---:|
+| Blackwell/sm103 | 0.9987 | 1.0006 |
+| Hopper/sm90 | 1.0005 | 1.0015 |
+| Consumer Blackwell/sm120 | 1.0000 | 1.0000 |
+
+The two consumers select different routes on sm90 and sm120. On sm103
+both select `tmem>receipt>reg` and time within 0.1% of each other. On sm90 the
+TileLang cell, with its direct `reg>copy>reg` route, is faster than the staged
+hand cell: 14.35 ms versus 15.10 ms linked at M = 16384. On sm120 the TileLang
+cell is slower (58.37 ms versus 57.15 ms). Its linked image and its one-TU
+control both contain 32 STL and 64 LDL instructions, so the local-memory
+traffic is shared with the control and is not a linking cost. The README's placement
+tables compare each cell with the hand-fused native, the same GEMM plus a
+standalone SwiGLU, cuBLAS + `torch.compile` and cuBLAS + Liger; these
+comparisons are diagnostics and do not gate acceptance.
 
 ## What you declared vs what was derived
 
 | Declared by the TileLang consumer author | Derived by the frontend, compiler or linker |
 |---|---|
-| **0 hand-written `PL_*` macros**, not zero semantic promises. One `ContractStage`, one `ParamsSpec` with eight fields and one four-warp `RoleSpec`. | Annotated CUDA stage/params/role declarations, captured compiler facts, pack-observed params layout and symbol attestation. |
-| Two selected partner packages and two named tensor imports. No provider header. | Tensor identities, ready/done event names, explicit produce/release call endpoints, prototypes and public argument structs from manifests. |
-| Two demand maps, eight resource lends and four rendezvous declarations. | Sampling lambdas, shared-site event aggregation and default lend lifetimes; link-time frame-capacity checks, transport adapters, barriers and ready/done fences. |
-| Two argument-member maps and the explicit produce → ready → import → arithmetic → done → release schedule. | Construction of each provider's public args from private params; typed source/argument bridges and link-resolved scratch access. |
-| TileLang arithmetic, fragment allocations and explicit role placement; automatic WS disabled. | Lowered device-function body and structural externalization, not invention of a foreign partner's protocol. |
-| One recipe re-lowered per partner and one consumer package per profile. | Byte-identical `roles.cu` for this admitted matrix, enforced by `build.py`; placement-specific adapters remain link outputs. |
+| **0 hand-written `PL_*` macros**; one `contract_stage` identity/version, the PrimFunc signature and `pl.HostParams` pointing at the shared host contract. | CUDA stage/params/role/topology declarations, compiler facts, pack-observed params layout and symbol attestation. |
+| One selected partner package and named tensor import with its producer-written members; no producer header. | Identity, ready/done events, published callable endpoints/prototypes and argument struct, member accessors. |
+| `acc.fragment(specialize=True, chunk=("n", 32))`, `scratch_bytes=0`, and the `produced`/`imported` scopes. | Captured per-chunk demand and destination extent, source frame, barrier lends, chunk binding, rendezvous and structural guarantees; the linker still checks capacity and transport. |
+| Arithmetic and the `acc.staging` output tile. | Synchronous event-lived owner storage, its placement on dead producer operands, externalization and the selected-overlap proxy fence. |
+| One recipe, lowered per producer. | The producer's delivery layout as the fragment layout, one package per producer and link-generated adapters. |
+
+The recipe is **63 physical lines**: 56 code lines without its docstring, with
+14 lines spanned by frontend calls. The hand consumer of T4 has **10 device
+annotations** in an 82-line `epilogue.cu`, and 163 consumer-specific code lines
+across its four CUDA sources: it supplies its demand, site, chunk binding, lends,
+rendezvous entries and its frame/scratch/call schedule by hand, because its
+packer cannot generate that code. The gap measures what the frontend saves by
+generating the schedule itself; PipeLink still cannot infer those promises from
+opaque CUDA. The CODA README's authoring ledgers count both consumers' contract
+records.
 
 Previous: [T5 — Host ABI v3](T5-host-abi.md).
 Next: [T7 — Overlap communication with compute across GPUs](T7-comm-overlap.md).

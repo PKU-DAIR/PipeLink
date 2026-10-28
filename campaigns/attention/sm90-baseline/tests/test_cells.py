@@ -26,7 +26,7 @@ def cell_for(mask, length=1027):
 
 
 def dense_mask(cell, head, sel):
-    """Independent dense construction, deliberately not using visible()."""
+    """Independent dense construction that does not call visible()."""
     n, m = cell["seqlen_q"], cell["mask"]
     allowed = torch.ones(n, n, dtype=torch.bool).tril()
     q, k = torch.arange(n)[:, None], torch.arange(n)[None, :]
@@ -86,7 +86,7 @@ def test_selection_invariants_and_shared_file(pattern, tmp_path):
             if block < mask["topk"] or pattern == "prefix":
                 assert valid[:-1] == list(range(min(mask["topk"] - 1, block)))
     if pattern == "uniform":
-        # Per-query and per-KV-head, not a shared block-tile selection.
+        # Selections differ per query and per KV head.
         assert not torch.equal(selection[0, -64:], selection[1, -64:])
         assert not torch.equal(selection[0, -2], selection[0, -1])
     path = tmp_path / "selection.i32"

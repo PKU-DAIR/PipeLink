@@ -1,6 +1,5 @@
 {
   "name": "chained_shared_completion_root",
-  "reference": "design §8.3",
   "description": "The leaf member targets another member instead of the root.",
   "base": "shared_completion",
   "phase": "protocol.expand",

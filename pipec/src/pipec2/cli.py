@@ -247,7 +247,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     launch.add_argument("--host-inputs", help="caller scalar and fixture-resource JSON")
     launch.add_argument("--device", type=int, default=0, help="visible CUDA device ordinal")
-    launch.add_argument("--cluster", metavar="X,Y,Z", help="admitted cluster")
+    launch.add_argument("--cluster", metavar="X,Y,Z", help="cluster dimensions; must fit the linked legality set or equal the fixed linked cluster")
     launch.add_argument("--grid", metavar="X,Y,Z", help="host-less grid; block size comes from the link")
     launch.add_argument("--buffer", action="append", default=[], metavar="NAME=SPEC",
                         help="host-less buffer: FILE.npy or SHAPE:DTYPE, e.g. out=64x64:float32")

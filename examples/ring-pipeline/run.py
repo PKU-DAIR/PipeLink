@@ -101,8 +101,8 @@ def main() -> int:
             images["linked"], images["one-tu"], env=dict(os.environ), out_dir=link_dir / "sass",
             backend_matched=out / controls["one_tu_lto"],
         )
-        ratio = record["timing"].get("ratio_linked_over_onetu")
-        record["phase_b_parity"] = ratio is not None and 0.97 <= ratio <= 1.03
+        speedup = record["timing"].get("ratio_onetu_over_linked")
+        record["phase_b_parity"] = speedup is not None and 1 / 1.03 <= speedup <= 1 / 0.97
         depth_passed &= record["phase_b_parity"]
         record["status"] = "PASS" if depth_passed else "FAIL"
         results["depths"].append(record)

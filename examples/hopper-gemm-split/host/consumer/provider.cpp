@@ -50,7 +50,7 @@ extern "C" int pipelink_params_query_user(
   demand.bit_strides[1] = 32;
   out->channel_count = 1;
   out->workspace_count = 0;
-  out->geometry = {};  // The GEMM owner, not its epilogue consumer, chooses the grid.
+  out->geometry = {};  // The GEMM owner chooses the grid.
   return PLK_OK;
 }
 
@@ -71,5 +71,5 @@ extern "C" int pipelink_params_build_user(
 }
 
 extern "C" int pipelink_params_release_user(plk_session*) {
-  return PLK_OK;  // Caller-owned resources; no provider allocation or persistent state.
+  return PLK_OK;  // All resources are caller-owned; the provider keeps no state.
 }

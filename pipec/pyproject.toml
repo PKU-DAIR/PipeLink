@@ -3,13 +3,17 @@ name = "pipec2"
 version = "0.1.0"
 description = "Deterministic PipeLink ABI-v2 artifact and nvJitLink driver"
 requires-python = ">=3.11"
-dependencies = ["numpy>=2", "z3-solver==4.15.4.0"]
+dependencies = [
+    "ml-dtypes>=0.5",
+    "numpy>=2",
+    "z3-solver==4.15.4.0",
+]
 
 [project.scripts]
 pipec2 = "pipec2.cli:main"
 
 [dependency-groups]
-dev = ["pytest"]
+dev = ["pytest==9.1.1"]
 
 [build-system]
 requires = ["hatchling"]

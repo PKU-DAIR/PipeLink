@@ -344,15 +344,9 @@ extern "C" __device__ __inline_hint__ void mok_gemm_rec(const void* view, const 
 #endif
 
 PL_STAGE("mok.gemm", "f3a8bd2+pipelink.p1");
-PL_NO_PARAMS();
 PL_TOPOLOGY(pl::topology{2, pl::cluster{{2,1,1}, pl::launch{2,{2,1,1}}}, true, "clc"});
 PL_VARIANT(0, {{"pipelink_mok_precision", MOK_PRECISION_BF16}});
 PL_VARIANT(1, {{"pipelink_mok_precision", MOK_PRECISION_MXFP8}});
-PL_EXPORT(mok_gemm_init, mok_gemm_init);
-PL_EXPORT(mok_gemm_fini, mok_gemm_fini);
-PL_EXPORT(mok_gemm_fwd, mok_gemm_fwd);
-PL_EXPORT(mok_gemm_bwd, mok_gemm_bwd);
-PL_EXPORT(mok_gemm_rec, mok_gemm_rec);
 PL_CALL(gemm_init, mok_gemm_init, pl::consume, "mok_gemm_init");
 PL_CALL(gemm_fini, mok_gemm_fini, pl::consume, "mok_gemm_fini");
 PL_CALL(gemm_fwd, mok_gemm_fwd, pl::consume, "mok_gemm_fwd");
@@ -382,7 +376,6 @@ MOK_GEMM_COUNTER(routed_buffers_done, pl::produce, {"mok_gemm_bwd"});
 #undef MOK_GEMM_COUNTER
 PL_HOST_GROUP("mok.gemm", "mok.gemm.params", "mok_gemm", plk_header_v2, PLK_ABI_TYPE_ID(plk_header_v2), false);
 PL_HOST_DOMAIN(1, "ep");
-PL_HOST_ABI_EMPTY(301, MokGemmResidue);
 PL_HOST_RESIDUE(2, "mok.gemm.residue", MokGemmResidue, 301, true, pl::host::roles({}));
 PL_HOST_SCALARS(1, pl::host::scalars(pl::host::roles({}))
     .field(pl::host::scalar(1, "mok.num_local_tokens", "i64").caller("num_local_tokens"))
@@ -476,5 +469,4 @@ MOK_GEMM_CHANNEL(68, uint16_t, d_gate_routed_bf16, "bf16", 2, read);
 MOK_GEMM_CHANNEL(69, uint16_t, d_up_routed_bf16, "bf16", 2, read);
 #undef MOK_GEMM_CHANNEL
 PL_HOST_SCHEDULER(pl::host::scheduler("mok.framework"));
-PL_HOST_TARGET();
 #endif

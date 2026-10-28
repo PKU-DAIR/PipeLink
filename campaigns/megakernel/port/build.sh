@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# Build and Gate P1 for the host ABI-v3 Megakernels llama-1b port.
+# Build and check the host ABI-v3 Megakernels llama-1b port.
 #
 # Ordered steps:
 #   pack      compile in-TU annotations and pack nine reference stages plus CuTe
 #   link      resolve/link A, three rebindings and CuTe; build host provider/runner
 #   onetu     compile each pipeline's generated stub+dispatch with its stage sources
 #   mono      compile the patched upstream megakernel control
-#   gate      compare linked and same-source one-TU cubins with Gate P1
+#   gate      compare linked and same-source one-TU cubin resources and normalized SASS
+#             for every pipeline (a, three rebindings, cute)
 #
 # Use --from STEP to resume, and --through link for a host-only pack/link run.
 # Use --cute to replace only attention: reuse the eight other packages and the
-# existing provider/runner, then link and build the same-source CuTe control.
-#   bash build.sh --cute                  # replacement-only pack/link/onetu
+# existing provider/runner, then link and build the same-source CuTe control and
+# re-run the gate for `a` and `cute`.
+#   bash build.sh --cute                  # replacement-only pack/link/onetu + gate
 #   bash build.sh --through onetu         # clean build, including CuTe
 set -euo pipefail
 
@@ -54,7 +56,7 @@ PIPELINES=("${BASELINE_PIPELINES[@]}" cute)
 
 usage() {
   printf 'usage: %s [--cute] [--from STEP] [--through STEP] (steps: %s)\n' "${0##*/}" "${STEPS[*]}"
-  printf '%s\n' '  --cute: rebuild only the replacement stage and CuTe linked/one-TU images; default through onetu'
+  printf '%s\n' '  --cute: rebuild only the replacement stage and CuTe linked/one-TU images, then gate a and cute'
 }
 
 step_index() {
@@ -135,19 +137,44 @@ PATCHES=(
   megakernels-7309cec-partial-kv-stage-index.patch
   megakernels-7309cec-reduction-page-lifetime.patch
   megakernels-7309cec-tensor-allocator-barrier.patch
+  megakernels-7309cec-all-lane-arrivals.patch
 )
-for patch_name in "${PATCHES[@]}"; do
-  PATCH="$HERE/patches/$patch_name"
-  if git -C "$MK" apply --check "$PATCH" 2>/dev/null; then
-    git -C "$MK" apply "$PATCH"
-    printf '== patch: applied %s ==\n' "$patch_name"
-  elif git -C "$MK" apply --reverse --check "$PATCH" 2>/dev/null; then
-    printf '== patch: already applied %s ==\n' "$patch_name"
+# The series is stacked (later patches may touch lines of earlier ones), so the
+# working tree is compared as a whole against pristine and fully patched copies.
+SERIES=()
+for patch_name in "${PATCHES[@]}"; do SERIES+=("$HERE/patches/$patch_name"); done
+mapfile -t PATCHED_FILES < <(sed -n 's#^+++ b/##p' "${SERIES[@]}" | sort -u)
+SERIES_DIR=$(mktemp -d)
+trap 'rm -rf "$SERIES_DIR"' EXIT
+for file in "${PATCHED_FILES[@]}"; do
+  mkdir -p "$SERIES_DIR/pristine/$(dirname "$file")"
+  if [[ $file == ThunderKittens/* ]]; then
+    git -C "$MK/ThunderKittens" show "HEAD:${file#ThunderKittens/}" > "$SERIES_DIR/pristine/$file"
   else
-    printf 'build.sh: upstream source does not match patch: %s\n' "$PATCH" >&2
-    exit 1
+    git -C "$MK" show "HEAD:$file" > "$SERIES_DIR/pristine/$file"
   fi
 done
+cp -r "$SERIES_DIR/pristine" "$SERIES_DIR/patched"
+for patch in "${SERIES[@]}"; do
+  (cd "$SERIES_DIR/patched" && git apply "$patch")
+done
+series_state() {
+  local state=$1 file
+  for file in "${PATCHED_FILES[@]}"; do
+    cmp -s "$SERIES_DIR/$state/$file" "$MK/$file" || return 1
+  done
+}
+if series_state patched; then
+  printf '== patches: series already applied (%d patches) ==\n' "${#PATCHES[@]}"
+elif series_state pristine; then
+  for file in "${PATCHED_FILES[@]}"; do cp "$SERIES_DIR/patched/$file" "$MK/$file"; done
+  printf '== patches: applied series (%d patches) ==\n' "${#PATCHES[@]}"
+else
+  printf 'build.sh: upstream source is neither pristine nor fully patched: %s\n' "$MK" >&2
+  exit 1
+fi
+rm -rf "$SERIES_DIR"
+trap - EXIT
 
 step_enabled() {
   local index
@@ -173,8 +200,8 @@ COMMON_FLAGS=(
 )
 
 mkdir -p build/artifacts build/linked build/logs build/onetu build/pipelines
-# Keep the original inventory separate: a replacement-only build does not
-# invalidate sanitizer receipts for the unchanged all-ThunderKittens images.
+# Keep the all-ThunderKittens inventory in its own file so a replacement-only
+# build leaves those images' sanitizer receipts valid.
 if step_enabled link || step_enabled onetu; then
   "$UV" run --project "$PIPEC" --locked python - "$HERE" "$NVCC" "${PIPELINES[@]}" <<'PY'
 import json
@@ -235,8 +262,9 @@ fi
 
 if step_enabled link; then
   printf '== link: resolving and linking %s ==\n' "${PIPELINES[*]}"
-  # The checked-in pipelines state wiring and rebinding choices, not copies of
-  # compiler-owned storage sizes, capacities, register budgets or target facts.
+  # The checked-in pipelines state only wiring and rebinding choices. Storage
+  # sizes, capacities, register budgets and target facts come from the packages;
+  # the VM pool capacities come from the interpreter package.
   "$UV" run --project "$PIPEC" --locked python - "$HERE" "${PIPELINES[@]}" <<'PY'
 import json
 import sys
@@ -246,9 +274,7 @@ from pipec2.container import read
 root = Path(sys.argv[1])
 manifest = read(root / "build/artifacts/interpreter.plink")[0]
 claims = {claim["handle"]: claim for claim in manifest["claims"]}
-hints = manifest["hints"]
-config = {key.removeprefix("megakernel_config."): value for key, value in hints.items()
-          if key.startswith("megakernel_config.")}
+uniform = claims["pipelink_launch_regs"]["values"][0]
 extent = lambda name: claims[f"pipelink_megakernel_{name}"]["extent"]["const"]
 for name in sys.argv[2:]:
     source = root / "pipelines" / ("a.json" if name == "cute" else f"{name}.json")
@@ -262,28 +288,24 @@ for name in sys.argv[2:]:
         for stage in pipeline["stages"]:
             if stage["stage_id"] == "org.pipelink.megakernel.attn-partial":
                 stage["artifact_path"] = str(root / "build/artifacts/op_attn_partial_cute.plink")
-    pipeline["domains"].update({
-        "instr_page": {"capacity": config["NUM_PAGES"]},
-        "instr_semaphore": {"capacity": config["DYNAMIC_SEMAPHORES"]},
-        "instr_scratch": {"capacity": config["SCRATCH_BYTES"]},
-    })
-    for group in ("consumer", "producer"):
-        handle = f"pipelink_regs_{group}_wg"
+    for handle in ("pipelink_regs_consumer_wg", "pipelink_regs_producer_wg", "pipelink_launch_regs"):
         pipeline["handles"][handle]["values"] = claims[handle]["values"]
-    pipeline["handles"]["pipelink_launch_regs"]["values"] = [hints["launch_registers"]]
     forced = pipeline["forced_bindings"]
+    # Integrator choice: the upstream split budgets (first claim value) and the uniform launch
+    # cap. Forcing them also fixes the solver search order, so the VM pool bases stay stable.
     forced.update(pipelink_megakernel_pages_base=0,
                   pipelink_megakernel_ring_base=extent("pages_base"),
                   pipelink_megakernel_vmbar_base=extent("pages_base") + extent("ring_base"),
-                  pipelink_regs_consumer_wg=config["CONSUMER_REGISTERS"],
-                  pipelink_regs_producer_wg=config["NON_CONSUMER_REGISTERS"],
-                  pipelink_launch_regs=hints["launch_registers"])
+                  pipelink_regs_consumer_wg=claims["pipelink_regs_consumer_wg"]["values"][0],
+                  pipelink_regs_producer_wg=claims["pipelink_regs_producer_wg"]["values"][0],
+                  pipelink_launch_regs=uniform)
     if source.stem == "rebind-smem":
         del forced["pipelink_megakernel_pages_base"]
         forced["pipelink_megakernel_ring_base"] = 0
         forced["pipelink_megakernel_vmbar_base"] = extent("ring_base")
     elif source.stem == "rebind-regs":
-        forced["pipelink_regs_consumer_wg"] = hints["launch_registers"]
+        # Rebind the consumer group to the uniform budget; the producer group follows.
+        forced["pipelink_regs_consumer_wg"] = uniform
         del forced["pipelink_regs_producer_wg"]
     (root / "build/pipelines" / f"{name}.json").write_text(json.dumps(spec, indent=2) + "\n")
 PY
@@ -308,9 +330,8 @@ if step_enabled onetu; then
     if [[ $pipeline == cute ]]; then
       pipeline_flags+=(-DMK_ATTENTION_CUTE -I"$ROOT/third_party/cutlass/include")
     fi
-    # pipec2 writes generated/binding_stub.cu and generated/dispatch.cu.  Keep
-    # the requested out-dir include and add generated/ for their bare include
-    # names in src/one_tu.cu.
+    # pipec2 writes generated/binding_stub.cu and generated/dispatch.cu;
+    # src/one_tu.cu includes them by bare name, hence the generated/ path.
     "$NVCC" "${COMMON_FLAGS[@]}" "${pipeline_flags[@]}" \
       -arch=sm_103a --cubin -Xptxas=-v \
       -I"$HERE/build/linked/$pipeline" \
@@ -328,8 +349,13 @@ if step_enabled mono; then
     2> build/mono.ptxas.txt
 fi
 
-if step_enabled gate; then
-  printf '%s\n' '== gate: checking Gate P1 seam parity and binding permutations =='
-  python3 gate_p1.py --build build --pipelines "${BASELINE_PIPELINES[@]}" \
-    | tee build/logs/gate-p1.stdout.txt
+# The gate covers every pipeline, including the mixed-library `cute`. A --cute build
+# re-gates `a` and `cute` against the existing reference images and mono control.
+if step_enabled gate || (( CUTE_ONLY && END_INDEX >= 2 )); then
+  GATE_PIPELINES=("${PIPELINES[@]}")
+  if (( CUTE_ONLY )); then GATE_PIPELINES=(a cute); fi
+  printf '== gate: checking linked/one-TU resource and normalized SASS parity for %s ==\n' "${GATE_PIPELINES[*]}"
+  python3 check_seam_sass.py --build build --pipelines "${GATE_PIPELINES[@]}" \
+    --markdown build/seam-sass.md \
+    | tee build/logs/seam-sass.stdout.txt
 fi

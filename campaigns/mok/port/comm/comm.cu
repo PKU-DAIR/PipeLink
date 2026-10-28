@@ -249,18 +249,13 @@ extern "C" __device__ __inline_hint__ void mok_comm_rec(
 }
 #endif
 PL_STAGE("mok.comm", "1.0.0");
-PL_NO_PARAMS();
 PL_TOPOLOGY(pl::topology{2, pl::cluster{{2,1,1}, pl::launch{2,{2,1,1}}}, true, "clc"});
 PL_VARIANT(0, {{"pipelink_mok_precision", 0}, {"pipelink_mok_world", 1}});
 PL_VARIANT(1, {{"pipelink_mok_precision", 0}, {"pipelink_mok_world", 4}});
 PL_VARIANT(2, {{"pipelink_mok_precision", 1}, {"pipelink_mok_world", 1}});
 PL_VARIANT(3, {{"pipelink_mok_precision", 1}, {"pipelink_mok_world", 4}});
-PL_EXPORT(mok_comm_init, mok_comm_init);
-PL_EXPORT(mok_comm_fwd, mok_comm_fwd);
 PL_CALL(comm_init, mok_comm_init, pl::consume, "mok_comm_init");
 PL_CALL(comm_fwd, mok_comm_fwd, pl::consume, "mok_comm_fwd");
-PL_EXPORT(mok_comm_bwd, mok_comm_bwd);
-PL_EXPORT(mok_comm_rec, mok_comm_rec);
 PL_CALL(comm_bwd, mok_comm_bwd, pl::consume, "mok_comm_bwd");
 PL_CALL(comm_rec, mok_comm_rec, pl::consume, "mok_comm_rec");
 PL_CLAIM("pipelink_mok_comm_arena", "smem", 229376, 1024, "phase:instr_comm");
@@ -308,7 +303,6 @@ PL_ENDPOINT(router_weights_ready, pl::endpoint("router_weights_ready", pl::consu
 PL_HOST_GROUP("mok.comm", "mok.comm.params", "mok_comm", plk_header_v2,
               PLK_ABI_TYPE_ID(plk_header_v2), false);
 PL_HOST_DOMAIN(1, "ep");
-PL_HOST_ABI_EMPTY(100, MokCommResidue);
 PL_HOST_RESIDUE(2, "mok.comm.residue", MokCommResidue, 100, true, pl::host::roles({}));
 PL_HOST_SCALARS(1, pl::host::scalars(pl::host::roles({}))
     .field(pl::host::scalar(1, "mok.num_local_tokens", "i64").caller("num_local_tokens"))
@@ -356,5 +350,4 @@ PL_HOST_FACT(pl::host::fact("mok.comm.COMBINE_Nb").i32(mok_comm_owner::config::C
 PL_HOST_FACT(pl::host::fact("mok.comm.COMBINE_PIPE_DEPTH").i32(mok_comm_owner::config::COMBINE_PIPE_DEPTH)
     .owner("mok.comm").stage("mok.comm").consumers({"mok.framework"}));
 PL_HOST_SCHEDULER(pl::host::scheduler("mok.framework"));
-PL_HOST_TARGET();
 #endif

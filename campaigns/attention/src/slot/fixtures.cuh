@@ -91,8 +91,8 @@ __global__ void fill_philox(T* dst, uint64_t count, uint32_t numeric_case, uint3
   dst[j] = from_f16<T>(double_to_half_rn(-2.0 + 4.0 * u));
 }
 
-// The sm90 bf16 family rounds Philox values directly, not via the f16 fixtures
-// retained by the other families.
+// The sm90 bf16 family rounds Philox values straight to bf16, skipping the f16
+// step the other families use.
 __global__ void fill_philox_bf16(cutlass::bfloat16_t* dst, uint64_t count,
                                uint32_t numeric_case, uint32_t role) {
   uint64_t j = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x;

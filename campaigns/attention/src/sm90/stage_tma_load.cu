@@ -33,24 +33,8 @@ PL_CLAIM_EX(pl::claim("pipelink_attention_warp_load", "warp").extent(1).align(1)
 PL_CLAIM_REGS("pipelink_attention_regs_aux_wg", "aux_wg", {40}, "load");
 PL_CLAIM("pipelink_attention_smem_base", "smem", Facts::shared_bytes, Facts::shared_align, "kernel");
 PL_CLAIM("pipelink_attention_mbarrier_base", "mbarrier", Facts::pipeline_slots, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_q_full", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_q_empty", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_k_full", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_k_empty", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_v_full", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_v_empty", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_work_core_full", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_work_core_empty", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_work_epilogue_full", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_work_epilogue_empty", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_kv_index_full", "mbarrier", 4, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_kv_index_empty", "mbarrier", 4, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_corrected_o_full", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_corrected_o_empty", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_final_stats_full", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_final_stats_empty", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_o_drained_full", "mbarrier", 1, 1, "kernel");
 PL_TOPOLOGY(pl::topology{1, pl::cluster{{1, 1, 1}, pl::launch{1, {1, 1, 1}}}, true, "static", {}});
+PL_ENTRY_RENDEZVOUS(0, Config::kThreads);
 
 PL_ENDPOINT(q, pl::endpoint("q", pl::produce, "load")
     .space("smem").scope("cta").proxy("async")

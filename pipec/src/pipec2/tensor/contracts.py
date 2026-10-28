@@ -241,7 +241,7 @@ class _Invalid(Exception):
 
 
 class _Reader:
-    """Accumulate independent boundary defects without manufacturing valid records."""
+    """Accumulate independent boundary defects; a record with defects is never returned as valid."""
 
     def __init__(self, sort_env: expr.SortEnv | None = None) -> None:
         self.failures: list[ClauseFailure] = []
@@ -395,8 +395,8 @@ class _Reader:
             self.reject(path, "invalid expression", issues=list(error.issues))
         if (result.sort == "pred") != predicate:
             self.fail(path, "expected a predicate" if predicate else "expected a value expression")
-        # The C1 environment supplies sorts. C2 additionally distinguishes the
-        # namespaces: a published binding is not a free coordinate, or vice versa.
+        # The C1 environment supplies sorts. C2 additionally keeps the namespaces
+        # apart: published bindings and free coordinates cannot stand in for each other.
         def references(node: expr.Expr) -> None:
             if node.op in ("coord", "bind"):
                 namespace = coords if node.op == "coord" else self.bindings
@@ -631,7 +631,7 @@ def _contains(domain: expr.Domain, value: int) -> bool:
 
 
 def load_stage_tensor(obj: Any, path: str) -> StageTensor:
-    """Load strict tensor-v2 JSON; leave analyzer/model/backend scope to admission."""
+    """Load strict tensor-v2 JSON; admission checks analyzer, model and backend scope."""
     reader = _Reader()
     root = reader.read(lambda value, loc: reader.object(value, loc, (
         "version", "exports", "imports", "sites", "bindings",

@@ -111,8 +111,8 @@ def _phi(flashinfer, torch, cell, q, k, v, config):
     wrapper = flashinfer.VariableBlockSparseAttentionWrapper(
         torch.empty(_WORKSPACE_BYTES, dtype=torch.uint8, device=q.device), backend="fa3",
     )
-    # Mask axis is KV-head, but Phi's vertical stripes depend on QUERY head.
-    # MHA replication is a one-time input layout conversion, not per-call work.
+    # The mask axis is the KV head, but Phi's vertical stripes depend on the
+    # query head, so K/V are replicated to MHA once during preparation.
     group = heads // cell["heads_kv"]
     qh = q.transpose(0, 1).contiguous()
     kh = k.transpose(0, 1).repeat_interleave(group, dim=0).contiguous()
@@ -213,8 +213,8 @@ def prepare(cell, q, k, v, sel=None):
         )
         ragged = _ragged(flashinfer, torch, cell, qs, ks, vs, config)
         candidates = {"single": single, "ragged": ragged}
-        # Both are native FA3/TMA paths. Pick the measured B=1 winner rather
-        # than assuming the single-request or persistent ragged schedule wins.
+        # Both are native FA3/TMA paths; keep whichever schedule measures
+        # faster at B=1.
         timings = {
             name: measure(candidate.run, reps=2, smoke=True)
             for name, candidate in candidates.items()

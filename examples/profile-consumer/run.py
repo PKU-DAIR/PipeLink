@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the host ABI v3 and one-TU paths, preserve Gate A, and sanitize both images."""
+"""Run the host ABI v3 and one-TU paths, apply the Gate A checks, and sanitize both images."""
 from __future__ import annotations
 
 import argparse
@@ -65,7 +65,7 @@ def main() -> int:
         "one_tu": command(one_tu, "one-tu-runtime.log", check=False),
     }
 
-    # Both tools run on both actual launch routes, even after a numerical failure.
+    # Both tools run on both launch routes, even after a numerical failure.
     sanitizer = []
     for image, argv in (("linked", linked), ("one-tu", one_tu)):
         sanitizer.extend({"image": image, **report} for report in sanitize(

@@ -113,8 +113,8 @@ using Config = Family<false>;
 #endif
 #define PIPELINK_SM90_SYMBOL(suffix) PIPELINK_SM90_SYMBOL_(suffix)
 
-// These offsets describe the actual owner storage, not independent allocations.
-// Every endpoint binds the same base; origin_bits selects its physical view.
+// These offsets describe the owner's single shared-storage block. Every
+// endpoint binds the same base; origin_bits selects its physical view.
 template <class F>
 struct AnnotationFacts {
   using Mainloop = typename F::Mainloop;
@@ -137,8 +137,8 @@ struct AnnotationFacts {
   static constexpr int kv_bytes = F::kBlockN * 128 * sizeof(typename F::Element);
 
   // pipec's affine mode checker requires scalar modes. Split the 128-column
-  // logical mode into {64,2}; this is the exact FA3 physical layout, not a
-  // row-major approximation. V's native (head_dim,N) view is transposed here
+  // logical mode into {64,2}, which is FA3's exact physical layout. V's
+  // native (head_dim,N) view is transposed here
   // into the same (N,64,2) endpoint coordinates as K.
   static constexpr auto q_affine = cute::get_nonswizzle_portion(typename Mainloop::SmemLayoutQ{});
   static constexpr auto k_affine = cute::get_nonswizzle_portion(typename Mainloop::SmemLayoutK{});

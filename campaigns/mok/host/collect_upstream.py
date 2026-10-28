@@ -1,9 +1,11 @@
 """Collect completed upstream logs without rerunning any GPU work."""
 
 import ast
+from datetime import date
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import xml.etree.ElementTree as ET
 
@@ -12,11 +14,22 @@ from run import sanitizer_counts
 
 HOST = Path(__file__).resolve().parent
 ROOT = HOST.parents[2]
-LOGS = Path(os.environ["PIPELINK_SCRATCH_ROOT"]) / "mok" / "logs"
+# Upstream logs: build_upstream.sh (MOK_UPSTREAM_LOG_DIR), test_upstream.sh and measure_upstream.py.
+LOGS = Path(os.environ.get("MOK_UPSTREAM_LOG_ROOT") or Path(os.environ["PIPELINK_SCRATCH_ROOT"]) / "mok/logs")
+EVIDENCE = Path(os.environ.get("MOK_EVIDENCE_DIR") or Path(os.environ["PIPELINK_SCRATCH_ROOT"]) / "mok/evidence")
 
 
 def load_json(path):
     return json.loads(path.read_text()) if path.exists() else None
+
+
+def toolchain():
+    recorded = load_json(LOGS / "toolchain.json")
+    if recorded is not None:
+        return recorded
+    import torch
+    return {"python": platform.python_version(), "torch": torch.__version__, "torch_cuda": torch.version.cuda,
+            "visible_device_count": torch.cuda.device_count()}
 
 
 def collect():
@@ -111,17 +124,16 @@ def collect():
                                    "completion": load_json(directory / "completion.json"),
                                    "run": load_json(directory / "run.json"), "ranks": ranks})
     data = {
-        "schema_version": 1, "date": "2026-10-05", "ep": 4,
+        "schema_version": 1, "date": date.today().isoformat(), "ep": 4,
         "upstream_revision": "f3a8bd2432457c5a2a2ea13915f0dcd0224581e4",
         "thunderkittens_revision": "1c3920d993404dd49a6d4c7267ea11d583bd5c68",
-        "toolchain": load_json(LOGS / "toolchain.json"),
+        "toolchain": toolchain(),
         "topology": load_json(LOGS / "topology.json"),
-        "build": {"d10_only_attempt": load_json(LOGS / "build-upstream-d10-failed.json"),
-                  "final_attempt": load_json(LOGS / "build-upstream.json"),
+        "build": {"final_attempt": load_json(LOGS / "build-upstream.json"),
                   "patches": ["campaigns/mok/host/patches/mok-f3a8bd2-nvcc-major-only.patch",
                               "campaigns/mok/host/patches/mok-f3a8bd2-qualify-kittens-detail.patch"]},
         "tests": tests, "benchmarks": benchmarks, "sanitizers": sanitizers,
-        "raw_logs": "PIPELINK_SCRATCH_ROOT/mok/logs",
+        "raw_logs": str(LOGS).replace(os.environ["PIPELINK_SCRATCH_ROOT"], "$PIPELINK_SCRATCH_ROOT"),
     }
     data["variant"] = "upstream with multicast host collectives"
     data["harness_build"] = load_json(LOGS.parent / "harness/logs/build-upstream.json")
@@ -156,10 +168,10 @@ def collect():
 
 def main():
     data = collect()
-    output = ROOT / "campaigns/mok/evidence/p0a-upstream.json"
+    output = EVIDENCE / "upstream.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(data, indent=2) + "\n")
-    print(output.relative_to(ROOT))
+    print(output)
 
 
 if __name__ == "__main__":

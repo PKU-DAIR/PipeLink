@@ -32,7 +32,7 @@ class GemmEpilogueParams(C.Structure):
 
 
 def build_load(addresses: Mapping[str, int], *, M: int, N: int, K: int) -> bytes:
-    """Encode both rank-two BF16/SW128 maps with the actual current CUDA driver.
+    """Encode both rank-two BF16/SW128 tensor maps with the loaded CUDA driver.
 
     Called only after open_hostless has selected the device, made its context
     current, and allocated A[M,K] and B[N,K].

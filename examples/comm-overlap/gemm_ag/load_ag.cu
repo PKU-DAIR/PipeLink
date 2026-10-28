@@ -19,7 +19,7 @@ extern "C" __device__ void gemm_load_ag_role(const void* raw_params, unsigned) {
   auto const& ag = residue.ag;
   extern __shared__ __align__(1024) unsigned char gemm_smem[];
   if ((threadIdx.x & 31) != 0) return;
-  // Device-resident launch generation: launches completed by this rank; peers' pushes for this launch reach (g+1)*expected.
+  // Launches this rank has completed (g); peers' pushes for this launch bring a counter to (g+1)*expected.
   const uint32_t generation = *reinterpret_cast<const volatile uint32_t*>(ag.gen);
   const int row_block = int(blockIdx.x);
   if (row_block * TileM / ag.rows_per_rank != ag.rank) {
@@ -55,7 +55,6 @@ extern "C" __device__ void gemm_load_ag_role(const void* raw_params, unsigned) {
 }
 
 PL_STAGE("gemm.load.ag", "1.0.0");
-PL_NO_PARAMS();
 PL_ROLE(load, gemm_load_ag_role, 1);
 PL_CLAIM_EX(pl::claim("pipelink_gemm_warp_load", "warp")
     .extent(1).align(1).at(8).roles({"load"}));
@@ -63,7 +62,6 @@ GEMM_OPERAND_CLAIMS();
 GEMM_OPERANDS(pl::produce, "load");
 // The comm owner's counter vocabulary: one slot per gathered 128-row block.
 PL_CLAIM("pipelink_comm_ready_slot", "gmem_counter", 512, 1, "kernel");
-PL_CLAIM("pipelink_comm_gather_reads_done", "mbarrier", 1, 1, "kernel");
 PL_ENDPOINT(chunk_ready, pl::endpoint("chunk_ready", pl::consume, "load")
     .space("gmem").scope("system").proxy("generic").tile("u32", {1})
     .layout(pl::affine{{1}, {1}, 32})

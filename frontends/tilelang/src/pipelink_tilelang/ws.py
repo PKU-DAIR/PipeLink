@@ -88,7 +88,6 @@ def emit_annotations(stage, facts, ledger, *, planes, smem_handles, full_handle,
     budget = ref("claims.regs.values", f"/branches/{branch}/set_max_nreg/0")
     ring_depth = ref("ring.depth", allocation_path + "/shape/0")
     zero = convention("claims.extent.const", "RingFixedExtent")
-    unit = convention("claims.mbarrier.extent.per", "BarrierSlotUnit")
     empty_index = next(index for index, item in enumerate(captured["barrier_schedule"]) if item["role"] == "consumer")
     empty_tx = ref("protocol.empty.tx_bytes", f"/barrier_schedule/{empty_index}/transaction_bytes")
     full_count = ref("protocol.full.arrive.count", "/captures/pre_codegen/barrier_init/0/1")
@@ -102,9 +101,8 @@ def emit_annotations(stage, facts, ledger, *, planes, smem_handles, full_handle,
         expr(f"params.fields.{field.name}.align", f"__alignof__((({stage.params.name}*)nullptr)->{field.name})")
     lines = [f'''// Adapter allocation/coordinate conventions, not TIR measurements.
 namespace {prefix}conventions {{
-// Ring extents have no depth-independent allocation; handles count logical slots.
+// Ring extents have no depth-independent allocation.
 inline constexpr int RingFixedExtent = 0;
-inline constexpr int BarrierSlotUnit = 1;
 // Authored allocation choice: role warp intervals start on a warpgroup boundary
 // (the granularity setmaxnreg register reallocation operates on).
 inline constexpr int WarpAllocationAlignment = 4;
@@ -124,11 +122,7 @@ inline constexpr int WarpAllocationAlignment = 4;
         ledger.alias(f"claims.{handle}.extent.const", "claims.extent.const")
         ledger.alias(f"claims.{handle}.extent.per", f"ring.{handle}.stage_stride_bytes")
         lines.append(f'PL_CLAIM_EX(pl::claim("{handle}", "smem").extent({zero}, {{{{"{stage.variants.depth_handle}", {stride}}}}}).align({alignment}));')
-    for handle in (full_handle, empty_handle):
-        ledger.alias(f"claims.{handle}.extent.const", "claims.extent.const")
-        ledger.alias(f"claims.{handle}.extent.per", "claims.mbarrier.extent.per")
-        ledger.alias(f"claims.{handle}.align", "claims.mbarrier.extent.per")
-        lines.append(f'PL_CLAIM_EX(pl::claim("{handle}", "mbarrier").extent({zero}, {{{{"{stage.variants.depth_handle}", {unit}}}}}).align({unit}));')
+    # The ring depth handle implies the full/empty barrier slot allocations.
     ledger.alias("claims.warp.extent", f"roles.{role}.warps")
     lines.append(f'PL_CLAIM_EX(pl::claim("pipelink_tilelang_warp_{role}", "warp").extent({warps}).align({warp_alignment}).at({base}).roles({{"{role}"}}));')
     for index, value in enumerate(stage.variants.values):
@@ -231,7 +225,7 @@ def emit(out, module, generated, *, target, planes):
                             smem_handles={planes[name]: handle for name, handle in smem_handles.items()},
                             full=full_handle, empty=empty_handle, declared_params=tuple(field.name for field in stage.params.fields),
                             target=target)
-        params = f'struct alignas({stage.params.alignas}) {stage.params.name} {{\n' + "".join(f"  {field.cpp_type} {field.name};\n" for field in stage.params.fields) + "};\n"
+        params = f'struct alignas({stage.params.alignas}) {stage.params.name} {{\n' + "".join(f"  {field.declarator};\n" for field in stage.params.fields) + "};\n"
         symbol = prefix + "role_" + role
         functions = {function.depth: function for function in split.functions}
         fields = {field.name: field for field in stage.params.fields}

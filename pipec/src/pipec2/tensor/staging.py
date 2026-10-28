@@ -19,8 +19,8 @@ def select(tables, scalar_bytes, extent, bindings):
     blocks retain identity. No candidate changes scalar alignment or extent.
     Each instruction's distinct words are counted, so broadcasts cost one.
     Bank-optimal candidates are tried by shear structural cost (XOR entries
-    plus distinct shifts), then signature. Stop at the first exact fit rather
-    than fitting every tied layout; expression cost is reported, not minimized.
+    plus distinct shifts), then signature. The search stops at the first exact
+    fit; expression cost is reported but not minimized.
     """
     byte_tables = [{point: identity * scalar_bytes for point, identity in table.items()} for table in tables]
     groups = []

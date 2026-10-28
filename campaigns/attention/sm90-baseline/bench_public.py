@@ -28,9 +28,23 @@ def make_inputs(cell, device):
     return tensor(cell["heads_q"]), tensor(cell["heads_kv"]), tensor(cell["heads_kv"])
 
 
+UNLOCKED_BANNER = ("> Unlocked or unrecorded SM clocks: timings are valid as relative comparisons only, "
+                   "not comparable with the paper's locked-clock numbers.")
+
+
+def clock_mode(result, report):
+    """A result's clock mode; without a recorded mode it is unknown, never assumed locked."""
+    return result.get("clock", report.get("clock", "unknown"))
+
+
 def markdown(report):
-    lines = ["# sm90 public attention", "", f"Mode: {report['mode']}. Ratios are Flex-Triton latency / implementation latency (higher is faster).",
-             "Ceiling diagnostics use their own causal oracle/work and never enter sparse comparisons.", ""]
+    timed = [r for cell in report["cells"] for r in cell["results"] if r["status"] in ("ok", "clock_violation")]
+    locked = all(clock_mode(r, report) == "locked" for r in timed)
+    lines = ["# sm90 public attention", "", *([] if locked else [UNLOCKED_BANNER, ""]),
+             f"Mode: {report['mode']}. The Flex-Triton ratio is Flex-Triton latency / implementation latency, "
+             "so values above 1 mean the implementation is faster than Flex-Triton.",
+             "Dense ceiling diagnostics use their own causal oracle and work count and are kept out of the "
+             "sparse comparisons.", ""]
     if report["import_errors"]:
         lines += ["## Unavailable adapter modules", ""]
         lines += [f"- `{name}`: {error}" for name, error in report["import_errors"].items()]
@@ -53,7 +67,7 @@ def markdown(report):
             else:
                 metrics = "— | — | —"
             reason = result.get("reason", "").replace("|", "\\|").replace("\n", " ")
-            clock = result.get("clock", report.get("clock", "locked (legacy)"))
+            clock = clock_mode(result, report)
             lines.append(f"| {result['impl']} | {result['role']} | {result['status']} {reason} | {clock} | {metrics} | {result.get('prep_ms', '—')} |")
         lines.append("")
     return "\n".join(lines) + "\n"
@@ -91,11 +105,17 @@ def main(argv=None):
     parser.add_argument("--cells", default="all")
     parser.add_argument("--impls", default="all", help="Comma-separated names; all excludes opt-in harness-equivalence products")
     parser.add_argument("--mode", choices=("smoke", "definitive"), default="smoke")
-    parser.add_argument("--gpu", type=int, required=True, help="CUDA device ordinal in this process")
+    parser.add_argument("--gpu", type=int, help="CUDA device ordinal in this process (required unless --render)")
     parser.add_argument("--clock-mhz", type=int, help="check an existing lease at N MHz (±3%%); default: unlocked")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--selection-dir", type=Path, help="Shared raw W6 files; default results/sm90-selections")
+    parser.add_argument("--render", type=Path, help="CPU-only: write the Markdown report for an existing JSON record")
     args = parser.parse_args(argv)
+    if args.render:
+        args.render.with_suffix(".md").write_text(markdown(json.loads(args.render.read_text())))
+        return
+    if args.gpu is None:
+        parser.error("--gpu is required")
     if args.clock_mhz is not None and args.clock_mhz <= 0:
         parser.error("--clock-mhz must be positive")
     configure_caches()
@@ -129,6 +149,7 @@ def main(argv=None):
         "gpu": args.gpu, "gpu_name": torch.cuda.get_device_name(device),
         "gpu_uuid": uuid, "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
         "clock": "unlocked" if args.clock_mhz is None else "locked",
+        "clock_locked": args.clock_mhz is not None,
         "expected_sm_mhz": args.clock_mhz, "import_errors": errors, "cells": [],
         "timing_contract": "full product call, warm L2, no graphs, >=20ms per interval; median/N; 10 reps (2 smoke)",
     }

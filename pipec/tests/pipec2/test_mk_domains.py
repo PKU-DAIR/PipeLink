@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -344,15 +343,3 @@ def test_dispatch_and_link_publication_keep_zero_byte_stage_total() -> None:
     )
     link_json = json.loads(canonical_bytes(result.to_json_obj()))
     assert ["org.fixture.op.a", 64, 0, 16] in link_json["params"]["entries"]
-
-
-
-
-def test_existing_example_pipeline_manifests_still_load() -> None:
-    repo = Path(__file__).parents[3]
-    expected = {
-        "examples/profile-consumer/manifests/pipeline.json": {"gmem_counter", "smem_page"},
-    }
-    for relative, domains in expected.items():
-        pipeline = load_pipeline(json.loads((repo / relative).read_text(encoding="utf-8")))
-        assert set(pipeline.domains) == domains, relative

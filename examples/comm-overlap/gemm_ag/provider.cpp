@@ -1,5 +1,5 @@
-// GEMM owner provider for the AllGather host group: the original owner's descriptor
-// encoding, with A over this rank's gathered buffer [M, K] and load_ag's readiness inputs.
+// GEMM owner provider for the AllGather host group: the hopper-gemm-split owner's
+// descriptor encoding, with A over this rank's gathered buffer [M, K] and load_ag's readiness inputs.
 #include "abi.h"
 #include <climits>
 #include <cstring>

@@ -1,6 +1,5 @@
 {
   "name": "incomplete_variant_key_tuple",
-  "reference": "D-finding",
   "description": "The second variant row omits one handle from the complete tuple established by the first row.",
   "base": "schema",
   "phase": "schema.stage",

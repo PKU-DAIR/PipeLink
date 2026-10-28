@@ -39,8 +39,6 @@ def _registry():
          "members": [{"name": "count", "offset": 0, "bytes": 4, "align": 4}]},
         {"kind": "role", "name": "x", "symbol": "plx_role_x", "warps": 1,
          "declaration": 'extern "C" __device__ void plx_role_x(const void*, uint32_t);'},
-        {"kind": "export", "name": "scale", "symbol": "plx_scale",
-         "declaration": 'extern "C" __device__ float plx_scale(float);'},
         {"kind": "tensor_export", "name": "value", "identity": identity, "read_capabilities": [],
          "readiness": {"after": "ready", "reuse_after": "done"}, "fixed_bindings": {}, "backing": [],
          "calls": {"produce": "produce", "release": None},
@@ -50,6 +48,27 @@ def _registry():
         {"kind": "map", "name": "swizzle", "inputs": [{**d, "role": "coord"} for d in identity["coords"]],
          "outputs": ["address"], "rows": [[m, n, m ^ n] for m in range(4) for n in range(4)]},
     ]}
+
+
+def test_provided_call_implies_its_export():
+    registry = _registry()
+    manifest = assemble(registry)
+    assert manifest["stage"]["exports"]["scale"]["symbol"] == "plx_scale"
+    restated = {"kind": "export", "name": "scale", "symbol": "plx_scale",
+                "declaration": 'extern "C" __device__ float plx_scale(float);'}
+    with pytest.raises(PackError) as caught:
+        assemble({"records": [*registry["records"], restated]})
+    assert [(item.clause_id, item.path) for item in caught.value.failures] == [("P-CALL", "$.stage.exports.scale")]
+
+
+def test_domain_capacities_are_keyed_by_domain():
+    registry = _registry()
+    capacity = lambda domain, value: {"kind": "domain_capacity", "domain": domain, "capacity": value}
+    registry["records"] += [capacity("instr_page", 13), capacity("instr_semaphore", 64)]
+    assert assemble(registry)["domain_capacities"] == {"instr_page": 13, "instr_semaphore": 64}
+    with pytest.raises(PackError) as caught:
+        assemble({"records": [*registry["records"], capacity("instr_page", 12)]})
+    assert caught.value.failures[0].clause_id == "P-MAP"
 
 
 def _facts(*, missing_role=False, max_threads=None, cluster_dim=None):
@@ -200,7 +219,7 @@ def _with_import(kind):
          "invocation": "once", "guarantees": ["enter_once"], "observes": ["ready"]},
         {"kind": "tensor_import", "name": "input", "symbol": "pl_import",
          "declaration": 'extern "C" __device__ void pl_import(float*);',
-         "identity": registry["records"][4]["identity"], "args": [{"name": "fragment", "meaning": "dest_fragment", "ctype": "float*"}],
+         "identity": registry["records"][3]["identity"], "args": [{"name": "fragment", "meaning": "dest_fragment", "ctype": "float*"}],
          "demand": demand, "sites": ["site"], "completion": "done", "lends": [], "rendezvous": []},
         {"kind": "map", "name": "input.demand", "inputs": [{**item, "role": "coord"} for item in domain],
          "outputs": demand["outputs"],
@@ -344,8 +363,6 @@ def _accumulator_registry():
          "extent": {"const": 4, "per": {}}, "align": 1, "offset": 16, "lifetime": "kernel"},
         {"kind": "claim", "handle": "pipelink_gemm_evt_warp_mma", "domain": "warp",
          "extent": {"const": 1, "per": {}}, "align": 1, "lifetime": "kernel", "roles": ["mma"]},
-        *[{"kind": "claim", "handle": f"pipelink_gemm_evt_sync_protocol_{side}", "domain": "mbarrier",
-           "extent": {"const": 2, "per": {}}, "align": 1, "lifetime": "kernel"} for side in ("full", "empty")],
         *[{"kind": "variant", "index": index, "key": {"pipelink_gemm_evt_depth": depth}}
           for index, depth in ((2, 6), (0, 4), (1, 5))],
     ])
@@ -382,8 +399,6 @@ def test_attention_register_group_and_fixed_depth_barrier_claims():
     registry["records"].extend([
         {"kind": "claim_regs", "handle": "pipelink_attention_regs_aux_wg", "reg_group": "aux_wg",
          "values": [32, 40], "roles": ["mma"]},
-        {"kind": "claim", "domain": "mbarrier", "handle": "pipelink_attention_slots_q_full",
-         "extent": {"const": 2, "per": {}}, "align": 1, "lifetime": "kernel"},
         {"kind": "endpoint", "name": "q", "direction": "consume", "role": "mma",
          "space": "smem", "scope": "cta", "proxy": "async",
          "tile": {"dtype": "f16", "shape": [256, 128]},
@@ -405,7 +420,24 @@ def test_attention_register_group_and_fixed_depth_barrier_claims():
         "domain": "regs", "handle": "pipelink_attention_regs_aux_wg", "reg_group": "aux_wg",
         "values": [32, 40], "roles": ["mma"],
     }
-    assert stage.endpoints[0].ring.depth.fixed == next(c for c in stage.claims if c.domain == "mbarrier").extent.const == 2
+    # The ring implies the slot allocations; a plain restatement is rejected, placement is kept.
+    assert not [claim for claim in stage.claims if claim.domain == "mbarrier"]
+    restated = {"kind": "claim", "domain": "mbarrier", "handle": "pipelink_attention_slots_q_full",
+                "extent": {"const": 2, "per": {}}, "align": 1, "lifetime": "kernel"}
+    with pytest.raises(PackError) as caught:
+        assemble({"records": [*registry["records"], restated]})
+    assert [(item.clause_id, item.path) for item in caught.value.failures] == [
+        ("P-CLAIM", "$.claims.pipelink_attention_slots_q_full")]
+    # A slot handle that also backs native barrier storage keeps its canonical claim.
+    backed = json.loads(json.dumps(registry))
+    endpoint = next(record for record in backed["records"] if record["kind"] == "endpoint")
+    endpoint["protocol"]["full"]["native"] = {"base": restated["handle"], "offset_bytes": 0, "stride_bytes": 16}
+    endpoint["protocol"]["init"]["materializer"] = "stage"
+    kept = assemble({"records": [*backed["records"], restated]})
+    assert [claim["handle"] for claim in kept["claims"] if claim["domain"] == "mbarrier"] == [restated["handle"]]
+    placed = assemble({"records": [*registry["records"], {**restated, "lifetime": "phase:load"}]})
+    assert [claim["handle"] for claim in placed["claims"] if claim["domain"] == "mbarrier"] == [
+        "pipelink_attention_slots_q_full"]
 
 
 def test_instruction_named_barrier_counter_phase_descriptor_and_dynamic_cluster():
@@ -635,11 +667,21 @@ def test_registered_types_reach_manifest_and_executable_trampolines(tmp_path):
     ])
     manifest = assemble(registry)
     stage = load_stage_manifest(manifest)
+    assert [item.name for item in stage.types] == ["Packet", "Record", "sample::nested::Token"]
+    interface = stage.exports["record"].interface
+    assert (interface.cohort.threads, interface.collectives.kind) == (32, "warp")
+    (param,) = interface.params
+    assert (param.index, param.space, param.access, param.dtype, param.extent) == (0, "smem", "rw", "u8", 64)
+    assert param.layout.to_json_obj() == {"encoding": "pl-layout-v2", "shape": [[8], [8]], "stride": [[8], [1]],
+                                          "elem_bits": 8, "swizzle": {"B": 1, "M": 4, "S": 3, "unit": "byte"}}
+    assert manifest["types"] == sorted(({key: value for key, value in record.items() if key != "kind"}
+                                        for record in registry["records"] if record["kind"] == "type"),
+                                       key=lambda item: item["name"])
     params = next(record for record in registry["records"] if record["kind"] == "params")
     assert manifest["params"]["sha256_of_layout_probe"] == sha256_hex(canonical_bytes(params))
     exported = stage.exports["packet"]
     printed = next(record["declaration"] for record in registry["records"]
-                   if record["kind"] == "export" and record["name"] == "packet")
+                   if record["kind"] == "call" and record.get("export") == "packet")
     assert exported.decl == printed
     assert normalize_declaration(exported.decl) == exported.decl
     assert exported.decl_sha256 == declaration_digest(printed)
@@ -658,8 +700,18 @@ def test_registered_types_reach_manifest_and_executable_trampolines(tmp_path):
     ]
     source = stubgen.generate_stub(solution, pipeline, [stage], expansions)
     definitions = """
+#include <cstdint>
 struct alignas(16) Packet { unsigned values[4]; };
 namespace sample::nested { class Token { public: unsigned value; }; }
+struct Record {
+  Packet head;
+  char tag;
+  alignas(8) int32_t count;
+  const void* opaque;
+  Record* next;
+  sample::nested::Token* token;
+  sample::nested::Token tokens[2];
+};
 """
     implementation = tmp_path / "implementation.cpp"
     implementation.write_text(definitions + """
@@ -670,6 +722,7 @@ extern "C" Packet plx_packet(const Packet& lhs, Packet* out, const Packet* rhs, 
 }
 extern "C" void plx_pointer(Packet* packet) { ++packet->values[0]; }
 extern "C" Packet plx_value(Packet packet) { ++packet.values[0]; return packet; }
+extern "C" void plx_record(Record* record) { record->head.values[0] += record->tokens[1].value; }
 """)
     main = """
 #include <cstring>
@@ -683,15 +736,19 @@ int main() {
     auto result = pipelink_call_packet(lhs, &out, &rhs, &token);
     pipelink_call_pointer(&result);
     result = pipelink_call_value(result);
-    std::memcpy(&answer, &result, sizeof(answer));
-    return answer == 23 ? 0 : 1;
+    Record record{};
+    record.head = result;
+    record.tokens[1].value = 4;
+    pipelink_call_record(&record);
+    std::memcpy(&answer, &record.head, sizeof(answer));
+    return answer == 27 ? 0 : 1;
 }
 """
     for real_definition in (False, True):
         stub = tmp_path / f"stub-{real_definition}.cpp"
         prelude = "#define __device__\n#define __forceinline__ inline\n"
         if real_definition:
-            prelude += "#define PACKET_DEFINED\n#define SAMPLE__NESTED__TOKEN_DEFINED\n" + definitions
+            prelude += "#define PACKET_DEFINED\n#define SAMPLE__NESTED__TOKEN_DEFINED\n#define RECORD_DEFINED\n" + definitions
         stub.write_text(prelude + source + main)
         binary = tmp_path / f"trampolines-{real_definition}"
         compiled = subprocess.run(

@@ -19,6 +19,7 @@
 #define CU_CHECK(expr) do { CUresult e_ = (expr); if (e_ != CUDA_SUCCESS) { const char* s_ = nullptr; cuGetErrorString(e_, &s_); throw std::runtime_error(std::string(#expr) + ": " + (s_ ? s_ : "driver error")); } } while (0)
 #include "slot/timing.cuh"
 #include "slot/family.cuh"
+#include "../../../evaluator/harness/parity/paired_reload.h"
 
 namespace {
 using namespace pipelink::attention::slot;
@@ -49,7 +50,7 @@ Case resolve_case(std::string const& path, std::string const& id) {
     std::string kind = mask.at("kind").string();
     if (kind != "causal" && kind != "sliding_window" && kind != "chunked" &&
         kind != "phi3_blocksparse" && kind != "msa_selected")
-      throw std::runtime_error(id + ": mask not supported until P4");
+      throw std::runtime_error(id + ": unsupported mask kind " + kind);
     Case c{id, row.at("seqlen_q").integer(), row.at("batch").integer(),
            row.at("heads_q").integer(), row.at("heads_kv").integer(),
            row.at("head_dim").integer(), uint32_t(row.at("numeric_case").integer()),
@@ -129,8 +130,8 @@ Options parse_options(int argc, char** argv) {
   } else if (out.link_json.empty() || out.linked_cubin.empty() || out.control_cubin.empty()) {
     throw std::runtime_error("--link-json, --linked-cubin, and --control-cubin are required for both family modes");
   }
-  // Reject absent images before parsing stdin or touching CUDA, including the
-  // companion image needed by the linked/control correctness gates.
+  // Check that every image exists, including the companion image the
+  // linked/control gates need, before parsing stdin or touching CUDA.
   auto require_file = [](std::string const& path) {
     if (!std::ifstream(path, std::ios::binary))
       throw std::runtime_error("cannot open required input: " + path);
@@ -262,12 +263,12 @@ class LoadedKernel {
   typename Kernel::Params params_;
   int* semaphore_;
   CUlaunchConfig launch_{};
+  std::string path_, symbol_;
  public:
   LoadedKernel(Options const& opts, Metadata const& meta, Problem const& p, int num_sm)
-      : params_(Adapter::make_params(p.arguments(num_sm), 0)), semaphore_(p.semaphore.data) {
-    CU_CHECK(cuModuleLoad(&module_, opts.cubin.c_str()));
-    CU_CHECK(cuModuleGetFunction(&function_, module_, meta.symbol.c_str()));
-    CU_CHECK(cuFuncSetAttribute(function_, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, Kernel::SharedStorageSize));
+      : params_(Adapter::make_params(p.arguments(num_sm), 0)), semaphore_(p.semaphore.data),
+        path_(opts.cubin), symbol_(meta.symbol) {
+    load();
     dim3 grid = Kernel::get_grid_shape(params_);
     launch_.gridDimX = grid.x; launch_.gridDimY = grid.y; launch_.gridDimZ = grid.z;
     launch_.blockDimX = Kernel::MaxThreadsPerBlock; launch_.blockDimY = launch_.blockDimZ = 1;
@@ -276,13 +277,23 @@ class LoadedKernel {
   ~LoadedKernel() { if (module_) cuModuleUnload(module_); }
   LoadedKernel(LoadedKernel const&) = delete;
   LoadedKernel& operator=(LoadedKernel const&) = delete;
+  void unload() {
+    if (module_) CU_CHECK(cuModuleUnload(module_));
+    module_ = nullptr;
+    function_ = nullptr;
+  }
+  void load() {
+    CU_CHECK(cuModuleLoad(&module_, path_.c_str()));
+    CU_CHECK(cuModuleGetFunction(&function_, module_, symbol_.c_str()));
+    CU_CHECK(cuFuncSetAttribute(function_, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, Kernel::SharedStorageSize));
+  }
 
   void launch() {
-    // FA3-as-shipped flash_api.cpp zeroes the dynamic scheduler counter for
-    // every invocation. This is inside every timed batch, not just warmup.
+    // Shipped FA3 (flash_api.cpp) zeroes the dynamic scheduler counter on
+    // every call, so every timed batch includes this reset.
     CUDA_CHECK(cudaMemsetAsync(semaphore_, 0, sizeof(int), nullptr));
-    // cutlass::device_kernel takes one __grid_constant__ Params BY VALUE;
-    // kernelParams points at that entire host record, not a device pointer.
+    // cutlass::device_kernel takes one __grid_constant__ Params by value, so
+    // kernelParams points at the whole host record.
     void* args[] = {&params_};
     CU_CHECK(cuLaunchKernelEx(&launch_, function_, args, nullptr));
   }
@@ -319,8 +330,8 @@ void measure(Request const& r, Options const& opts, Case const& c,
             << "\"work_definition\":\"attention O and natural-log LSE\"}\n";
 }
 
-// A stock image is both gate_b operands: there is no linked/control pair and
-// Gate A is inapplicable (null), never a fabricated successful bitwise check.
+// A stock image is both gate_b operands. With no linked/control pair, Gate A
+// does not apply and is reported as null.
 constexpr char correctness[] = "\"correctness\":{\"all_true\":true,\"checked_before_warmup\":true,"
     "\"gate_a_bitwise\":null,\"gate_b_linked\":true,\"gate_b_control\":true,\"gate_c_lse\":true},";
 
@@ -363,8 +374,10 @@ void process_family(Request const& r, Options const& opts, LinkMetadata const& m
                        : make_family_params<Causal>(args, 0, c.window);
   };
   auto linked_params = make_params(arguments);
-  arguments.o_ptr = control_o.data;
-  arguments.softmax_lse_ptr = control_lse.data;
+  if (!r.paired()) {
+    arguments.o_ptr = control_o.data;
+    arguments.softmax_lse_ptr = control_lse.data;
+  }
   auto control_params = make_params(arguments);
   PhiWorkspace phi(c.phi, arguments, c.phi_params);
   std::unique_ptr<MsaWorkspace> msa;
@@ -394,7 +407,8 @@ void process_family(Request const& r, Options const& opts, LinkMetadata const& m
   };
   auto launch_control = [&] {
     control.launch(control_packed);
-    if (msa) msa->combine(control_o.data, control_lse.data, c.scale);
+    if (msa) msa->combine(r.paired() ? p.o.data : control_o.data,
+                          r.paired() ? p.lse.data : control_lse.data, c.scale);
   };
   auto launch = [&] {
     if (opts.mode == "linked") launch_linked();
@@ -407,13 +421,116 @@ void process_family(Request const& r, Options const& opts, LinkMetadata const& m
     std::cout << "\"images_executed\":[" << json_quote(opts.mode) << "],\"timing\":false}\n";
     return;
   }
+  if (r.paired()) {
+    std::unique_ptr<LoadedKernel<true, false>> stock_causal;
+    std::unique_ptr<LoadedKernel<false, true>> stock_window;
+    if (r.reference_kind == "stock") {
+      if (c.softcap > 0 || c.chunk > 0 || c.phi || c.msa)
+        throw std::runtime_error("paired stock supports causal/window without softcap");
+      auto stock_meta = load_metadata(opts.meta, c);
+      if (c.window) stock_window = std::make_unique<LoadedKernel<false, true>>(opts, stock_meta, p, device.multiProcessorCount);
+      else stock_causal = std::make_unique<LoadedKernel<true, false>>(opts, stock_meta, p, device.multiProcessorCount);
+    }
+    auto launch_reference = [&] {
+      if (stock_causal) stock_causal->launch();
+      else if (stock_window) stock_window->launch();
+      else launch_control();
+    };
+    auto numeric = [&] {
+      p.reference(msa ? msa->selection() : nullptr);
+      launch_control();
+      CUDA_CHECK(cudaDeviceSynchronize());
+      p.check(p.o.data, p.lse.data, "control");
+      CUDA_CHECK(cudaMemcpy(control_o.data, p.o.data, p.q_count * sizeof(Element), cudaMemcpyDeviceToDevice));
+      CUDA_CHECK(cudaMemcpy(control_lse.data, p.lse.data, p.rows * sizeof(float), cudaMemcpyDeviceToDevice));
+      launch_linked();
+      CUDA_CHECK(cudaDeviceSynchronize());
+      p.check(p.o.data, p.lse.data, "linked");
+      CUDA_CHECK(cudaMemset(p.bad.data, 0, sizeof(int)));
+      compare_bitwise<<<int((p.q_count + 255) / 256), 256>>>(p.o.data, control_o.data, p.q_count, p.bad.data);
+      compare_bitwise<<<int((p.rows + 255) / 256), 256>>>(p.lse.data, control_lse.data, p.rows, p.bad.data);
+      CUDA_CHECK(cudaGetLastError());
+      int failed = 0;
+      CUDA_CHECK(cudaMemcpy(&failed, p.bad.data, sizeof(int), cudaMemcpyDeviceToHost));
+      if (failed) throw std::runtime_error("Gate A: linked/control O/LSE differ");
+      if (r.reference_kind == "stock") {
+        launch_reference();
+        CUDA_CHECK(cudaDeviceSynchronize());
+        p.check(p.o.data, p.lse.data, "stock");
+      }
+    };
+    auto reload = [&] {
+      CUDA_CHECK(cudaDeviceSynchronize());
+      linked.unload();
+      control.unload();
+      if (stock_causal) stock_causal->unload();
+      if (stock_window) stock_window->unload();
+      if (stock_causal) stock_causal->load();
+      if (stock_window) stock_window->load();
+      control.load();
+      linked.load();
+      numeric();
+    };
+    numeric();
+    if (r.action == "paired-check") {
+      // Exercise the real shared-output queued-call and reload lifetimes
+      // without running all 320 measured launches under compute-sanitizer.
+      for (int half = 0; half < 2; ++half) {
+        for (int i = 0; i < 2; ++i) launch_linked();
+        for (int i = 0; i < 2; ++i) launch_reference();
+        CUDA_CHECK(cudaDeviceSynchronize());
+        if (half == 0) reload();
+      }
+      numeric();
+      std::cout << "{\"schema_version\":\"attention-paired-check-result-v2\","
+                << "\"action\":\"paired-check\",\"protocol\":\"paired-reload-v2\","
+                << "\"case_id\":" << json_quote(c.id) << ",\"reference_kind\":" << json_quote(r.reference_kind)
+                << ",\"timing\":false,\"queued_calls_per_arm_per_half\":2,\"halves\":2,"
+                << "\"images_executed\":[\"linked\",\"control\""
+                << (r.reference_kind == "stock" ? ",\"stock\"" : "") << "],"
+                << "\"correctness\":{\"all_true\":true,\"checked_before_work\":true,"
+                << "\"checked_after_reload\":true,\"checked_after_work\":true,"
+                << "\"gate_a_bitwise\":true,\"gate_b_linked\":true,\"gate_b_control\":true,"
+                << "\"gate_c_lse\":true,\"gate_stock\":" << (r.reference_kind == "stock" ? "true" : "null")
+                << "}}\n";
+      return;
+    }
+    cudaEvent_t begin, end;
+    CUDA_CHECK(cudaEventCreate(&begin));
+    CUDA_CHECK(cudaEventCreate(&end));
+    auto pair = pipelink::parity::time_pair([&](bool candidate, int n) {
+      CUDA_CHECK(cudaEventRecord(begin));
+      for (int i = 0; i < n; ++i) {
+        if (candidate) launch_linked(); else launch_reference();
+      }
+      CUDA_CHECK(cudaEventRecord(end));
+      CUDA_CHECK(cudaEventSynchronize(end));
+      float ms = 0;
+      CUDA_CHECK(cudaEventElapsedTime(&ms, begin, end));
+      return double(ms);
+    }, reload);
+    CUDA_CHECK(cudaEventDestroy(begin));
+    CUDA_CHECK(cudaEventDestroy(end));
+    std::cout << "{\"schema_version\":\"attention-paired-result-v2\",\"action\":\"paired\","
+              << "\"case_id\":" << json_quote(c.id) << ",\"reference_kind\":" << json_quote(r.reference_kind)
+              << ",\"correctness\":{\"all_true\":true,\"checked_before_warmup\":true,"
+              << "\"checked_after_reload\":true,\"gate_a_bitwise\":true,\"gate_b_linked\":true,"
+              << "\"gate_b_control\":true,\"gate_c_lse\":true,\"gate_stock\":"
+              << (r.reference_kind == "stock" ? "true" : "null") << "},"
+              << "\"scheduler_semaphore_memset_per_launch\":" << (c.msa ? "false" : "true")
+              << ",\"combine_per_launch\":" << (c.msa ? "true" : "false")
+              << ",\"oracle\":\"fp32-boundary-rows-all-heads\",\"pair\":";
+    pipelink::parity::write_json(std::cout, pair);
+    std::cout << "}\n";
+    return;
+  }
   p.reference(msa ? msa->selection() : nullptr);
   launch_linked();
   launch_control();
   CUDA_CHECK(cudaDeviceSynchronize());
   if (opts.seam_cost) {
-    // Different compiler schedules are allowed here: each image must satisfy
-    // the unchanged fp32 O/LSE oracle, not linked/control Gate A equality.
+    // The two images may differ in compiler schedule, so each is checked
+    // against the fp32 O/LSE oracle instead of Gate A bitwise equality.
     p.check(p.o.data, p.lse.data, "score-identity");
     p.check(control_o.data, control_lse.data, "no-score-seam");
     auto timings = time_absolute_pair(
@@ -461,6 +578,13 @@ int main(int argc, char** argv) {
     Options opts = parse_options(argc, argv);
     Case c = resolve_case(opts.cells_json, opts.cell);
     Request r = read_request();
+    if (r.paired()) {
+      if (opts.mode != "linked" || opts.timing != "parity" || opts.seam_cost)
+        throw std::runtime_error("paired action requires linked parity mode");
+      if (r.reference_kind == "stock" &&
+          (!std::ifstream(opts.cubin, std::ios::binary) || !std::ifstream(opts.meta)))
+        throw std::runtime_error("paired stock requires readable stock cubin and metadata");
+    }
     if (opts.seam_cost && r.action != "slot")
       throw std::runtime_error("--seam-cost requires action=slot");
     if (r.case_id != c.id) throw std::runtime_error("request case_id does not match --cell");

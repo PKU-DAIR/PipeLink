@@ -36,7 +36,7 @@ def _subject(record: dict[str, Any]) -> str:
 
 
 def build_correctness_record(record: dict[str, Any]) -> dict[str, Any]:
-    """Close a Gate-A/B/safety record under the plan's subject tolerance."""
+    """Finalize a Gate-A/B/safety record using the subject's tolerance."""
     result = deepcopy(record)
     result["schema_version"] = SCHEMA_VERSIONS["correctness"]
     result.setdefault("utc_time", utc_now())
@@ -99,7 +99,7 @@ def build_correctness_record(record: dict[str, Any]) -> dict[str, Any]:
         "subject_id": subject_id,
         "rtol": expected_rtol,
         "atol": expected_atol,
-        "plan_section": "§4.5" if subject_id == "family2" else "§2.1",
+        "plan_section": "family2-subject-tolerance" if subject_id == "family2" else "default-subject-tolerance",
     }
     result["all_true"] = gate_a["bitwise_identical"] and gate_b["passed"]
     return result
@@ -458,7 +458,7 @@ def _family2_predicate(result: dict[str, Any], resources: dict[str, Any]) -> dic
 
 
 def build_resource_record(record: dict[str, Any]) -> dict[str, Any]:
-    """Close an absolute-zero, narrow Family-1, or Family-2 resource record."""
+    """Finalize a resource record: absolute-zero, Family-1 cap-domain or Family-2 componentwise."""
     result = deepcopy(record)
     result["schema_version"] = SCHEMA_VERSIONS["resource"]
     result.setdefault("utc_time", utc_now())

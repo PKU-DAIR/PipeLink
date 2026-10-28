@@ -1,4 +1,4 @@
-"""Compiled-object evidence; symbol probing stays in the existing CUDA mechanism."""
+"""Facts read from the compiled object: symbols (via the shared CUDA symbol probe) and ELF launch attributes."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,7 +24,7 @@ class ObjectFacts:
 
 
 def parse_elf(text: str) -> tuple[int | None, tuple[int, int, int] | None]:
-    """Read CUDA ELF integer attributes, leaving absent LTO-only attributes absent."""
+    """Read the max-threads and cluster-shape ELF attributes; either may be absent (None) in LTO objects."""
     limits = []
     clusters = set()
     for match in re.finditer(r"Attribute:\s*(EIATTR_\w+)(.*?)(?=Attribute:|\Z)", text, re.DOTALL):
@@ -54,10 +54,10 @@ def parse_elf(text: str) -> tuple[int | None, tuple[int, int, int] | None]:
 
 def observe(object_path: Path, scratch: Path, seed: Mapping[str, str], env: Mapping[str, str],
             profile: Profile) -> ObjectFacts:
-    """Run the existing probe in isolation so its nested tempfiles stay in scratch.
+    """Run the symbol probe in a subprocess so its nested temporary files stay in scratch.
 
-    ``seed`` holds every import the stage declares (``symbols.import_seed``): seeded symbols are
-    resolved in one probe link, so only undeclared imports pay one probe link each.
+    ``seed`` holds every import the stage declares (``symbols.import_seed``). Seeded symbols
+    resolve in a single probe link; each undeclared import costs one extra probe link.
     """
     seed_path = scratch / "symbol-seed.json"
     seed_path.write_bytes(canonical_bytes(dict(seed)))

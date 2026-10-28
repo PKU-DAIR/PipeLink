@@ -1,0 +1,60 @@
+{
+  "natives": {
+    "fused": {
+      "source": "campaigns/coda/natives/sm103/native.cu",
+      "kernel": "coda_sm103_fused",
+      "std": "c++20",
+      "compile_flags": [
+        "--extended-lambda",
+        "--expt-relaxed-constexpr",
+        "-lineinfo"
+      ],
+      "includes": [
+        "third_party/mixture-of-kittens/third_party/ThunderKittens/include",
+        "pipec/src/pipec2/host/include"
+      ],
+      "defines": {
+        "KITTENS_BLACKWELL": "1",
+        "NDEBUG": "1"
+      },
+      "grid": "((M // 128) * (N // 256), 1, 1)",
+      "threads": 256,
+      "cluster": [
+        2,
+        1,
+        1
+      ],
+      "dyn_smem": 99328,
+      "arguments": "one by-value 512-byte NativeArgs (alignment 128): A map @0, B map @128, SM count i32 @256, stagger_ns u32 @260, output ptr @384, M/N/K i32 @392/396/400",
+      "stagger_ns": 22500
+    },
+    "unfused_gemm": {
+      "source": "campaigns/coda/natives/sm103/native.cu",
+      "kernel": "coda_sm103_unfused_gemm",
+      "std": "c++20",
+      "compile_flags": [
+        "--extended-lambda",
+        "--expt-relaxed-constexpr",
+        "-lineinfo"
+      ],
+      "includes": [
+        "third_party/mixture-of-kittens/third_party/ThunderKittens/include",
+        "pipec/src/pipec2/host/include"
+      ],
+      "defines": {
+        "KITTENS_BLACKWELL": "1",
+        "NDEBUG": "1"
+      },
+      "grid": "((M // 128) * (N // 256), 1, 1)",
+      "threads": 256,
+      "cluster": [
+        2,
+        1,
+        1
+      ],
+      "dyn_smem": 99328,
+      "arguments": "one by-value 640-byte GemmNativeArgs (alignment 128): A map @0, B map @128, SM count i32 @256, stagger_ns u32 @260, output ptr @384, M/N/K i32 @392/396/400, output tensor map @512",
+      "stagger_ns": 22500
+    }
+  }
+}

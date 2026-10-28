@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "m3-parity-pair-v2",
-  "title": "M3 archived attempted pair with adjudicated validity disjunction",
+  "title": "Parity archived attempted pair with adjudicated validity disjunction",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "case_id", "attempt", "order", "device", "protocol", "stream_map_sha256", "stream_classes", "inputs", "arguments", "correctness", "outputs", "telemetry", "original_valid", "original_discard_reasons", "amended_valid", "amended_discard_reasons", "pair_valid", "pair_discard_reasons", "validity_class", "ratio_linked_over_reference"],

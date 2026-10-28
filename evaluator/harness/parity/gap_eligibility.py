@@ -1,4 +1,8 @@
-"""Ratio-blind ex-ante solo eligibility and post-seal scoring for gap rows."""
+"""Gap-row eligibility and scoring.
+
+Eligibility comes from solo runs and is decided before any ratio is seen;
+scoring happens only after the result is sealed.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -52,7 +56,7 @@ SAMPLE_FIELDS = {
 
 
 class GapSoloError(RuntimeError):
-    """A required solo or bound-policy prerequisite failed the whole route."""
+    """A required solo run or GPU-policy check failed, so the whole gap-row route fails."""
 
 
 def canonical(value: Any) -> bytes:

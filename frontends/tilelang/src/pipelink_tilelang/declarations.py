@@ -1,12 +1,12 @@
-"""Author promises only; compiler geometry belongs to capture, never declarations."""
+"""Author promises; compiler geometry comes from capture."""
 from dataclasses import dataclass, fields, is_dataclass
 from types import MappingProxyType
 from collections.abc import Mapping
 from typing import Literal
 
 
-# Numeric facts and their containing records from the frozen probe .facts contract.
-# Names/role labels are shared vocabulary, not compiler measurements.
+# Numeric facts and their containing records from the captured .facts schema.
+# Names and role labels are shared vocabulary and stay allowed.
 FORBIDDEN_CAPTURE_KEYS = frozenset({
     "captures", "layouts", "branches", "barrier_schedule", "attrs", "allocations",
     "barrier_init", "barrier_init_annotation", "registers", "warp_scope", "offsets",
@@ -17,7 +17,7 @@ FORBIDDEN_CAPTURE_KEYS = frozenset({
     "warp_base", "warps", "set_max_nreg", "iteration", "barrier", "arrivals",
     "transaction_bytes", "guard",
 })
-# Family C facts are not present in arithmetic TIR, but are equally forbidden.
+# Facts of the family kernel: absent from arithmetic TIR, still compiler-supplied.
 FORBIDDEN_FAMILY_KEYS = frozenset({
     "warp", "initializer_warp", "physical_initializer_warp", "initializer_physical_warp",
     "extent", "align", "absolute_base", "stage_stride_bytes", "slots", "count",
@@ -123,12 +123,20 @@ class Endpoint:
 
 @dataclass(frozen=True, slots=True)
 class ParamField:
+    """One params member; ``elements`` declares a fixed 1-D array (``uint8_t aux[128]``)."""
     name: str
     cpp_type: str
+    elements: int | None = None
 
     def __post_init__(self):
         _text(self.name, "name")
         _text(self.cpp_type, "cpp_type")
+        _require(self.elements is None or (type(self.elements) is int and self.elements > 0),
+                 "elements", "expected a positive array element count")
+
+    @property
+    def declarator(self) -> str:
+        return f"{self.cpp_type} {self.name}" + (f"[{self.elements}]" if self.elements is not None else "")
 
 
 @dataclass(frozen=True, slots=True)

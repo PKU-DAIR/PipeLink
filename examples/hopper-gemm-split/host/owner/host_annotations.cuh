@@ -16,13 +16,12 @@ PL_HOST_SCALARS(1, pl::host::scalars(pl::host::roles({"gemm.load:load", "gemm.mm
     .field(pl::host::scalar(1, "gemm.M", "i64").caller("M"))
     .field(pl::host::scalar(2, "gemm.N", "i64").caller("N"))
     .field(pl::host::scalar(3, "gemm.K", "i64").caller("K")));
-// These descriptors are internal to load, which exposes only an smem endpoint.
-// There is no device gmem endpoint to bind and therefore no transfer report.
+// Load encodes these tensors' descriptors internally and exposes only an smem
+// endpoint, so no gmem endpoint is bound and no transfer is reported.
 PL_HOST_CHANNEL(1, uint16_t, pl::host::channel("gemm.a", "bf16").rank(2).read().caller("a"));
 PL_HOST_CHANNEL(2, uint16_t, pl::host::channel("gemm.b", "bf16").rank(2).read().caller("b"));
 PL_HOST_SCHEDULER(pl::host::scheduler("gemm.owner", "gemm.static-grid", pl::host::schema()));
-// Both stages are unkeyed; depth remains an ordinary link-time binding.
+// One unkeyed variant per stage; depth stays an ordinary link-time binding.
 PL_HOST_VARIANTS("gemm.load", pl::host::variants(std::vector<pl::fixed_bindings>{{}}));
 PL_HOST_VARIANTS("gemm.mma", pl::host::variants(std::vector<pl::fixed_bindings>{{}}));
-PL_HOST_TARGET();
 #endif

@@ -1,7 +1,6 @@
-"""Frozen M3 common-harness constants.
+"""Shared measurement-policy constants for the parity harness.
 
-The normative numeric values below define the shared measurement policy.
-Family code imports these values rather than restating measurement policy.
+Family code imports these values instead of defining its own.
 """
 from __future__ import annotations
 
@@ -51,8 +50,7 @@ GEMM_ATOL = 1.0e-3
 ATTENTION_RTOL = 2.0e-2
 ATTENTION_ATOL = 2.0e-2
 
-# Closed Gate-B tolerance table.
-# Callers identify the family/experiment; no local override.
+# Gate-B tolerances by family/experiment; callers cannot override them.
 CORRECTNESS_TOLERANCES = {
     "family1": (GEMM_RTOL, GEMM_ATOL),
     "family2": (ATTENTION_RTOL, ATTENTION_ATOL),
@@ -86,8 +84,8 @@ REQUIRED_LOCAL_BYTES = 0
 REQUIRED_SPILL_LOAD_BYTES = 0
 REQUIRED_SPILL_STORE_BYTES = 0
 
-# Absolute-zero default, narrow pre-performance Family-1 cap-domain exception,
-# and Family-2 componentwise comparator rule.
+# Resource-audit subjects: absolute zero by default, with a Family-1 cap-domain
+# exception and a Family-2 componentwise comparison.
 FAMILY1_RESOURCE_SUBJECT = "family1"
 ABSOLUTE_ZERO_RESOURCE_SUBJECTS = frozenset({
     "family1",
@@ -146,12 +144,12 @@ RESOURCE_AUDIT_FIELDS = (
     "occupancy",
 )
 
-# Preflight completeness/fail-closed fields.
+# Preflight completeness fields; a missing field fails the preflight.
 PREFLIGHT_HASH_CATEGORIES = ("inputs", "images", "catalogs", "configs")
 PREFLIGHT_COMPLETED_BEFORE_FREEZE = True
 PREFLIGHT_NO_TIMED_SLOT_FIRST = True
 
-# Fast protocol and one-level original-duration escalation.
+# Fast protocol, plus its single escalation to the original (longer) durations.
 SLOTS_PER_PAIR = 2
 WARMUPS_PER_IMAGE = 5
 SLOT_SECONDS = 3.0
@@ -189,8 +187,7 @@ NEGATIVE_LAUNCH_WARMUPS = 1000
 NEGATIVE_LAUNCH_BATCH_QUANTUM_MS = 100.0
 MIN_COVERING_SAMPLES_PER_SLOT = 2
 
-# Coordinate-ladder (sweep) protocol.  These identifiers are
-# additive and deliberately excluded from every frozen protocol allowlist.
+# Coordinate-ladder (sweep) protocol; excluded from every frozen protocol allowlist.
 SWEEP_PROTOCOL_NAME = "sweep"
 SWEEP_PROTOCOL_VARIANT = "sweep-v1"
 EXPERIMENT_ONLY_PROTOCOL_VARIANTS = frozenset({SWEEP_PROTOCOL_VARIANT})
@@ -242,7 +239,7 @@ ABSENT_PROBE_MARKERS = (
     "Unable to determine the device handle",
     "NVML_ERROR_GPU_IS_LOST",
 )
-# Expressly ineligible failover triggers.
+# Triggers that never justify failover to another GPU.
 INELIGIBLE_FAILOVER_TRIGGERS = (
     "slow-throughput",
     "changed-winner",
@@ -275,7 +272,7 @@ EXCLUDED_STEADY_PHASES = (
 )
 F3_UNFUSED_TIMED_LAUNCHES = 2
 
-# Mandatory smoke and outer-G7 rehearsal.
+# Mandatory smoke run and outer-G7 rehearsal.
 SMOKE_JOB_BUDGET_THRESHOLD_HOURS = 1.0
 SMOKE_VALID_PAIRS = 3
 SMOKE_ATTEMPT_CAP = 9

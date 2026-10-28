@@ -1,4 +1,4 @@
-"""Timing-only backward ablations; never modify delivered images or endorse unsafe variants."""
+"""Timing-only backward ablations on copies of the delivered images; ablated variants may be unsafe."""
 from __future__ import annotations
 import argparse
 import hashlib
@@ -74,11 +74,10 @@ def build(args):
                 for key in ("link", "linked", "one_tu"):
                     index[key] = str(original.parent / index[key])
                 index["providers"] = {k: str(original.parent / v) for k, v in index["providers"].items()}
-                # Both image slots use the same ablation, so the normal harness
-                # control checks harness noise, not correctness of the unsafe code.
+                # Both image slots load the ablation, so the harness's paired
+                # control measures harness noise only.
                 index["linked"] = index["one_tu"] = str(output)
-                # Runtime paths must remain absolute; evidence scrubbing is only
-                # for reports, not loader inputs.
+                # The loader needs absolute paths; only reports are scrubbed.
                 (view / "cell.json").write_text(json.dumps(index, indent=2) + "\n")
                 view_matrix["cells"].append({**row, "index": "cell.json"})
             (view / "matrix.json").write_text(json.dumps(view_matrix, indent=2) + "\n")
@@ -109,7 +108,7 @@ def reduce_trace(path):
                         "cluster": sorted({x["clusterX"] for x in values}),
                         "registers": sorted({x["registersPerThread"] for x in values}),
                         "local_memory_bytes": sorted({x["localMemoryPerThread"] for x in values})}
-    result["ratio"] = result["ablation"]["mean_ms"] / result["upstream"]["mean_ms"]
+    result["speedup_vs_upstream"] = result["upstream"]["mean_ms"] / result["ablation"]["mean_ms"]
     return result
 
 
@@ -167,7 +166,7 @@ def profile(args):
                 record_path = evidence / f"{tag}-profile.json"
                 if record_path.exists():
                     prior = json.loads(record_path.read_text())
-                    if "ratio" in prior and prior["clock"]["status"] == "PASS":
+                    if "speedup_vs_upstream" in prior and prior["clock"]["status"] == "PASS":
                         break
                     if any("contended=1" in line for line in prior.get("gpu_window_lines", [])):
                         attempt += 1

@@ -1,4 +1,4 @@
-"""F2 fast cross-source discarded-transition clock/mask classifier v2."""
+"""Classify clocks and throttle masks in the discarded transition window of F2 fast cross-source slots."""
 from __future__ import annotations
 
 import hashlib

@@ -75,8 +75,8 @@ def main():
                           "files": ["load.plink", "mma.plink", "provider.so", "gemm.h"]}))
         return
 
-    # This tree has only the published owner artifacts and the consumer's code.
-    # Compile/link inside it, and audit compiler dependencies against both private roots.
+    # Build the consumer in a tree holding only the published owner artifacts and the
+    # consumer's code, and check its compiler dependencies against both private roots.
     with tempfile.TemporaryDirectory(prefix="withheld-", dir=scratch) as temporary:
         tree = Path(temporary)
         shutil.copytree(owner, tree / "owner")
@@ -87,8 +87,8 @@ def main():
         shutil.copytree(tree / "consumer", out / "consumer", dirs_exist_ok=True)
         shutil.copytree(tree / "link", out / "link", dirs_exist_ok=True)
 
-    # As in dequant-splice's control: structural role-view types in generated
-    # dispatch are namespaced, while exact owner/consumer bodies retain C symbols.
+    # Same-source control: generated dispatch is namespaced because its role-view
+    # structs restate owner types; owner and consumer bodies keep their C symbols.
     link_dir = out / "link"
     link = json.loads((link_dir / "link.json").read_text())
     generated = link_dir / "generated"

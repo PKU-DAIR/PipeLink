@@ -1,29 +1,30 @@
 # Host ABI reference
 
-Host ABI v3 lets a stage owner ship a compiled host provider instead of source.
+Host ABI v3 lets a stage owner ship a compiled host provider in place of source.
 The owner's `query`/`build`/`release` code computes geometry and writes its own
 params, descriptors included, behind a neutral C ABI. Consumers never
 instantiate the owner's device templates; cross-owner facts flow through the
-manifest. A host fact is declared when the linker decides on it or another
+manifest. Declare a host fact only when the linker decides on it or another
 owner consumes it; everything else stays private to the owner.
 
 Host-bearing packages use manifest schema `3.0`, host ABI `linux-lp64-le-v2` and
-provider protocol `2`. The device entry ABI is unchanged. [T5](../tutorials/T5-host-abi.md)
-walks through a source-withheld owner; [Launching](launching.md) covers sessions.
+provider protocol `2`. Their device entry ABI is the same as for host-less
+stages. [Launching](launching.md) covers sessions.
 
 ## Host annotations
 
 Host contracts are declared in the stage's TU beside the device annotations and
-are inert outside the `PIPELINK_EMIT` pass. Use `PL_NO_PARAMS()` for the outer
-carrier: a host group owns its params through residue and shared scalars, not a
-raw stage blob. Include `pipelink_host_abi_v2.h` for the neutral ABI structs.
+are inert outside the `PIPELINK_EMIT` pass. A host group owns its params through
+residue and shared scalars, so its TU declares no `PL_PARAMS`/`PL_NO_PARAMS`:
+pack records empty params and rejects either one.
+Include `pipelink_host_abi_v2.h` for the neutral ABI structs.
 
 | Annotation | Declares |
 | --- | --- |
 | `PL_HOST_GROUP(owner, group, suffix, T, type_id, allocated)` | A params group served by four exports `pipelink_params_{abi,query,build,release}_<suffix>`; owner argument bytes and alignment come from `T`. `allocated=false` declares null/zero storage but keeps the type identity and alignment. |
 | `PL_HOST_ABI_TYPE(id, T, fields...)` | An owner public type: name, `sizeof`, `alignof` and offsets/sizes of 1–48 named fields. Declare owner-local and role-view types with explicit IDs. |
-| `PL_HOST_ABI_EMPTY(id, T)` | A type with no members (including C++ empty structs). |
-| `PL_HOST_RESIDUE(id, name, T, type_id, allocated, roles)` | Owner-written params bytes, including descriptors or strided views, read by `pl::host::roles({"stage.id:role", ...})`. |
+| `PL_HOST_ABI_EMPTY(id, T)` | A type with no members (including C++ empty structs). Not needed for an opaque residue type: `PL_HOST_RESIDUE` implies that row. |
+| `PL_HOST_RESIDUE(id, name, T, type_id, allocated, roles)` | Owner-written params bytes, including descriptors or strided views, read by `pl::host::roles({"stage.id:role", ...})`. Without a `PL_HOST_ABI_TYPE` for `type_id`, pack publishes `T` as an opaque row (`sizeof`, `alignof`, no members); a `PL_HOST_ABI_EMPTY` restating that row is rejected. |
 | `PL_HOST_SCALARS(id, builder)` | `pl::host::scalars(roles).field(scalar)` or `.fields(std::vector<scalar>)`; all groups' scalars merge into one shared scalar image. |
 | `PL_HOST_CHANNEL(id, StorageT, builder)` | `pl::host::channel(name, storage_dtype)` with `.logical(dtype)`, `.rank(n)`, access, a caller or workspace source and optional domain views `.peer(domain)`, `.multicast(domain)` or `.domain(domain)`. `sizeof(StorageT) * 8` must match the storage dtype, so logical `s4` can be stored in `uint8_t`. |
 | `PL_HOST_DOMAIN(id, name)` | A caller-named communication domain (`"tp"`, `"ep"`) the owner depends on; `query` and `build` receive its rank and world in `plk_common_v2.domains`. |
@@ -31,8 +32,8 @@ raw stage blob. Include `pipelink_host_abi_v2.h` for the neutral ABI structs.
 | `PL_HOST_TRANSFER(id, builder)` | `pl::host::transfer(name, channel).device(stage, endpoint).read()` or `.write()`: binds a channel transfer to a device endpoint. Descriptors used only inside the owner need no transfer. |
 | `PL_HOST_FACT(builder)` | `pl::host::fact(name)` with a typed value or `.variants(...)`, plus `.owner(name)`, `.stage(name)` and `.consumers(roles)`. |
 | `PL_HOST_SCHEDULER(builder)` | `pl::host::scheduler(owner, strategy, schema)` for the geometry authority, or `pl::host::scheduler(owner)` to reference it. |
-| `PL_HOST_VARIANTS(stage, builder)` | `pl::host::variants(std::vector<pl::fixed_bindings>)`: the complete variant inventory of a stage in this group. The current stage's variants come from `PL_VARIANT*`; an explicit inventory must agree. |
-| `PL_HOST_TARGET()` | Opts into the minimal `{target}` section, whose only digest is `dtypes`. |
+| `PL_HOST_VARIANTS(stage, builder)` | `pl::host::variants(std::vector<pl::fixed_bindings>)`: the complete variant inventory of a stage in this group. The current stage's variants come from `PL_VARIANT*`; an explicit entry for it (a group header shared by member TUs) must agree. |
+| `PL_HOST_TARGET()` | Opts a stage without a group or declarations into the minimal `{target}` section, whose only digest is `dtypes`. Groups and declarations imply it; pack rejects it beside them. |
 | `PL_HOST_DECLARATIONS(owner)` | Providerless facts and scheduler references with no runtime state. Mutually exclusive with `PL_HOST_GROUP`. |
 
 The `pl::host::` builders own their values; authors never write JSON.
@@ -77,7 +78,6 @@ PL_HOST_FACT(pl::host::fact("pipelink.f3.TileShape")
     .consumers({"pipelink.f3.integration", "pipelink.f3.user"}));
 PL_HOST_SCHEDULER(pl::host::scheduler("pipelink.f3.integration"));
 PL_HOST_VARIANTS("org.pipelink.dequant-splice.quant-load", host_variants());
-PL_HOST_TARGET();
 ```
 
 Annotations can use owner types, constants and helper functions, as above.
@@ -105,10 +105,10 @@ The C11/C++ header is `pipec/src/pipec2/host/include/pipelink_host_abi_v2.h`
 query/build/release sources with a generated ABI-report export into a shared
 object. Pass stable group-local IDs for the owner's argument, residue, role-view
 and pointer-reachable types only; pipec adds the neutral inventory and probes
-every layout with the provider's own compiler and flags. The report binds real
-`sizeof`, `alignof`, member offsets and sizes, layout digests, the dtype digest
-and the owner-contract digest; type names alone are not layouts. Link-time and
-open-time probes and the provider report must all agree with the manifest.
+every layout with the provider's own compiler and flags. The report binds the
+compiled `sizeof`, `alignof`, member offsets and sizes, layout digests, the
+dtype digest and the owner-contract digest. Link-time and open-time probes and
+the provider report must all agree with the manifest.
 
 ## What the link publishes
 
@@ -116,12 +116,12 @@ open-time probes and the provider report must all agree with the manifest.
 shared scalar image, each owner's residue offset, role views, resolved facts, the
 scheduler schema and inputs, and static launch constraints. Each transfer carries
 its bound endpoint's physical layout and its expanded completion-credit
-requirement. It does not publish a launch grid: the scheduler authority's `query`
-supplies geometry at open, checked against those constraints.
+requirement. The link publishes no launch grid: the scheduler authority's
+`query` supplies geometry at open, checked against those constraints.
 
 `host.target` holds only the public `dtypes` digest
 (`pipec2.host.profile.profile_digests(profile)`). Toolchain and driver identity
-are recorded as session provenance, not admitted against a list.
+are recorded as session provenance and are not checked against an allowlist.
 
 ## Scheduler schema
 
@@ -151,7 +151,7 @@ inputs and `.workspaces({ids...})` takes workspace IDs.
 
 The linker checks required and unknown inputs, leaf types, tuple arity, enum
 membership, pinned values, runtime-i32 constraints, hardware sources and fact
-agreement generically; there is no compiler-owned strategy table. Every stage
+agreement generically, without a compiler-owned strategy table. Every stage
 naming a strategy carries the same body and digest, and all references resolve
 to one authority. `allow_no_launch` permits empty invocations. Enum values travel
 as ordered `u64` indices; lowering them to owner C++ types stays in the owner's
@@ -160,7 +160,7 @@ header.
 ## Transfer reports
 
 An owner's `build` writes only its residue and returns one
-`plk_transfer_report_v2` per declared transfer. The broker never encodes or
+`plk_transfer_report_v2` per declared transfer; the broker neither encodes nor
 inspects descriptors. At open, `L-HOSTCHAN` checks each report against the
 manifest:
 
@@ -178,7 +178,7 @@ manifest:
   `plk_tma_tiled_detail_v2` matches the endpoint's byte-unit swizzle. Rank, box
   and strides are recorded, not checked.
 
-Reports are the owner's self-description, not proof of descriptor contents.
-Coordinate layout and order, and legal driver-encoder parameters, remain the
-owner's responsibility (`PLK_E_BUILD` on failure). Sessions publish the reports
+Reports are the owner's self-description and prove nothing about descriptor
+contents. Coordinate layout and order, and legal driver-encoder parameters, are
+the owner's responsibility (`PLK_E_BUILD` on failure). Sessions publish the reports
 and their check results with geometry and toolchain provenance.

@@ -109,23 +109,24 @@ struct mk_op_attn_partial_cute {
         parts[warp] = &workspace(s, warp);
       }
       if (lane == 0) s.record(megakernel::TEVENT_OUTPUT_READY);
+      // Four head groups share the warp. Rotate columns so their shared loads
+      // use disjoint banks despite the 64-float output row stride.
+      const int head = lane / 8;
+      float weights[pages];
+      const float lse = pipelink::cute_attention::merge_weights(parts, head, weights);
+      const int q_head = inst.kv_head * 4 + head;
 #pragma unroll
-      for (int head = 0; head < 4; ++head) {
-        float weights[pages];
-        const float lse = pipelink::cute_attention::merge_weights(parts, head, weights);
-        const int q_head = inst.kv_head * 4 + head;
-#pragma unroll
-        for (int column = lane; column < 64; column += 32) {
-          const float value = pipelink::cute_attention::merge_output(parts, weights, head * 64 + column);
-          if (g.skip_attn_reduction)
-            reinterpret_cast<Element*>(g.attn_out.raw_ptr)[q_head * 64 + column] = Element(value);
-          else
-            g.attn_out_intermediates.raw_ptr[(q_head * g.attn_out_intermediates.rows() +
-                                              inst.partition) * 64 + column] = value;
-        }
-        if (lane == 0 && !g.skip_attn_reduction)
-          g.attn_lse_intermediates.raw_ptr[q_head * g.attn_lse_intermediates.cols() + inst.partition] = lse;
+      for (int i = 0; i < 8; ++i) {
+        const int column = ((lane % 8) + 8 * head + 8 * i) % 64;
+        const float value = pipelink::cute_attention::merge_output(parts, weights, head * 64 + column);
+        if (g.skip_attn_reduction)
+          reinterpret_cast<Element*>(g.attn_out.raw_ptr)[q_head * 64 + column] = Element(value);
+        else
+          g.attn_out_intermediates.raw_ptr[(q_head * g.attn_out_intermediates.rows() +
+                                            inst.partition) * 64 + column] = value;
       }
+      if (lane % 8 == 0 && !g.skip_attn_reduction)
+        g.attn_lse_intermediates.raw_ptr[q_head * g.attn_lse_intermediates.cols() + inst.partition] = lse;
       __threadfence();
       __syncwarp();
       if (lane < 4) {
@@ -135,14 +136,13 @@ struct mk_op_attn_partial_cute {
           atomicAdd(&g.Bar[{inst.layer, opcode - 1, inst.kv_head * 4 + lane}], 1);
       }
       __syncwarp();
-      if (lane == 0) {
+      // Every lane read the workspaces; each releases the pages itself.
 #pragma unroll
-        for (int warp = 0; warp < pages; ++warp)
-          s.finish_page(s.pid(warp), mk_config::NUM_CONSUMER_WARPS);
-      }
+      for (int warp = 0; warp < pages; ++warp)
+        s.warp_finish_page(s.pid(warp), mk_config::NUM_CONSUMER_WARPS);
     }
   };
 };
 
 MK_DEFINE_OP_EXPORTS(attn_partial, 2, mk_op_attn_partial_cute,
-    mk_op_attn_partial_cute::pages, mk_op_attn_partial_cute::pages, 0, 0, false)
+    mk_op_attn_partial_cute::pages, mk_op_attn_partial_cute::pages, 0, 0)

@@ -96,13 +96,15 @@ def test_unsupported_parameter_names_the_index(workspace):
     assert "PL_TYPE" in compiled.stderr
 
 
-def test_registered_type_members_must_restate_layout(workspace):
+@pytest.mark.parametrize("define", [
+    "OMITTED_TYPE_MEMBER", "REORDERED_TYPE_MEMBERS", "EXTRA_TYPE_MEMBER", "DUPLICATE_TYPE_MEMBER",
+])
+def test_registered_type_names_every_member_once_in_declaration_order(workspace, define):
     _, compiled = _compile(
         workspace, "g++", [FIXTURES / "header_authoring.cpp", PACK / "runner.cpp"],
-        "misstated-type-members", defines=["MISSTATED_TYPE_MEMBERS"],
+        f"type-names-{define}", defines=[define],
     )
     assert compiled.returncode != 0
-    assert "PL_TYPE members" in compiled.stderr
 
 
 @pytest.mark.parametrize("foreign", [False, True], ids=["missing", "different-tu"])
@@ -195,23 +197,94 @@ def test_authoring_gaps_emit_params_and_registered_types(workspace, defines):
         assert params == {"kind": "params", "type": "Opaque", "bytes": 8, "align": 4, "members": [], "opaque": True}
     else:
         assert params == {"kind": "params", "type": "void", "bytes": 0, "align": 1, "members": []}
-    assert [record for record in records if record["kind"] == "type"] == [
-        {"kind": "type", "name": "Packet", "bytes": 16, "align": 16, "members": "alignas(16) unsigned values[4];"},
-        {"kind": "type", "name": "sample::nested::Token", "bytes": 4, "align": 4, "members": "unsigned value;"},
+    types = {record["name"]: record for record in records if record["kind"] == "type"}
+    assert types["Packet"] == {"kind": "type", "name": "Packet", "bytes": 16, "align": 16, "members": [
+        {"name": "values", "ctype": "uint32_t", "extent": 4, "offset": 0, "bytes": 16, "align": 4}]}
+    assert types["sample::nested::Token"]["members"] == [
+        {"name": "value", "ctype": "uint32_t", "extent": 0, "offset": 0, "bytes": 4, "align": 4}]
+    record = types["Record"]
+    assert (record["bytes"], record["align"]) == (64, 16)
+    assert [(m["name"], m["ctype"], m["extent"], m["offset"], m["align"]) for m in record["members"]] == [
+        ("head", "Packet", 0, 0, 16), ("tag", "char", 0, 16, 1), ("count", "int32_t", 0, 24, 8),
+        ("opaque", "const void*", 0, 32, 8), ("next", "Record*", 0, 40, 8),
+        ("token", "sample::nested::Token*", 0, 48, 8), ("tokens", "sample::nested::Token", 2, 56, 4),
     ]
-    packet = '#ifndef PACKET_DEFINED\n#define PACKET_DEFINED\nstruct Packet { alignas(16) unsigned values[4]; };\n#endif\n'
-    token = '#ifndef SAMPLE__NESTED__TOKEN_DEFINED\n#define SAMPLE__NESTED__TOKEN_DEFINED\nnamespace sample::nested { struct Token { unsigned value; }; }\n#endif\n'
-    declaration = packet + token + (
-        'extern "C" __device__ Packet plx_packet(const Packet&, Packet*, const Packet*, sample::nested::Token*);'
-    )
-    assert next(record for record in records if record["kind"] == "call")["declaration"] == declaration
-    assert next(record for record in records if record.get("name") == "packet")["declaration"] == declaration
+    declaration = next(record for record in records if record["kind"] == "call")["declaration"]
+    assert declaration.endswith(
+        'extern "C" __device__ Packet plx_packet(const Packet&, Packet*, const Packet*, sample::nested::Token*);')
     imported = next(record for record in records if record["kind"] == "tensor_import")
-    assert imported["declaration"] == packet + 'extern "C" __device__ void plx_pointer(Packet*);'
+    assert imported["declaration"].endswith('extern "C" __device__ void plx_pointer(Packet*);')
     assert imported["args"] == [{"name": "fragment", "meaning": "dest_fragment", "ctype": "Packet*"}]
     assert next(record for record in records if record["kind"] == "endpoint")["protocol"]["init"] == {
         "phase": 0, "materializer": "stage", "warp": 0,
     }
+
+
+AUTHORED_TYPES = """
+#include <cstdint>
+struct alignas(16) Packet { unsigned values[4]; };
+namespace sample::nested { class Token { public: unsigned value; }; }
+struct Record {
+  Packet head;
+  char tag;
+  alignas(8) int32_t count;
+  const void* opaque;
+  Record* next;
+  sample::nested::Token* token;
+  sample::nested::Token tokens[2];
+};
+"""
+
+
+@pytest.mark.parametrize("compiler", ["g++", "nvcc"])
+def test_published_type_prelude_round_trips_against_the_authored_definition(workspace, compiler):
+    binary, compiled = _compile(workspace, compiler, [FIXTURES / "header_authoring.cpp", PACK / "runner.cpp"],
+                                f"prelude-{compiler}")
+    assert compiled.returncode == 0, compiled.stderr
+    result = _run(workspace, binary)
+    assert result.returncode == 0, result.stderr
+    records = json.loads(result.stdout)["records"]
+    declaration = next(record for record in records if record.get("name") == "record" and record["kind"] == "export")
+    prelude = declaration["declaration"].replace("__device__ ", "")
+    asserts = "\n".join(line for line in prelude.splitlines() if line.startswith("static_assert("))
+    # One sizeof/alignof assertion per type, one offsetof assertion per member.
+    assert asserts.count("static_assert(") == (1 + 1) + (1 + 1) + (1 + 7)
+    path = workspace[0]
+    cases = {
+        # The printed definitions alone satisfy their own layout assertions.
+        "printed": "#include <cstdint>\n" + prelude + "\n",
+        # The authored definitions satisfy the same assertions without the guards.
+        "authored": AUTHORED_TYPES + asserts + "\n",
+        # A consumer holding the authored definitions skips the printed ones through the guards.
+        "guarded": AUTHORED_TYPES + "#define PACKET_DEFINED\n#define SAMPLE__NESTED__TOKEN_DEFINED\n"
+                   "#define RECORD_DEFINED\n" + prelude + "\n",
+    }
+    for name, text in cases.items():
+        source = path / f"prelude-{compiler}-{name}.cpp"
+        source.write_text(text, encoding="utf-8")
+        checked = subprocess.run(["g++", "-std=c++17", "-fsyntax-only", str(source)],
+                                 env=workspace[1], capture_output=True, text=True, timeout=60)
+        assert checked.returncode == 0, (name, checked.stderr)
+    # The assertions defend the layout: the same names without the over-alignment are rejected.
+    source = path / f"prelude-{compiler}-misaligned.cpp"
+    source.write_text(AUTHORED_TYPES.replace("struct alignas(16) Packet", "struct Packet") + asserts + "\n",
+                      encoding="utf-8")
+    checked = subprocess.run(["g++", "-std=c++17", "-fsyntax-only", str(source)],
+                             env=workspace[1], capture_output=True, text=True, timeout=60)
+    assert checked.returncode != 0
+
+
+@pytest.mark.parametrize("standard", ["c++17", "c++20"])
+def test_registered_type_capture_is_standard_independent(workspace, standard):
+    outputs = set()
+    for compiler in ("g++", "nvcc"):
+        binary, compiled = _compile(workspace, compiler, [FIXTURES / "header_authoring.cpp", PACK / "runner.cpp"],
+                                    f"standard-{compiler}-{standard}", extra=(f"-std={standard}",))
+        assert compiled.returncode == 0, compiled.stderr
+        result = _run(workspace, binary)
+        assert result.returncode == 0, result.stderr
+        outputs.add(result.stdout)
+    assert len(outputs) == 1
 
 
 @pytest.mark.parametrize("defines, diagnostic", [
@@ -416,6 +489,42 @@ def test_host_annotation_conflicts_are_pack_failures(host_registry, mutation):
     assert caught.value.failures[0].clause_id == "P-HOST"
 
 
+def test_host_group_implies_params_target_and_opaque_residue_row(host_registry):
+    from copy import deepcopy
+    from pipec2.host.abi import layout_digest
+    from pipec2.host.profile import dtypes_digest
+    from pipec2.model import PackError
+    from pipec2.pack.assemble import assemble
+
+    actual = assemble(host_registry)
+    assert actual["params"]["bytes"] == 0
+    assert actual["host"]["target"] == {"dtypes": dtypes_digest("sm_103a")}
+    # A residue whose type has no published row gets an opaque row of the same layout.
+    registry = deepcopy(host_registry)
+    registry["records"] = [row for row in registry["records"]
+                           if not (row["kind"] == "host_abi_type" and row["name"] == "HostResidue")]
+    host = assemble(registry)["host"]
+    row = next(row for row in host["provider"]["abi_types"] if row["id"] == 2)
+    assert (row["name"], row["bytes"], row["align"], row["fields"]) == ("HostResidue", 8, 8, [])
+    assert host["residue"]["layout_digest"] == layout_digest("HostResidue", 8, 8, {})
+
+    restatements = {
+        "params": {"kind": "params", "type": "void", "bytes": 0, "align": 1, "members": []},
+        "target": {"kind": "host_target", "name": ""},
+        "opaque_row": {"kind": "host_abi_type", "id": 2, "name": "HostResidue", "bytes": 8, "align": 8, "members": []},
+    }
+    for name, record in restatements.items():
+        registry = deepcopy(host_registry)
+        if name == "opaque_row":
+            registry["records"] = [row for row in registry["records"]
+                                   if not (row["kind"] == "host_abi_type" and row["name"] == "HostResidue")]
+        registry["records"].append(record)
+        with pytest.raises(PackError) as caught:
+            assemble(registry)
+        assert (caught.value.failures[0].clause_id, name) in {("P-MAP", "params"), ("P-HOST", "target"),
+                                                              ("P-HOST", "opaque_row")}
+
+
 @pytest.mark.parametrize("compiler", ["g++", "nvcc"])
 def test_host_annotations_are_inert(host_workspace, compiler):
     assert _host_emit(host_workspace, compiler, ("HOST_INERT",), emit=False) == ""
@@ -429,14 +538,13 @@ def test_native_and_one_shot_scheduler_annotations_roundtrip(workspace, compiler
     source.write_text(r'''
 #include <pipelink/stage.hpp>
 struct Params { int value; };
-extern "C" void fixture_native_role_load(const void*, unsigned) {}
+#define FIXTURE_SYMBOL(name) fixture_native_##name
+extern "C" void FIXTURE_SYMBOL(role_load)(const void*, unsigned) {}
 PL_STAGE("fixture.native", "1");
 PL_PARAMS(Params, value);
-PL_ROLE(load, fixture_native_role_load, 1);
+PL_ROLE(load, FIXTURE_SYMBOL(role_load), 1);
 PL_SCHEDULER_STRATEGY("clc-sm100-v1",
     R"(["swizzle_size","raster_order","cluster_shape_m","cluster_shape_n"])");
-PL_CLAIM("pipelink_full", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_empty", "mbarrier", 1, 1, "kernel");
 PL_CLAIM("pipelink_storage", "smem", 16, 8, "kernel");
 constexpr auto native_side = pl::side{"pipelink_full", {"load", "threads(load)"}, 0}
     .native(pl::barrier_storage{"pipelink_storage", 8, 8});
@@ -450,6 +558,13 @@ PL_ENDPOINT(ring, pl::endpoint("ring", pl::produce, "load")
     .layout(pl::affine{{1}, {1}, 64})
     .protocol(pl::mbarrier{native_side, {"pipelink_empty", {"load", 1}, 0}, {"load", 0, "stage"}})
     .ring(pl::fixed(1), 8).bind("full", "pipelink_full").bind("empty", "pipelink_empty"));
+// Its own slot handle backs native storage: the canonical slot claim stays as local backing.
+PL_CLAIM("pipelink_self_full", "mbarrier", 1, 1, "kernel");
+PL_ENDPOINT(self, pl::signal_endpoint("self", pl::produce, "load")
+    .protocol(pl::mbarrier{pl::side{"pipelink_self_full", {"load", 1}, 0}
+                               .native(pl::barrier_storage{"pipelink_self_full", 0, 16}),
+                           std::nullopt, {"load", 0, "stage"}, "never"})
+    .bind("full", "pipelink_self_full"));
 ''')
     binary, compiled = _compile(workspace, compiler, [source, PACK / "runner.cpp"], f"native-{compiler}")
     assert compiled.returncode == 0, compiled.stderr
@@ -463,6 +578,9 @@ PL_ENDPOINT(ring, pl::endpoint("ring", pl::produce, "load")
     assert endpoint.protocol.full.native.to_json_obj() == {
         "base": "pipelink_storage", "offset_bytes": 8, "stride_bytes": 8,
     }
+    # Symbols built by a macro are recorded after expansion.
+    assert manifest["stage"]["roles"]["load"]["entry"] == "fixture_native_role_load"
+    assert [claim.handle for claim in stage.claims if claim.domain == "mbarrier"] == ["pipelink_self_full"]
 
 
 @pytest.mark.parametrize("compiler", ["g++", "nvcc"])
@@ -478,8 +596,6 @@ extern "C" void fixture_signal_role_work(const void*, unsigned) {}
 PL_STAGE("fixture.signal", "1");
 PL_PARAMS(Params, value);
 PL_ROLE(work, fixture_signal_role_work, 1);
-PL_CLAIM("pipelink_once_full", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_reusable_full", "mbarrier", 2, 1, "kernel");
 PL_ENDPOINT(once, pl::signal_endpoint("once", pl::produce, "work")
     .protocol(pl::mbarrier{pl::side{"pipelink_once_full", {"work", 1}, 0},
                           std::nullopt, {"work", 0, "dispatch"}, "never"})

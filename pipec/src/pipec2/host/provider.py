@@ -19,13 +19,14 @@ def build_provider(sources: Sequence[str | Path], output: str | Path, *, owner: 
                    compiler: str = "g++", compile_flags: Sequence[str] = ()) -> list[dict]:
     """Compile query/build/release sources plus a generated ``abi`` export.
 
-    The returned exact ABI-type inventory goes into the owner manifest. The
-    generated report TU and layout probe use identical headers, compiler and
-    flags. No source-name hash or serialized object padding is treated as layout.
-    Caller sources must not define the generated ABI export themselves.
+    Returns the ABI-type inventory for the owner manifest. The generated report TU
+    and the layout probe use the same headers, compiler and flags; layout means
+    measured sizes, alignments and offsets only, never source-name hashes or padding
+    bytes. Caller sources must not define the ABI export themselves.
+
     type_ids covers only owner-local types; pipec supplies the neutral inventory.
-    profile is the owner's pipec2 target profile name; dtypes_digest binds
-    the owner's declared dtype table on that profile.
+    profile is the owner's pipec2 target profile name; dtypes_digest binds the
+    owner's declared dtype table on that profile.
     """
     if not re.fullmatch(r"[A-Za-z_]\w*", owner):
         raise ValueError("provider owner export suffix must be a C identifier")

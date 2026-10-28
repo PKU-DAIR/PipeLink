@@ -1,4 +1,4 @@
-"""Compile one annotated CUDA TU twice, never projecting it through host shims."""
+"""Compile one annotated CUDA TU twice: once as a host program that prints the registry, once as the LTO payload."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -56,7 +56,7 @@ def compile_registry(
     nvcc_flags: Sequence[str] = (), profile: str = "sm_103a", toolkit: str = "cuda-13.3.0",
     env: Mapping[str, str],
 ) -> Compilation:
-    """Emit registry first, then produce the single LTO payload for the same defines."""
+    """Emit the registry, then compile the LTO payload with the same defines."""
     from ..profile import get_profile
 
     selected = get_profile(profile)
@@ -78,14 +78,14 @@ def compile_registry(
     include_dir = package / "include"
     host_include_dir = package.parent / "host" / "include"
     compiler = cuda_home(env) / "bin" / "nvcc"
-    # Extra nvcc flags follow the fixed recipe so a stage may override e.g. -std=c++20.
+    # Extra nvcc flags come last so a stage can override the recipe, e.g. with -std=c++20.
     flags = ["-std=c++17", f"-I{include_dir}", f"-I{host_include_dir}", *(f"-I{path.resolve()}" for path in includes),
              *(f"-D{definition}" for definition in defines), *nvcc_flags]
     arch = selected.arch
     emit_flags = ["-x", "cu", "-DPIPELINK_EMIT", "--expt-relaxed-constexpr", "-gencode",
                   f"arch={arch.compute},code={arch.sm}", *flags]
-    # The payload recipe matches the linker's adapter compile and the one-TU parity control
-    # (-O3 -DNDEBUG): release asserts/traps in CUTLASS change register allocation across the seam.
+    # -O3 -DNDEBUG matches the linker's adapter compile and the single-TU parity control:
+    # CUTLASS asserts and traps left in a release build change register allocation across the seam.
     object_flags = ["-gencode", f"arch={arch.compute},code={arch.lto}", "-dc", "-rdc=true", "-O3", "-DNDEBUG", *flags]
     executable = scratch / "emit-0"
     object_path = scratch / "stage-0.o"

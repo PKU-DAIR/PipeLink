@@ -35,27 +35,11 @@ PL_CLAIM_EX(pl::claim("pipelink_attention_warp_core", "warp").extent(8).align(4)
 PL_CLAIM_REGS("pipelink_attention_regs_core_wg", "core_wg", {232}, "core");
 PL_CLAIM("pipelink_attention_smem_base", "smem", Facts::shared_bytes, Facts::shared_align, "kernel");
 PL_CLAIM("pipelink_attention_mbarrier_base", "mbarrier", Facts::pipeline_slots, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_q_full", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_q_empty", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_k_full", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_k_empty", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_v_full", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_v_empty", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_work_core_full", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_work_core_empty", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_work_epilogue_full", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_work_epilogue_empty", "mbarrier", 2, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_kv_index_full", "mbarrier", 4, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_kv_index_empty", "mbarrier", 4, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_corrected_o_full", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_corrected_o_empty", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_final_stats_full", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_final_stats_empty", "mbarrier", 1, 1, "kernel");
-PL_CLAIM("pipelink_attention_slots_o_drained_full", "mbarrier", 1, 1, "kernel");
 PL_CLAIM("pipelink_attention_warp_scheduler_wg1", "named_barrier", 1, 1, "kernel", "core");
 PL_CLAIM("pipelink_attention_warp_scheduler_wg2", "named_barrier", 1, 1, "kernel", "core");
 PL_CLAIM("pipelink_attention_epilogue_barrier", "named_barrier", 1, 1, "kernel", "core");
 PL_TOPOLOGY(pl::topology{1, pl::cluster{{1, 1, 1}, pl::launch{1, {1, 1, 1}}}, true, "static", {}});
+PL_ENTRY_RENDEZVOUS(0, Config::kThreads);
 
 PL_ENDPOINT(q, pl::endpoint("q", pl::consume, "core")
     .space("smem").scope("cta").proxy("async")
@@ -155,11 +139,7 @@ PL_ENDPOINT(final_stats, pl::endpoint("final_stats", pl::produce, "core")
     .bind("base", "pipelink_attention_smem_base")
     .bind("full", "pipelink_attention_slots_final_stats_full")
     .bind("empty", "pipelink_attention_slots_final_stats_empty"));
-PL_TYPE(pipelink_attention_sm90_work_desc,
-    int32_t q_block; int32_t batch; int32_t kv_head; int32_t kv_steps;
-    int32_t seqlen_q; int32_t seqlen_k; int32_t q_causal_offset;
-    int32_t split_idx; uint32_t flags; uint32_t qhead_per_kvhead;
-    int32_t mask_param; float score_param; float score_param_inv;);
+PIPELINK_SM90_WORK_DESC_PL_TYPE;
 PL_CALL(mask_mod, pipelink_call_mask_mod, pl::produce, "core", "mask_mod");
 #if !defined(PIPELINK_SM90_NO_SCORE_SEAM)
 PL_CALL(score_mod, pipelink_call_score_mod, pl::produce, "core", "score_mod");

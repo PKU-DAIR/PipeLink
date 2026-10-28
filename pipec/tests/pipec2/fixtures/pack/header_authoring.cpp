@@ -1,20 +1,42 @@
 #include <pipelink/stage.hpp>
+#include <cstdint>
 
 struct alignas(16) Packet { unsigned values[4]; };
 namespace sample::nested { class Token { public: unsigned value; }; }
-#if defined(MISSTATED_TYPE_MEMBERS)
-PL_TYPE(Packet, unsigned values[4];);
+// A nested registered type, an over-aligned member, pointers (to itself, to const void, to a
+// registered type) and an array of a registered type.
+struct Record {
+  Packet head;
+  char tag;
+  alignas(8) int32_t count;
+  const void* opaque;
+  Record* next;
+  sample::nested::Token* token;
+  sample::nested::Token tokens[2];
+};
+PL_TYPE(Packet, values);
+PL_TYPE(sample::nested::Token, value);
+#if defined(OMITTED_TYPE_MEMBER)
+PL_TYPE(Record, head, tag, count, opaque, next, token);
+#elif defined(REORDERED_TYPE_MEMBERS)
+PL_TYPE(Record, head, count, tag, opaque, next, token, tokens);
+#elif defined(EXTRA_TYPE_MEMBER)
+PL_TYPE(Record, head, tag, count, opaque, next, token, tokens, missing);
+#elif defined(DUPLICATE_TYPE_MEMBER)
+PL_TYPE(Record, head, tag, count, opaque, next, token, tokens, tag);
 #else
-PL_TYPE(Packet, alignas(16) unsigned values[4];);
+PL_TYPE(Record, head, tag, count, opaque, next, token, tokens);
 #endif
-PL_TYPE(sample::nested::Token, unsigned value;);
 
 extern "C" Packet plx_packet(const Packet&, Packet*, const Packet*, sample::nested::Token*);
 extern "C" void plx_pointer(Packet*);
+extern "C" void plx_record(Record*);
 extern "C" Packet plx_value(Packet);
-PL_EXPORT(packet, plx_packet);
 PL_EXPORT(pointer, plx_pointer);
 PL_EXPORT(value, plx_value);
+PL_EXPORT(record, plx_record);
+PL_INTERFACE(record, pl::interface{pl::cohort{32}, pl::collective::warp, {
+    pl::param{0, "smem", "rw", "u8", 64, pl::affine{pl::tree{{8}, {8}}, pl::tree{{8}, {1}}, 8}.swizzle(1, 4, 3, "byte")}}});
 PL_CALL(packet_call, plx_packet, pl::consume, "packet");
 PL_IMPORT_TENSOR(input, plx_pointer,
     (pl::identity{"value", "work", "v1", "f32", "exact", {{"m", 0, 1}}}),

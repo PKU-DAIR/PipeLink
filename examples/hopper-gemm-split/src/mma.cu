@@ -62,8 +62,8 @@ extern "C" __device__ void gemm_mma_role(const void* raw_params, unsigned) {
     cutlass::arch::ClusterBarrier::arrive(empty);
   }
 
-  // Like the sm90 attention core, materialize once into a declared smem channel.
-  // Unlike attention, keep f32: no cast or arithmetic is hidden in the seam.
+  // Store the accumulator once into the declared smem channel, still in f32, so
+  // the seam hides no cast or arithmetic.
   cutlass::arch::ClusterBarrier::wait(barrier(gemm_smem, pipelink_gemm_drained()), 1);
   auto* output = reinterpret_cast<float*>(gemm_smem + pipelink_gemm_output());
   CUTE_UNROLL
@@ -77,9 +77,7 @@ extern "C" __device__ void gemm_mma_role(const void* raw_params, unsigned) {
 }
 
 PL_STAGE("gemm.mma", "1.0.0");
-#if defined(GEMM_HOST_ABI) && GEMM_HOST_ABI
-PL_NO_PARAMS();
-#else
+#if !(defined(GEMM_HOST_ABI) && GEMM_HOST_ABI)
 PL_PARAMS(GemmMmaParams, K);
 #endif
 PL_ROLE(mma, gemm_mma_role, 8);

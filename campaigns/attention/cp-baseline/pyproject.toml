@@ -13,12 +13,12 @@ dependencies = [
   "setuptools==84.0.0",
   "wheel==0.48.0",
   "ninja==1.13.2",
-  "pybind11",
-  "onnxscript",
-  "onnx",
-  "pydantic",
-  "nvdlfw-inspect",
-  "pytest",
+  "pybind11==3.1.0",
+  "onnxscript==0.7.2",
+  "onnx==1.23.2",
+  "pydantic==2.13.5",
+  "nvdlfw-inspect==0.2.2",
+  "pytest==9.1.1",
 ]
 
 [[tool.uv.index]]

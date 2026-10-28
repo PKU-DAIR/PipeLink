@@ -1,4 +1,10 @@
-"""10 Hz covering clock sampler and the original/amended §2.4 predicates."""
+"""10 Hz clock sampler and the clock-validity predicates.
+
+In ``evaluate_clock_predicates`` a pair is valid under one of two branches:
+"original" allows only throttle-reason masks 0x0/0x1 and "amended" requires a
+steady SW power cap (0x4). Both also require enough covering samples, successful
+queries and clocks within 3% of the run median.
+"""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -61,9 +67,7 @@ def _parse_sample(line: str, timestamp_ns: int) -> ClockSample:
 
 
 def query_clock_support(gpu: int) -> dict[str, Any]:
-    """Fail closed unless the exact §2.4 active-reasons field is queryable."""
-    if gpu == 0:
-        raise ValueError("physical GPU 0 is forbidden by M3 G0/§2.5")
+    """Probe the GPU once; raise unless the throttle-reasons field is queryable."""
     command = [
         "nvidia-smi",
         "-i",
@@ -82,13 +86,11 @@ def query_clock_support(gpu: int) -> dict[str, Any]:
 
 
 class ClockSampler:
-    """One long-lived ``nvidia-smi --loop-ms=100`` process per case."""
+    """Sample clocks from one long-lived ``nvidia-smi --loop-ms=100`` process per case."""
 
     def __init__(self, gpu: int, field: str = CLOCK_REASON_FIELD) -> None:
-        if gpu == 0:
-            raise ValueError("physical GPU 0 is forbidden by M3 G0/§2.5")
         if field != CLOCK_REASON_FIELD:
-            raise ValueError(f"M3 requires exact telemetry field {CLOCK_REASON_FIELD}")
+            raise ValueError(f"clock telemetry requires exact field {CLOCK_REASON_FIELD}")
         self.gpu = gpu
         self.field = field
         self._process: subprocess.Popen[str] | None = None
@@ -190,12 +192,11 @@ def _clock_window_valid(rows: list[ClockSample], run_median: float | None) -> bo
 def evaluate_clock_predicates(
     windows: list[dict[str, tuple[int, int]]], samples: list[ClockSample]
 ) -> tuple[float | None, list[dict[str, Any]]]:
-    """Evaluate every attempt against one case-wide run median.
+    """Evaluate every attempted pair against one case-wide median clock.
 
-    ``windows`` has one item per attempted pair and exactly ``reference`` and
-    ``linked`` steady CUDA-event window bounds.  Only samples inside these
-    windows contribute to the run median, matching the covering-sample wording
-    of M3 §2.4.
+    ``windows`` has one entry per attempted pair, holding the ``reference`` and
+    ``linked`` steady-state CUDA-event window bounds. Only samples inside these
+    windows count toward the median.
     """
     covering_by_attempt: list[dict[str, list[ClockSample]]] = []
     all_covering: list[ClockSample] = []
@@ -252,7 +253,7 @@ def evaluate_clock_predicates(
         original_valid = not original_reasons
         amended_valid = not amended_reasons
         if original_valid and amended_valid:
-            raise AssertionError("§2.4 original-valid and amended-valid branches must be mutually exclusive")
+            raise AssertionError("original-valid and amended-valid branches must be mutually exclusive")
         pair_valid = original_valid or amended_valid
         evaluations.append({
             "run_median_clock_mhz": run_median,
@@ -278,7 +279,7 @@ def evaluate_clock_predicates(
 
 
 class GapPowerTelemetryError(RuntimeError):
-    """Required report-only power telemetry is absent or inconsistent."""
+    """Power telemetry required for the gap-row report is missing or inconsistent."""
 
 
 def _percentile(values: list[float], fraction: float) -> float:
@@ -350,7 +351,7 @@ def evaluate_gap_row_predicates(
     windows: list[dict[str, tuple[int, int]]],
     samples: list[ClockSample],
 ) -> list[dict[str, Any]]:
-    """Classify allowlisted gap rows using per-half own-median clock windows."""
+    """Classify allowlisted gap-row pairs, judging each half against its own median clock."""
     evaluations: list[dict[str, Any]] = []
     for pair_windows in windows:
         if set(pair_windows) != {"reference", "linked"}:

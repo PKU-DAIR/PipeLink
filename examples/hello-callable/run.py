@@ -48,7 +48,7 @@ def main() -> int:
     link = out / "link" / "link.json"
     controls = json.loads((out / "controls.json").read_text())
     images = {"linked": out / "link" / "pipeline.cubin", "one-tu": out / controls["one_tu"]}
-    # 64 MiB per array makes this a memory-throughput workload, not an empty-launch benchmark.
+    # 64 MiB per array, so timing measures memory throughput rather than launch overhead.
     inputs = np.random.default_rng(2026).uniform(-1.0, 1.0, COUNT).astype(np.float32)
     expected = inputs * np.float32(2.0)
     buffers = {"input": inputs, "output": np.zeros_like(inputs)}
@@ -80,7 +80,7 @@ def main() -> int:
     else:
         results["timing"] = {"status": "NOT_RUN_NUMERICAL_FAILURE"}
 
-    # Always run both tools on both images; --single prevents recursive sanitization.
+    # Always run both tools on both images; each child runs one --single launch.
     sanitizer = []
     for image in images:
         reports = sanitize(

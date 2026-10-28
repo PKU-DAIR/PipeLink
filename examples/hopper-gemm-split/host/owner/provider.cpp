@@ -117,8 +117,8 @@ extern "C" int pipelink_params_build_gemm(
     if (addresses[i] % 16) return PLK_E_RESOURCE;
   }
   // The broker makes the caller's CUDA context current before entering build.
-  // Tensor maps are inline values: no GPU allocation or provider session leaks
-  // when a later invocation supplies different scalar dimensions or resources.
+  // Tensor maps are inline values, so a later build with different dimensions or
+  // resources leaves no GPU allocation or provider session behind.
   CUcontext context = nullptr;
   if (cuCtxGetCurrent(&context) != CUDA_SUCCESS || !context) return PLK_E_RESOURCE;
   auto& residue = *new (out) GemmOwnerResidue{};

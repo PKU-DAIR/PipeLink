@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -88,8 +88,8 @@ def validate_request(request: Any, args: argparse.Namespace) -> tuple[dict[str, 
     if request.get("cuda_visible_device") != 0:
         raise SlotError("visible CUDA device must be 0")
     physical_gpu = request.get("physical_gpu")
-    if isinstance(physical_gpu, bool) or not isinstance(physical_gpu, int) or physical_gpu <= 0:
-        raise SlotError("physical_gpu must be a positive nonzero integer")
+    if isinstance(physical_gpu, bool) or not isinstance(physical_gpu, int) or physical_gpu < 0:
+        raise SlotError("physical_gpu must be a nonnegative integer")
     if os.environ.get("CUDA_VISIBLE_DEVICES") != str(physical_gpu):
         raise SlotError("CUDA_VISIBLE_DEVICES does not match request physical_gpu")
     if not isinstance(request.get("case_id"), str) or not request["case_id"]:
@@ -244,8 +244,15 @@ def parse_bench_output(
 
 
 def perform_slot(
-    request: dict[str, Any], args: argparse.Namespace, bundle: Path, workspace: Path, correctness: dict[str, Any]
+    request: dict[str, Any], args: argparse.Namespace, bundle: Path, workspace: Path, correctness: dict[str, Any],
+    *,
+    launcher: Callable[..., list[str]] | None = None,
+    run_command: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> dict[str, Any]:
+    if launcher is None:
+        launcher = launch_command
+    if run_command is None:
+        run_command = run_checked
     protocol = request["protocol"]
     slot_seconds = float(protocol["slot_seconds"])
     discard_seconds = float(protocol["leading_discard_seconds"])
@@ -253,7 +260,7 @@ def perform_slot(
     configured_quantum_ms = float(protocol["configured_batch_quantum_ms"])
 
     probe_out = workspace / "batch-probe"
-    probe_command = launch_command(args.pipeline, args.image, bundle, probe_out, "bench")
+    probe_command = launcher(args.pipeline, args.image, bundle, probe_out, "bench")
     probe_command.extend(
         [
             "--bench-seconds",
@@ -266,7 +273,7 @@ def perform_slot(
             str(args.pos_id),
         ]
     )
-    probe_completed = run_checked(probe_command, "single-token batch probe")
+    probe_completed = run_command(probe_command, "single-token batch probe")
     probe_batches = parse_bench_output(
         probe_completed,
         expected_tokens=1,
@@ -279,7 +286,7 @@ def perform_slot(
     )
 
     out = workspace / "bench"
-    command = launch_command(args.pipeline, args.image, bundle, out, "bench")
+    command = launcher(args.pipeline, args.image, bundle, out, "bench")
     command.extend(
         [
             "--bench-seconds",
@@ -292,7 +299,7 @@ def perform_slot(
             str(args.pos_id),
         ]
     )
-    completed = run_checked(command, "timed bench slot", timeout=slot_seconds + discard_seconds + 120.0)
+    completed = run_command(command, "timed bench slot", timeout=slot_seconds + discard_seconds + 120.0)
     batches = parse_bench_output(
         completed,
         expected_tokens=batch_tokens,

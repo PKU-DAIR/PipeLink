@@ -2,14 +2,15 @@
 
 Controllers execute per physical participant.  A collective issues only when all
 members of its declared warp are at the same instruction; shared rendezvous has
-separate arrivals and publication.  Payload integers are ghost identity indices,
-not runtime data or observations.  EMPTY denotes an unavailable copy.
+separate arrivals and publication.  Payload integers are ghost identity indices:
+they carry no runtime data and cannot be observed.  EMPTY denotes an unavailable copy.
 
 Operand cells are {resource, index, participant?}; index/participant may be C1
 expressions in participant, published bindings, and retained local metadata.
 SMEM indices are byte offsets; register indices are scalar positions.  The
 special borrowed source names are @export:reg and @export:smem.  TMEM is accessible
-only through complete packets in the issuing warp's own DP subpartition, never scalar edges or cross-warp DP reads.
+only through complete packets in the issuing warp's own DP subpartition (no scalar
+edges or cross-warp DP reads).
 Shared rounds use an address expression over participant and slot; each slot is
 one ordinary scalar transition, with no implicit rendezvous or atomic batching.
 """
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
 EMPTY = -1
 _ROUND_SCALARS = {"smem_store_round": "smem_store_scalar", "smem_load_round": "smem_load_scalar",
                   "reg_copy_round": "reg_copy"}
-MODEL_SEMANTICS = "tensor-machine-v6-memory-view-publication"
+MODEL_SEMANTICS = "tensor-machine-v7-immutable-binding-guards"
 
 
 def _constant(value: int, sort: str = "int") -> list[Any]:
@@ -86,7 +87,7 @@ def _option(profile: Any, name: str, default: Any) -> Any:
 def tmem_lane_count(profile: Any) -> int | None:
     """Physical TMEM lanes, or None when the target has no TMEM.
 
-    One rule for real and finite test profiles alike: a target has TMEM iff it states a
+    For real and finite test profiles alike, a target has TMEM iff it states a
     lane count (`Profile.tmem_lanes`; `tmem_dps`/`tmem_lanes` in a Mapping test profile).
     """
     return _option(profile, "tmem_dps", _option(profile, "tmem_lanes", None))
@@ -122,7 +123,7 @@ PRIMITIVES: Mapping[str, Primitive] = MappingProxyType({entry.family: entry for 
 
 
 def CATALOGUE(profile: Any) -> Mapping[str, Primitive]:
-    """The target catalogue, independent from candidate controller construction.
+    """The target catalogue, defined independently of candidate controller construction.
 
     `tmem_packet_receipt` exists only on a target with TMEM (`tmem_lane_count`).
     """
@@ -341,8 +342,8 @@ class Transition:
     detail: str = ""
 
 
-def is_static_expression(value: Any) -> bool:
-    """A closed expression recomputable from the physical participant alone."""
+def is_static_expression(value: Any, bindings=()) -> bool:
+    """A closed expression recomputable from participant and immutable bindings."""
     if isinstance(value, expr.Expr):
         value = expr.to_json_obj(value)
     if type(value) is int:
@@ -352,8 +353,8 @@ def is_static_expression(value: Any) -> bool:
     if value[0] == "coord":
         return len(value) == 2 and value[1] == "participant"
     if value[0] == "bind":
-        return False
-    return all(is_static_expression(arg) for arg in value[1:])
+        return len(value) == 2 and value[1] in bindings
+    return all(is_static_expression(arg, bindings) for arg in value[1:])
 
 
 def _values(domain: expr.Domain) -> tuple[int, ...] | range:
@@ -499,7 +500,7 @@ class Instance:
             if resource.domain in {"smem", "barrier"} and resource.scope != "cta" or resource.domain == "reg" and resource.scope != "thread":
                 raise ModelError([f"resource {resource.name!r} scope has no initial-model storage interpretation"])
             if resource.name in derived.readonly_storage:
-                continue  # owner backing: covered by the source-stability premise, not a lend lifetime
+                continue  # owner backing is covered by the source-stability premise
             if resource.lifetime["from"] not in {export.readiness.after, *(site.invocation for site in sites)}:
                 raise ModelError([f"resource {resource.name!r} start event has no finite invocation/readiness interpretation"])
             if f"resource_{resource.name}_available_until_{imp.completion}" not in derived.assumptions:
@@ -756,7 +757,7 @@ class Instance:
             for pc, node in enumerate(graph.nodes):
                 if isinstance(node, ir.Meta):
                     key = (site, node.dest)
-                    static_metadata[key] = static_metadata.get(key, True) and is_static_expression(node.expr)
+                    static_metadata[key] = static_metadata.get(key, True) and is_static_expression(node.expr, self.derived.binding_domains)
                 elif isinstance(node, ir.Issue) and node.primitive == "observe_ready":
                     static_metadata[site, node.operands.get("dest")] = False
                 if isinstance(node, ir.Return) and node.results and not set(node.results) <= demand_set:
@@ -813,7 +814,7 @@ class Instance:
         """Conservative exact-address footprint, including control and lifetimes.
 
         A future instruction depending on mutable metadata is not projected:
-        callers must retain every interleaving rather than guess its address.
+        callers must keep every interleaving instead of guessing its address.
         Read/read overlap is conservatively considered dependent.
         """
         if pc < 0:
@@ -1434,9 +1435,9 @@ class Instance:
         if count == 0:
             return ()
         members = self.participants[site.name]
-        # The only participant occurrence below is floor(participant/warp_size):
-        # one representative per physical warp is therefore an exact quotient
-        # for operand range/uniformity checking, not an execution reduction.
+        # The only participant occurrence below is floor(participant/warp_size),
+        # so one representative per physical warp is an exact quotient for
+        # operand range/uniformity checking (execution is not reduced).
         representatives = tuple(min(member for member in members if member // self.warp_size == warp)
                                 for warp in sorted({member // self.warp_size for member in members}))
         domains = {**self._binding_domains(), "participant": expr.Domain("participant", "int", values=representatives)}
@@ -1481,8 +1482,8 @@ class Instance:
     def _round_addresses(self, site: Site, width: int, name: str, extent: int) -> tuple[Any, ...]:
         """Finite public-contract algebra plus flat/xor/cyclic bank addresses.
 
-        These are operand expressions, not schedules or witness programs.  Full
-        private-bank rounds remain scalar-interleaved in the execution model.
+        These are operand expressions only.  Full private-bank rounds stay
+        scalar-interleaved in the execution model.
         """
         key = (site.name, width, name)
         if key in self._round_address_cache:
@@ -1503,8 +1504,8 @@ class Instance:
             candidates.append(flatten(["toint", ["bxor", ["tobits", bits, participant], ["cbits", bits, 1 << bit]]], position))
 
         # Join the published demand coordinate expressions to a published source
-        # placement.  This common coordinate-projection case is algebraic; no
-        # T5/T6 construction, matching result, or preselected controller is used.
+        # placement.  This common coordinate-projection case is purely algebraic:
+        # it uses no construction, matching result or preselected controller.
         for demand in self.imp.demands:
             if demand.kind != "positions" or demand.participant.op != "coord" or demand.position.op != "coord":
                 continue
@@ -1791,7 +1792,7 @@ class Instance:
         }
 
     def static_region(self, *, families: frozenset[str] | None = None) -> dict[str, Any]:
-        """Legacy private projection or compact conditional native transition model."""
+        """Private scalar projection for one ready register-only actor, else the compact conditional native transition model."""
         if self.demand_kind == "memory_view":
             return {"ok": False, "kind": "memory-view", "prerequisite": "memory views use the checked constructive classes"}
         if len(self.actors) != 1 or not self.ready_at_entry or len(self.worlds) != 1:

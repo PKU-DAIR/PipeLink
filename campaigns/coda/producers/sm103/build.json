@@ -1,0 +1,33 @@
+{
+  "sources": [
+    "campaigns/coda/producers/sm103/producer.cu"
+  ],
+  "includes": [
+    "third_party/mixture-of-kittens/third_party/ThunderKittens/include",
+    "pipec/src/pipec2/host/include"
+  ],
+  "defines": {
+    "KITTENS_BLACKWELL": "1",
+    "NDEBUG": "1"
+  },
+  "std": "c++20",
+  "compile_flags": [
+    "--extended-lambda",
+    "--expt-relaxed-constexpr",
+    "-lineinfo"
+  ],
+  "profile": "sm_103a",
+  "host_group": "coda.sm103.params",
+  "provider": {
+    "build": [
+      "uv",
+      "run",
+      "--project",
+      "pipec",
+      "python",
+      "campaigns/coda/producers/sm103/build.py"
+    ],
+    "artifact": "campaigns/coda/producers/sm103/out/provider.so",
+    "header": "campaigns/coda/producers/sm103/provider.h"
+  }
+}

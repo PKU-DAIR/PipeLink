@@ -13,10 +13,10 @@ class SoloCadenceError(RuntimeError):
 
 @dataclass
 class SoloRefreshCadence:
-    """Monotonic, schedule-only FAST solo refresh state.
+    """Refresh schedule for FAST solo blocks, driven only by monotonic time.
 
-    Eligibility and throughput are intentionally absent from this interface: a caller
-    can refresh only because elapsed monotonic time reached the fixed cadence.
+    A refresh becomes due when the fixed cadence has elapsed. The interface takes
+    no eligibility or throughput input, so results cannot trigger a refresh.
     """
 
     initial_branches: dict[str, str]

@@ -1,4 +1,5 @@
 .env
+.env.backup-*
 checkpoints/
 
 /profile/
@@ -40,6 +41,7 @@ __pycache__/
 # new authored files there need `git add -f`)
 results/
 !/campaigns/attention/results/
+!/campaigns/coda/results/
 evidence/
 linked/
 audit-rc/

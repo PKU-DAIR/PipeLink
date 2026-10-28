@@ -1,4 +1,4 @@
-"""Encode CUDA tiled tensor maps after the caller makes a context current."""
+"""Encode CUDA tiled tensor maps; the caller must make a CUDA context current first."""
 from __future__ import annotations
 
 import ctypes as C
@@ -11,9 +11,9 @@ def encode_tiled(address: int, *, dtype: int, dims: Sequence[int],
     """Return a 128-byte CUtensorMap using CUDA enum values.
 
     Dimensions are innermost-first; strides omit the contiguous first dimension.
-    Element strides are one, interleave is NONE, and the defaults are L2_256B
-    and NONE OOB fill. CUDA validates addresses, extents and layout constraints.
-    No driver library is loaded at module import time.
+    Element strides are one and interleave is NONE; ``l2_promotion`` defaults to
+    L2_256B and ``oob`` to no fill. CUDA itself validates addresses, extents and
+    layout. The driver library is loaded when called, not at import.
     """
     rank = len(dims)
     if not 1 <= rank <= 5 or len(strides_bytes) != rank - 1 or len(box) != rank:

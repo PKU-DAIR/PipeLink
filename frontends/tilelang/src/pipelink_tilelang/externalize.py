@@ -1,12 +1,13 @@
 """Structural role selection and contract-driven TileLang CUDA externalization."""
 from dataclasses import dataclass
 import hashlib
+from math import prod
 
 from tilelang import tvm
 from tilelang.cuda.codegen import build_cuda_without_compile
 
 from .annotate import AnnotationError
-from .external import ExternalBarrier, ExternalStorage, ExternalThreadBase
+from .external import ExternalBarrier, ExternalStorage, ExternalThreadBase, NativeStorage
 
 
 tir = tvm.tirx
@@ -84,17 +85,43 @@ def _barrier_operands(call, address, *, pointer=None):
     value = tir.stmt_functor.ir_transform(tir.Evaluate(call), address_of, replace, ["tirx.Call", "tirx.BufferLoad"]).value
     return value, rewritten
 
+def _local_barrier(buffer, initializers, handle, offset=0):
+    """Capture a compiler-owned barrier array using the shared native-storage convention."""
+    counts = {int(call.args[1]) for call in initializers
+              if isinstance(call.args[0], tir.BufferLoad)
+              and call.args[0].buffer.data.same_as(buffer.data)}
+    _require(len(counts) == 1, "internal_storage.barrier",
+             f"{buffer.name}: expected a uniform captured arrive count")
+    slots = prod(int(value) for value in buffer.shape)
+    return ExternalBarrier(buffer.name, "full", handle,
+                           NativeStorage(handle, 1, offset, 8),
+                           slots, counts.pop(), "keep", 0)
 
-def _storage_bind(node, handles, offsets, dyn=None):
+
+def _smem_offset(handle, offset=0):
+    """A solved shared-memory byte offset plus the plane's constant origin within it."""
+    base = tir.call_extern("int32", handle)
+    return base + offset if offset else base
+
+
+def _bind_smem(var, arena, handle, offset=0):
+    """Bind an existing storage variable to a claimed shared-memory byte offset."""
+    return tir.Bind(var, tir.call_intrin("handle", "tirx.handle_add_byte_offset",
+                                       arena.data, _smem_offset(handle, offset)))
+
+
+def _storage_bind(node, handles, counts, dyn=None, origins=None):
+    """Rebind a merged-arena plane to ``dyn + solved(handle) + origin``."""
     if node.var.name not in handles:
         return None
     value = node.value
     _require(isinstance(value, tir.Call) and _op_name(value) == "tirx.handle_add_byte_offset"
              and isinstance(value.args[1], tir.IntImm), "split.smem", node.var.name)
-    offsets[node.var.name] += 1
+    counts[node.var.name] += 1
+    origin = (origins or {}).get(node.var.name, 0)
     return tir.Bind(node.var, tir.Call(value.dtype, value.op,
                     [value.args[0] if dyn is None else dyn.data,
-                     tir.call_extern("int32", handles[node.var.name])]))
+                     _smem_offset(handles[node.var.name], origin)]))
 
 
 def _prune(body):
@@ -147,7 +174,10 @@ def _role_function(func, body, name, declared_params):
     _require(set(names) == set(declared_params), "split.params", f"{names} != {declared_params}")
     descriptor_indices = [i for i, param in enumerate(params) if _uses(param, [ptr for _, ptr, _ in replacements])]
     attrs = dict(func.attrs.items())
-    attrs.update({"global_symbol": name, "tl.readonly_param_indices": descriptor_indices,
+    readonly_names = {func.params[int(i)].name for i in attrs.get("tl.readonly_param_indices", ())}
+    readonly_indices = sorted(set(descriptor_indices) |
+                              {i for i, param in enumerate(params) if param.name in readonly_names})
+    attrs.update({"global_symbol": name, "tl.readonly_param_indices": readonly_indices,
                   "tl.device_function": True})
     buffer_map = {param: buffer for param, buffer in func.buffer_map.items() if _uses(param, params)}
     role = tir.PrimFunc(params, body, ret_type=func.ret_type, buffer_map=buffer_map).with_attrs(attrs)
@@ -331,10 +361,10 @@ def externalize_role(module, *, role: str, warp_range: tuple[int, int] | None,
     A role compiled at warp ``lo`` and linked at solved warp ``base()`` keeps
     its compiled thread coordinates: ``tx -> tx - base()*32 + lo*32``.
 
-    Whole-CTA syncs and TileLang's reserved id-3 partial syncs are rebound;
-    explicit partner named barriers retain their id/count. This pin allocates
-    partial ids starting at kFirstUsedBarrier (thread_storage_sync.cc:349-351);
-    id 3 is the generated first role-local synchronization domain.
+    Whole-CTA syncs and TileLang's id-3 partial syncs are rebound; explicit
+    partner named barriers keep their id and count. The pinned TileLang numbers
+    partial syncs from kFirstUsedBarrier (thread_storage_sync.cc:349-351), so
+    id 3 is the first generated role-local synchronization domain.
     """
     funcs = list(module.functions.values())
     _require(len(funcs) == 1 and isinstance(funcs[0], tir.PrimFunc), "split.module", "expected one PrimFunc")
@@ -464,12 +494,11 @@ def externalize_role(module, *, role: str, warp_range: tuple[int, int] | None,
                                native.offset_bytes, native.stride_bytes, slot)
 
     handles = {name: item.handle for name, item in storage.items()}
+    origins = {name: item.offset_bytes for name, item in storage.items()}
 
     def bind_storage(var, record):
         offsets[record.buffer] += 1
-        pointer = tir.call_intrin("handle", "tirx.handle_add_byte_offset", dyn.data,
-                                 tir.call_extern("int32", record.handle))
-        return tir.Bind(var, pointer)
+        return _bind_smem(var, dyn, record.handle, record.offset_bytes)
 
     columns = {name: item.column_handle for name, item in storage.items()
                if item.space == "tmem" and item.column_handle is not None}
@@ -495,14 +524,14 @@ def externalize_role(module, *, role: str, warp_range: tuple[int, int] | None,
                     count += 1
             return tir.Call(value.dtype, value.op, args) if count else None
         if isinstance(node, tir.BufferLoad) and node.buffer.data.name in columns:
-            # Load at the original use, after the caller's publish handshake;
-            # eagerly copying the word at allocation time can read it too soon.
+            # Load at each use, after the caller's publish handshake; reading
+            # the word at allocation time could precede its publication.
             return node + tir.Cast(node.dtype, tir.call_extern("int32", columns[node.buffer.data.name]))
         if isinstance(node, tir.Bind) and node.var.name in storage:
             record = storage[node.var.name]
             if record.space == "tmem":
                 return bind_storage(node.var, record)
-            return _storage_bind(node, handles, offsets, dyn)
+            return _storage_bind(node, handles, offsets, dyn, origins)
         if isinstance(node, tir.AllocBuffer):
             buffer = node.buffer
             record = storage.get(buffer.name) or storage.get(buffer.data.name)

@@ -11,13 +11,19 @@ from .model import (
     BarrierSide,
     BarrierStorage,
     CallDecl,
+    CallInterface,
+    CallParam,
+    CallSite,
     Claim,
     ClauseFailure,
     ClusterConstraints,
+    Cohort,
+    Collectives,
     CounterDecl,
     Depth,
     DescriptorDecl,
     Endpoint,
+    EntryRendezvous,
     Export,
     Extent,
     Handle,
@@ -43,6 +49,8 @@ from .model import (
     TensorLifetime,
     Tile,
     TxSum,
+    TypeDecl,
+    TypeMember,
     Variant,
 )
 from .profile import Profile, ProfileError, get_profile
@@ -91,6 +99,8 @@ _COUNTER_ACQUIRES = {
     "system": ("ld.acquire.sys", "ld.relaxed.sys+fence.acquire.sys"),
 }
 _PROXIES = frozenset({"async", "generic"})
+_CALL_SPACES = frozenset({"smem", "gmem", "generic", "local", "value"})
+_CALL_ACCESS = frozenset({"r", "w", "rw"})
 
 
 def _reject(clause_id: str, path: str, message: str, **detail: Any) -> NoReturn:
@@ -246,9 +256,8 @@ def _target_stamp(value: Any, path: str = "$.pipelink_abi") -> tuple[TargetStamp
         raise SchemaError(failures) from exc
     lto_arch = _string(target["lto_arch"], f"{path}.target.lto_arch", "L-TOPO")
     toolkit = _string(target["toolkit"], f"{path}.target.toolkit", "L-TOPO")
-    # D-ARCH: stages built on the explicit compute_*a/lto_*a adapter route carry
-    # that arch honestly next to the neutral lto_*; composition compatibility is
-    # checked at link (T-NATIVE), never silently substituted.
+    # Stages built on the explicit compute_*a/lto_*a adapter route record that arch;
+    # others record the neutral lto_*. Link checks composition compatibility (T-NATIVE).
     admitted_lto = {profile.arch.lto_base, profile.arch.lto}
     if lto_arch not in admitted_lto:
         _reject(
@@ -302,6 +311,105 @@ def _object_map(value: Any, path: str, clause_id: str) -> dict[str, Any]:
     return value
 
 
+def _cohort(value: Any, path: str) -> Cohort:
+    obj = _object(value, path, "L-CALL", required=("threads",))
+    return Cohort(_integer(obj["threads"], f"{path}.threads", "L-CALL", positive=True))
+
+
+def _call_params(value: Any, path: str) -> tuple[CallParam, ...]:
+    result: list[CallParam] = []
+    for position, item in enumerate(_array(value, path, "L-CALL")):
+        item_path = f"{path}[{position}]"
+        obj = _object(item, item_path, "L-CALL", required=("index", "space", "access", "dtype", "extent"),
+                      optional=("layout",))
+        space = _string(obj["space"], f"{item_path}.space", "L-CALL")
+        if space not in _CALL_SPACES:
+            _reject("L-CALL", f"{item_path}.space", "unknown callable parameter space", actual=space)
+        access = _string(obj["access"], f"{item_path}.access", "L-CALL")
+        if access not in _CALL_ACCESS:
+            _reject("L-CALL", f"{item_path}.access", "callable parameter access must be r, w or rw", actual=access)
+        layout = None
+        if "layout" in obj:
+            if space != "smem":
+                _reject("L-CALL", f"{item_path}.layout", "only shared-memory parameters state a layout")
+            layout = load_layout(obj["layout"], space, f"{item_path}.layout")
+        result.append(CallParam(
+            _integer(obj["index"], f"{item_path}.index", "L-CALL", nonnegative=True), space, access,  # type: ignore[arg-type]
+            _string(obj["dtype"], f"{item_path}.dtype", "L-CALL"),
+            _integer(obj["extent"], f"{item_path}.extent", "L-CALL", positive=True), layout,
+        ))
+    indices = [param.index for param in result]
+    if len(set(indices)) != len(indices):
+        _reject("L-CALL", path, "callable parameter indices must be unique")
+    return tuple(sorted(result, key=lambda param: param.index))
+
+
+def _call_interface(value: Any, path: str) -> CallInterface:
+    obj = _object(value, path, "L-CALL", required=("cohort", "collectives", "params"))
+    collectives_path = f"{path}.collectives"
+    collectives_obj = _object(obj["collectives"], collectives_path, "L-CALL", required=("kind",), optional=("handle",))
+    kind = _string(collectives_obj["kind"], f"{collectives_path}.kind", "L-CALL")
+    if kind not in {"none", "warp", "named", "cta"}:
+        _reject("L-CALL", f"{collectives_path}.kind", "unknown collective kind", actual=kind)
+    if ("handle" in collectives_obj) != (kind == "named"):
+        _reject("L-CALL", collectives_path, "exactly named collectives carry a barrier handle")
+    handle = _handle_name(collectives_obj["handle"], f"{collectives_path}.handle") if kind == "named" else None
+    cohort = _cohort(obj["cohort"], f"{path}.cohort")
+    if kind == "warp" and cohort.threads != 32:
+        _reject("L-CALL", f"{path}.cohort.threads", "warp collectives require a 32-thread cohort")
+    return CallInterface(cohort, Collectives(kind, handle), _call_params(obj["params"], f"{path}.params"))  # type: ignore[arg-type]
+
+
+def _call_site(value: Any, path: str) -> CallSite:
+    obj = _object(value, path, "L-CALL", required=("cohort", "params"))
+    return CallSite(_cohort(obj["cohort"], f"{path}.cohort"), _call_params(obj["params"], f"{path}.params"))
+
+
+def _types(value: Any, path: str) -> tuple[TypeDecl, ...]:
+    items = _array(value, path, "L-SYM")
+    result: list[TypeDecl] = []
+    for position, item in enumerate(items):
+        item_path = f"{path}[{position}]"
+        obj = _object(item, item_path, "L-SYM", required=("name", "bytes", "align", "members"))
+        size = _integer(obj["bytes"], f"{item_path}.bytes", "L-SYM", positive=True)
+        members: list[TypeMember] = []
+        for index, member in enumerate(_array(obj["members"], f"{item_path}.members", "L-SYM", nonempty=True)):
+            member_path = f"{item_path}.members[{index}]"
+            fields = _object(member, member_path, "L-SYM",
+                             required=("name", "ctype", "extent", "offset", "bytes", "align"))
+            entry = TypeMember(
+                _identifier(fields["name"], f"{member_path}.name", "L-SYM"),
+                _string(fields["ctype"], f"{member_path}.ctype", "L-SYM"),
+                _integer(fields["extent"], f"{member_path}.extent", "L-SYM", nonnegative=True),
+                _integer(fields["offset"], f"{member_path}.offset", "L-SYM", nonnegative=True),
+                _integer(fields["bytes"], f"{member_path}.bytes", "L-SYM", positive=True),
+                _power_of_two(fields["align"], f"{member_path}.align", "L-SYM"),
+            )
+            if members and entry.offset < members[-1].offset + members[-1].bytes or entry.offset + entry.bytes > size:
+                _reject("L-SYM", member_path, "type members must be disjoint, in offset order and inside the type")
+            members.append(entry)
+        result.append(TypeDecl(_string(obj["name"], f"{item_path}.name", "L-SYM"), size,
+                               _power_of_two(obj["align"], f"{item_path}.align", "L-SYM"), tuple(members)))
+    names = [item.name for item in result]
+    if names != sorted(set(names)):
+        _reject("L-SYM", path, "types are unique and sorted by name")
+    return tuple(result)
+
+
+def _entry_rendezvous(value: Any, path: str, roles: dict[str, Role]) -> EntryRendezvous:
+    obj = _object(value, path, "L-JOIN", required=("barrier", "threads"))
+    if not roles:
+        _reject("L-JOIN", path, "role-less stages do not declare an entry rendezvous")
+    barrier = _integer(obj["barrier"], f"{path}.barrier", "L-JOIN", nonnegative=True)
+    if barrier != 0:
+        # Named-barrier allocation excludes only id 0, so only it is free for an entry join.
+        _reject("L-JOIN", f"{path}.barrier", "the entry rendezvous uses reserved barrier 0")
+    threads = _integer(obj["threads"], f"{path}.threads", "L-JOIN", positive=True)
+    if threads % 32:
+        _reject("L-JOIN", f"{path}.threads", "bar.sync thread counts are whole warps")
+    return EntryRendezvous(barrier, threads)
+
+
 def _exports(value: Any, path: str) -> dict[str, Export]:
     obj = _object_map(value, path, "L-SYM")
     result: dict[str, Export] = {}
@@ -313,6 +421,7 @@ def _exports(value: Any, path: str) -> dict[str, Export]:
             export_path,
             "L-SYM",
             required=("symbol", "decl", "decl_sha256"),
+            optional=("interface",),
         )
         decl = _string(export["decl"], f"{export_path}.decl", "L-SYM")
         digest = _sha256(export["decl_sha256"], f"{export_path}.decl_sha256", "L-SYM")
@@ -329,6 +438,7 @@ def _exports(value: Any, path: str) -> dict[str, Export]:
             _identifier(export["symbol"], f"{export_path}.symbol", "L-SYM"),
             decl,
             digest,
+            _call_interface(export["interface"], f"{export_path}.interface") if "interface" in export else None,
         )
     return result
 
@@ -552,6 +662,7 @@ def _protocol(value: Any, path: str, *, signal: bool = False) -> Protocol:
             path,
             "L-PROTO",
             required=("kind", "export", "signature", "decl", "decl_sha256"),
+            optional=("site",),
         )
         decl = _string(obj["decl"], f"{path}.decl", "L-PROTO")
         digest = _sha256(obj["decl_sha256"], f"{path}.decl_sha256", "L-PROTO")
@@ -569,6 +680,7 @@ def _protocol(value: Any, path: str, *, signal: bool = False) -> Protocol:
             _string(obj["signature"], f"{path}.signature", "L-PROTO"),
             decl,
             digest,
+            _call_site(obj["site"], f"{path}.site") if "site" in obj else None,
         )
         return Protocol(kind, None, None, None, None, call, None, None)
     if kind == "named_barrier":
@@ -667,20 +779,26 @@ def _endpoint(value: Any, path: str) -> Endpoint:
             _reject("L-PROTO", f"{path}.protocol.full.tx_bytes", "completion-only endpoints require tx_bytes 0")
         if binds != {"full": protocol.full.slots}:
             _reject("L-PAIR", f"{path}.binds", "completion-only endpoints require only the full slot binding")
+    # A nested call site is made from inside this stage's exports, in their caller's role.
+    nested_call = protocol.kind == "call" and direction == "produce" and obj["owner_role"] is None
     if protocol.kind == "call" and direction == "consume":
         if obj["owner_role"] is not None:
             _reject("L-PAIR", f"{path}.owner_role", "provided call endpoints must not name a caller role")
+        if protocol.call.site is not None:
+            _reject("L-CALL", f"{path}.protocol.site", "provided call endpoints state their interface on the export")
         owner_role = None
-    elif protocol.kind != "call" and space != "reg" and obj["owner_role"] is None:
+    elif nested_call or protocol.kind != "call" and space != "reg" and obj["owner_role"] is None:
         # An endpoint signalled or awaited inside an exported callable runs in its caller's role.
         # Only register tiles (thread-value layout) and host transfers depend on that role.
         owner_role = None
     else:
         owner_role = _identifier(obj["owner_role"], f"{path}.owner_role", "L-PAIR")
+    if nested_call and "exports" not in obj:
+        _reject("L-PAIR", f"{path}.exports", "a role-less call site names the exports it is made from")
     exports = None
     if "exports" in obj:
-        if protocol.kind == "call":
-            _reject("L-PAIR", f"{path}.exports", "call endpoints are themselves exports or callsites")
+        if protocol.kind == "call" and not nested_call:
+            _reject("L-PAIR", f"{path}.exports", "role-bearing call sites and provided call endpoints name no exports")
         exports = _unique_strings(obj["exports"], f"{path}.exports", "L-PAIR")
         if not exports:
             _reject("L-PAIR", f"{path}.exports", "an export association names at least one export")
@@ -806,10 +924,15 @@ def _claim(value: Any, path: str, profile: Profile) -> Claim:
             _reject("L-REGS", f"{path}.{sorted(forbidden)[0]}", "regs claims omit interval and alias fields")
         if "roles" not in obj or "values" not in obj:
             _reject("L-REGS", path, "regs claims require roles and values")
-        roles = _unique_strings(obj["roles"], f"{path}.roles", "L-REGS", nonempty=True, identifiers=True)
+        launch_cap = handle == "pipelink_launch_regs"
+        roles = _unique_strings(obj["roles"], f"{path}.roles", "L-REGS", nonempty=not launch_cap, identifiers=True)
+        if launch_cap and (roles or obj.get("reg_group") != "launch"):
+            _reject("L-REGS", path, "launch register constraints require group launch and no roles")
         values = _unique_ints(obj["values"], f"{path}.values", "L-REGS", positive=True)
+        maximum = profile.caps.launch_regs_max if launch_cap else profile.caps.regs_max
+        step = 1 if launch_cap else profile.caps.regs_step
         for index, item in enumerate(values):
-            if not profile.caps.regs_min <= item <= profile.caps.regs_max or item % profile.caps.regs_step:
+            if not profile.caps.regs_min <= item <= maximum or item % step:
                 _reject(
                     "L-REGS",
                     f"{path}.values[{index}]",
@@ -1002,7 +1125,8 @@ def _validate_stage_handle_uses(stage: StageManifest) -> None:
                     use(part.split("=", 1)[0], {"depth", "variant"})
     for name, value_sets in constraints.items():
         if value_sets and not set.intersection(*value_sets):
-            _reject("L-HANDLE", f"$.handles.{name}", "shared handle value constraints have an empty intersection")
+            _reject("L-REGS" if name == "pipelink_launch_regs" else "L-HANDLE",
+                    f"$.handles.{name}", "shared handle value constraints have an empty intersection")
 
 
 def _symbols(value: Any) -> SymbolTable:
@@ -1037,8 +1161,9 @@ def load_stage_manifest(obj: dict[str, Any]) -> StageManifest:
         obj,
         "$",
         "L-SYM",
-        required=("pipelink_abi", "stage", "endpoints", "claims", "topology", "params"),
-        optional=("hints", "payload", "symbols", "host", "tensor", "provenance"),
+        required=("pipelink_abi", "stage", "endpoints", "claims", "params"),
+        optional=("topology", "types", "hints", "payload", "symbols", "host", "tensor", "domain_capacities",
+                  "provenance"),
     )
     target, profile = _target_stamp(root["pipelink_abi"])
     if "tensor" in root and target.schema not in {"2.2", "3.0"}:
@@ -1057,7 +1182,7 @@ def load_stage_manifest(obj: dict[str, Any]) -> StageManifest:
             "entry_signature",
             "variants",
         ),
-        optional=("descriptor",),
+        optional=("descriptor", "entry_rendezvous"),
     )
     stage_id = _string(stage_obj["id"], "$.stage.id", "L-SYM")
     if _STAGE_ID_RE.fullmatch(stage_id) is None:
@@ -1086,7 +1211,7 @@ def load_stage_manifest(obj: dict[str, Any]) -> StageManifest:
 
     endpoint_items = _array(root["endpoints"], "$.endpoints", "L-PAIR")
     endpoints = [_endpoint(item, f"$.endpoints[{index}]") for index, item in enumerate(endpoint_items)]
-    # Channel cardinality is a link-assembly check (L-PAIR), not a per-stage schema rule.
+    # Channel cardinality is checked at link assembly (L-PAIR).
     for index, endpoint in enumerate(endpoints):
         unknown = sorted(set(endpoint.exports or ()) - set(exports))
         if unknown:
@@ -1112,6 +1237,13 @@ def load_stage_manifest(obj: dict[str, Any]) -> StageManifest:
             unknown_roles = sorted(set(claim.roles) - set(roles))
             if unknown_roles:
                 _reject("L-OWNER", f"$.claims[{index}].roles", "claim names an undeclared role", role=unknown_roles[0])
+
+    named_barriers = {claim.handle for claim in claims if claim.domain == "named_barrier"}
+    for name, export in exports.items():
+        collectives = export.interface.collectives if export.interface is not None else None
+        if collectives is not None and collectives.kind == "named" and collectives.handle not in named_barriers:
+            _reject("L-CALL", f"$.stage.exports.{name}.interface.collectives.handle",
+                    "a named collective uses a named barrier its stage claims", handle=collectives.handle)
 
     for index, endpoint in enumerate(endpoints):
         protocol_path = f"$.endpoints[{index}].protocol"
@@ -1163,6 +1295,12 @@ def load_stage_manifest(obj: dict[str, Any]) -> StageManifest:
             _reject("L-HOSTCHAN", "$.params", "host declarations forbid stage parameter blobs", subreason="inventory")
     elif target.host_abi is not None:
         _reject("L-HOSTCHAN", "$.pipelink_abi.target", "host ABI requires an explicit host declaration", subreason="inventory")
+    if "topology" not in root and roles:
+        _reject("L-TOPO", "$.topology", "role-bearing stages declare their topology")
+    entry_rendezvous = (
+        _entry_rendezvous(stage_obj["entry_rendezvous"], "$.stage.entry_rendezvous", roles)
+        if "entry_rendezvous" in stage_obj else None
+    )
     if params.bytes == 0 and host is None:
         if roles:
             _reject(
@@ -1188,14 +1326,17 @@ def load_stage_manifest(obj: dict[str, Any]) -> StageManifest:
         _variants(stage_obj["variants"], "$.stage.variants", symbol_prefix),
         endpoints,
         claims,
-        _stage_topology(root["topology"], "$.topology", profile),
+        _stage_topology(root["topology"], "$.topology", profile) if "topology" in root else None,
         params,
         descriptor,
         hints,
         target,
         _symbols(root["symbols"]) if "symbols" in root else None,
         host,
+        entry_rendezvous,
+        _types(root["types"], "$.types") if "types" in root else None,
         tensor,
+        _domain_capacities(root["domain_capacities"], profile) if "domain_capacities" in root else None,
         _provenance(root["provenance"], "$.provenance") if "provenance" in root else None,
     )
     _validate_stage_handle_uses(stage)
@@ -1262,6 +1403,18 @@ def _stage_ref(value: Any, path: str) -> StageRef:
     if _STAGE_ID_RE.fullmatch(stage_id) is None:
         _reject("L-SYM", f"{path}.stage_id", "stage_id must be a lowercase reverse-DNS identifier")
     return StageRef(_string(obj["artifact_path"], f"{path}.artifact_path", "L-SYM"), stage_id)
+
+
+def _domain_capacities(value: Any, profile: Profile) -> dict[str, int]:
+    raw = _object_map(value, "$.domain_capacities", "L-HANDLE")
+    result = {}
+    for name in sorted(raw):
+        path = f"$.domain_capacities.{name}"
+        domain = profile.domains.get(name)
+        if domain is None or domain.capacity != "pipeline" or name == "smem_page":
+            _reject("L-HANDLE", path, "a stage declares capacity only for page-free pipeline-capacity domains")
+        result[name] = _integer(raw[name], path, "L-HANDLE", positive=True)
+    return result
 
 
 def _pipeline_domain(value: Any, name: str, path: str) -> PipelineDomain:
@@ -1685,6 +1838,11 @@ def validate_assembly(pipeline: Pipeline, stages: list[StageManifest]) -> list[C
                     bindings={"bind"},
                     domains={"regs"},
                 )
+                if claim.handle == "pipelink_launch_regs":
+                    declaration = declarations.get(claim.handle)
+                    if declaration is not None and declaration.owner != "reg_group:launch":
+                        fail(f"{claim_path}.handle", "launch register constraint requires the launch owner",
+                             clause_id="L-REGS")
                 if claim.values is not None:
                     constrain(claim.handle, f"{claim_path}.values", set(claim.values))
             else:
@@ -1805,7 +1963,7 @@ def validate_assembly(pipeline: Pipeline, stages: list[StageManifest]) -> list[C
         declared_values = set(declaration.values or [])
         for path, values in value_constraints[name]:
             unsupported = sorted(values - declared_values)
-            if unsupported:
+            if unsupported and name != "pipelink_launch_regs":
                 fail(
                     path,
                     "handle reference contains a value absent from its declaration",
@@ -1817,6 +1975,7 @@ def validate_assembly(pipeline: Pipeline, stages: list[StageManifest]) -> list[C
             fail(
                 f"pipeline.handles.{name}.values",
                 "shared handle value constraints have an empty intersection",
+                clause_id="L-REGS" if name == "pipelink_launch_regs" else "L-HANDLE",
             )
 
     from .host.contracts import validate_host_assembly

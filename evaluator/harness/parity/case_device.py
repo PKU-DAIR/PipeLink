@@ -1,4 +1,4 @@
-"""Pre-pair all-role case/device qualification and deterministic fallback."""
+"""Qualify every role of a case on a device before pairing, with a deterministic device fallback."""
 from __future__ import annotations
 
 import hashlib
@@ -637,7 +637,7 @@ def rotated_fallback_order(ordered_devices: list[int], assigned: int) -> list[in
 
 
 class CaseDeviceFallback:
-    """One-pass dispatcher over a presealed rotated case fallback order."""
+    """Try devices once each, in a fallback order fixed in advance and rotated to start at the assigned GPU."""
 
     def __init__(
         self,

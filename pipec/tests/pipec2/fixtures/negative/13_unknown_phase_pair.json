@@ -1,6 +1,5 @@
 {
   "name": "unknown_phase_pair",
-  "reference": "D-finding",
   "description": "An exclusivity pair names a phase absent from the finite phase list.",
   "base": "topology",
   "phase": "schema.pipeline",

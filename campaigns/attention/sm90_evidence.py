@@ -1,31 +1,44 @@
 #!/usr/bin/env python3
-"""bf16 SM90 attention evidence from sm90-baseline/cells.json.
+"""bf16 SM90 attention evidence for the cells in sm90-baseline/cells.json.
 
-The default family is W1/W2 at 8k and 32k. Causal cells use selected;
-sliding-window cells use window; W3 binds score-softcap and W4 reuses selected
-with chunk virtual batches. --cells all also selects supported diagnostic cells.
+By default subcommands cover W1/W2 at 8k and 32k, definitive covers the 17
+published cells and seam-cost its own three cells; --cells all selects every
+supported cell, including the diagnostic ones.
+Causal cells use the `selected` pipeline and sliding-window cells use `window`.
+W3 binds the score softcap, and W4 reuses `selected` with chunked virtual batches.
 
-gate and sanitize check linked/control, plus stock where its slot image supports
-the cell. smoke and definitive use the canonical parity Protocol: R1 =
-linked/control is scored at >= 0.97; supported stock R3/R2 are diagnostic.
-Parity throughput is iterations/s, not useful TFLOP/s or absolute placement.
-definitive requires current passing smoke and sanitizer evidence.
+Subcommands:
+  gate         numerical gates for linked and control, plus stock where the stock
+               slot image supports the cell.
+  sanitize     memcheck, racecheck and synccheck on the paired reload path.
+  smoke        optional diagnostic using the calibrated slot timer.
+  definitive   paired-reload-v2 timing: eight balanced blocks of four batches,
+               exactly ten complete calls per batch, with a module reload
+               halfway. R1 must reach 0.97; R3 is reported for context. Needs
+               passing gate and sanitize records from the current build.
+  absolute     --tag TAG [--modes linked,control,stock] writes
+               results/sm90-absolute-TAG.json with the slot's absolute event timer.
+  stock-baseline  the same timer for stock on harness_equivalence_cells.
+  seam-cost    times the linked production image with the score transform set to
+               identity (flag off) against the same-source control without a score
+               seam, alternating absolute repetitions; defaults to
+               W1-8k,W1-32k,W2a-32k and writes results/sm90-seam-cost.json. LTO
+               may remove the identity branch, so this bounds only that case: it
+               does not measure a retained non-identity branch, R1 parity or the
+               cost of a larger descriptor.
+  sass         GPU-free SASS comparison of linked and control for all seven
+               pipelines (the six single-device families plus context-parallel
+               `cp`), written to results/sm90-sass.{json,md}. Differences are
+               reported as diagnostics only.
+  render       CPU-only: rewrite the gate, sanitize, definitive and SASS Markdown
+               reports from the JSON records in --results.
 
-absolute --tag TAG [--modes linked,control,stock] writes
-results/sm90-absolute-TAG.json using the slot's absolute event timer.
-stock-baseline uses that timer for stock on harness_equivalence_cells.
-seam-cost defaults to W1-8k,W1-32k,W2a-32k and writes
-results/sm90-seam-cost.json: linked production score-identity, flag off, versus
-the same-source no-score-seam control, using alternating absolute repetitions.
-Identity LTO may remove the branch; this does not measure retained nonidentity
-branch cost and is not an R1 parity measurement or descriptor-growth comparison.
-Timed runs default to unlocked clocks, recording SM clocks before/after timing.
---clock-mhz N requests a monitored gpulockd lease; violating runs are discarded.
-sass writes results/sm90-sass.{json,md} for all seven linked/control pipelines
-(the six single-device families plus context-parallel `cp`),
-using the shared normalized SASS comparator without GPU access. Differences
-are mandatory diagnostics, never an acceptance gate.
-Every subcommand supports --dry-run without inputs, GPU access, or output files.
+Timed runs default to --clock-mhz $PIPELINK_LOCK_SM_MHZ; when that variable is
+unset, empty or 0 (or --clock-mhz 0 is given), clocks are unlocked and only
+observed before and after timing. A positive --clock-mhz N requests a monitored
+gpulockd lease and discards runs that leave it. Timing receipts record
+`clock_locked`. Every subcommand accepts --dry-run, which needs no inputs or GPU and
+writes no files.
 """
 from __future__ import annotations
 
@@ -47,13 +60,17 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 RESULTS = HERE / "results"
 
-SLOT = HERE / "out" / "bin" / "attention-slot-sm90"
+OUT = HERE / "out"
+SLOT = OUT / "bin" / "attention-slot-sm90"
 SPEC = "d128-sm90-c"
 PIPELINES = {"causal": "selected", "sliding_window": "window", "chunked": "selected",
              "phi3_blocksparse": "phi", "msa_selected": "msa"}
 SASS_PIPELINES = ("selected", "window", "softcap", "window-softcap", "phi", "msa", "cp")
 MODES = ("linked", "control", "stock")
 BASE_CELLS = ("W1-8k", "W1-32k", "W2a-8k", "W2a-32k", "W2b-8k", "W2b-32k")
+PRIMARY_CELLS = (*BASE_CELLS, "W3a-8k", "W3a-32k", "W3b-8k",
+                 "W4-32k", "W4-128k", "W5-32k", "W5-128k",
+                 "W6-prefix-32k", "W6-prefix-128k", "W6-uniform-32k", "W6-uniform-128k")
 SEAM_CELLS = ("W1-8k", "W1-32k", "W2a-32k")
 SEAM_SCOPE = "production-score-identity-flag-off"
 SEAM_ORDER = "alternating-candidate-first-reference-first"
@@ -65,6 +82,9 @@ SEAM_LIMITATIONS = [
     "No bitwise equality is required between these two images; ordinary R1 Gate A is unchanged.",
     "Timing alone does not establish inlining, branch retention, register usage, or absence of spills.",
 ]
+SANITIZER_TOOLS = ("memcheck", "racecheck", "synccheck")
+UNLOCKED_BANNER = ("> Unlocked or unrecorded SM clocks: timings are valid as relative comparisons only, "
+                   "not comparable with the paper's locked-clock numbers.")
 CELLS_JSON = HERE / "sm90-baseline" / "cells.json"
 CELLS: dict[str, dict[str, Any]] = {}
 CELLS_DOCUMENT: dict[str, Any] = {}
@@ -87,8 +107,43 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def default_clock_mhz() -> int:
+    """The machine's qualified clock from PIPELINK_LOCK_SM_MHZ; 0 (unlocked) when unset or empty."""
+    value = os.environ.get("PIPELINK_LOCK_SM_MHZ", "").strip()
+    try:
+        return int(value) if value else 0
+    except ValueError:
+        raise EvidenceError(f"PIPELINK_LOCK_SM_MHZ must be an integer MHz value or empty, got {value!r}")
+
+
+def clock_status(record: dict[str, Any]) -> str:
+    """Clock mode of a timing record: locked, unlocked or unknown (never assumed locked).
+
+    New receipts carry top-level `clock_locked`. Older ones are read from their own
+    fields: a lease record (`sm_mhz` with a healthy lease), a `clock` mode string,
+    or the shared execution controller's record under `execution`.
+    """
+    locked = record.get("clock_locked")
+    if isinstance(locked, bool):
+        return "locked" if locked else "unlocked"
+    clock = record.get("clock")
+    if isinstance(clock, dict):
+        if clock.get("locked") is False:
+            return "unlocked"
+        return "locked" if clock.get("sm_mhz") and clock.get("healthy") else "unknown"
+    if clock in ("locked", "unlocked"):
+        return clock
+    execution = record.get("execution")
+    return clock_status(execution) if isinstance(execution, dict) else "unknown"
+
+
+def banner(statuses: list[str]) -> list[str]:
+    """The unlocked-clock banner and a blank line when any timing is not known to be locked."""
+    return [UNLOCKED_BANNER, ""] if any(status != "locked" for status in statuses) else []
+
+
 def build_generation() -> str:
-    path = HERE / "out" / "build-report.json"
+    path = OUT / "build-report.json"
     generation = load_json(path).get("build_generation") if path.is_file() else None
     if not generation:
         raise EvidenceError("missing build generation; run attention/build.py before collecting evidence")
@@ -116,12 +171,55 @@ def run_command(command: list[str], *, env: dict[str, str] | None = None,
     }
 
 
+class SanitizerCheckpoint:
+    """Resumable record of completed sanitizer legs; not itself sanitizer evidence."""
+
+    def __init__(self, path: Path, identity: dict[str, Any], *, resume: bool = False):
+        self.path = path
+        self.raw = path.parent / f"{path.stem}.raw"
+        if resume:
+            if not path.is_file():
+                raise EvidenceError(f"cannot resume without checkpoint: {path}")
+            self.data = load_json(path)
+            if self.data.get("identity") != identity or self.data.get("status") != "INCOMPLETE":
+                raise EvidenceError(f"checkpoint provenance differs: {path}")
+        else:
+            if path.exists():
+                raise EvidenceError(f"checkpoint exists; use explicit --resume or a fresh result directory: {path}")
+            self.data = {"schema": "attention-sanitizer-checkpoint-v1", "status": "INCOMPLETE",
+                         "identity": identity, "completed": {}}
+        self.raw.mkdir(parents=True, exist_ok=True)
+        self.flush()
+
+    def flush(self) -> None:
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_text(json.dumps(self.data, indent=2, sort_keys=True) + "\n")
+        temporary.replace(self.path)
+
+    def get(self, key: str, command: list[str]) -> dict[str, Any] | None:
+        outcome = self.data["completed"].get(key)
+        if outcome is not None and outcome["command"]["command"] != command:
+            raise EvidenceError(f"checkpoint command differs for {key}")
+        return outcome
+
+    def save(self, key: str, outcome: dict[str, Any], request: dict[str, Any] | None = None) -> None:
+        # Raw files are written before the atomic manifest makes this leg resumable.
+        run = outcome["command"]
+        stem = self.raw / key
+        stem.with_suffix(".stdout").write_text(run["stdout"])
+        stem.with_suffix(".stderr").write_text(run["stderr"])
+        stem.with_suffix(".json").write_text(json.dumps(
+            {"request": request, "outcome": outcome}, indent=2, sort_keys=True) + "\n")
+        self.data["completed"][key] = outcome
+        self.flush()
+
+
 def paths(spec: str, pipeline: str) -> tuple[Path, Path, Path]:
-    link_dir = HERE / "out" / "links" / spec / pipeline
+    link_dir = OUT / "links" / spec / pipeline
     return (
         link_dir / "link.json",
         link_dir / "pipeline.cubin",
-        HERE / "out" / "controls" / spec / f"{pipeline}.cubin",
+        OUT / "controls" / spec / f"{pipeline}.cubin",
     )
 
 
@@ -160,7 +258,7 @@ def sass_audit(cubin: Path, cuda: Path, *, results: Path | None = None) -> tuple
     if record["returncode"] != 0:
         raise EvidenceError(f"cuobjdump failed for {cubin}: {record['stderr']}")
     text = record["stdout"]
-    relative = cubin.parent.relative_to(HERE / "out" / "links")
+    relative = cubin.parent.relative_to(OUT / "links")
     sass_path = (RESULTS if results is None else results) / "sass" / relative / "pipeline.sass"
     sass_path.parent.mkdir(parents=True, exist_ok=True)
     sass_path.write_text(text, encoding="utf-8")
@@ -304,7 +402,7 @@ def image(cell: str, pipeline: str, mode: str, timing: str = "parity", *,
         if not stock_supported(CELLS[cell]):
             raise EvidenceError(f"no stock slot image implements {cell}; use the public baselines")
         mask = "local" if CELLS[cell]["mask"]["kind"] == "sliding_window" else "c"
-        cubin = HERE / "out" / "stock" / "sm90" / f"fa3-hdim128-bf16-{mask}-cluster1.cubin"
+        cubin = OUT / "stock" / "sm90" / f"fa3-hdim128-bf16-{mask}-cluster1.cubin"
         meta = cubin.with_suffix(".json")
         command = [str(SLOT), "--mode=stock", f"--stock-cubin={cubin}", f"--stock-meta={meta}"]
         inputs = {"slot": SLOT, "stock": cubin, "stock_meta": meta}
@@ -354,7 +452,7 @@ def require_inputs(images: list[dict[str, Any]]) -> None:
     for description in images:
         for name in description["inputs"].values():
             if not Path(name).is_file():
-                raise EvidenceError(f"missing input: {name} (family artifacts require Phase P3)")
+                raise EvidenceError(f"missing input: {name} (run build.py)")
 
 
 def image_spec(description: dict[str, Any], role: str, ImageSpec: Any) -> Any:
@@ -370,13 +468,19 @@ def input_paths(images: list[dict[str, Any]]) -> dict[str, str]:
     return {role: path for description in images for role, path in description["inputs"].items()}
 
 
+def binary_hashes(inputs: dict[str, str]) -> dict[str, str]:
+    return {role: sha256(Path(path)) for role, path in inputs.items()
+            if role in ("slot", "linked", "control", "stock")}
+
+
 def write_report(name: str, records: list[dict[str, Any]], extra: dict[str, Any]) -> dict[str, Any]:
     RESULTS.mkdir(parents=True, exist_ok=True)
     path = RESULTS / f"{name}.json"
     # Preserve rows only while their input specification has the same semantics.
     previous = load_json(path) if path.is_file() else {}
     old_rows = (previous.get("cases", []) if
-                previous.get("cells_document") == CELLS_DOCUMENT else [])
+                previous.get("cells_document") == CELLS_DOCUMENT
+                and previous.get("protocol") == extra.get("protocol") else [])
     merged = {(row["case_id"], row["pipeline"]): row for row in old_rows}
     merged.update({(row["case_id"], row["pipeline"]): row for row in records})
     rows = [merged[key] for key in sorted(merged)]
@@ -386,14 +490,150 @@ def write_report(name: str, records: list[dict[str, Any]], extra: dict[str, Any]
                "stream_map_sha256": digest, "stream_map": table, **extra,
                "cases": rows, "all_passed": all(row["status"] == "PASS" for row in rows)}
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    path.with_suffix(".md").write_text(markdown_report(name, rows), encoding="utf-8")
+    path.with_suffix(".md").write_text(markdown_report(name, rows, payload), encoding="utf-8")
     return payload
 
 
-def markdown_report(name: str, rows: list[dict[str, Any]]) -> str:
-    lines = [f"# {name}", "", "R1 = linked/control (scored, >= 0.97); R2 = control/stock and R3 = linked/stock (diagnostic).",
-             "Ratios are medians of paired iterations/s ratios; these are not absolute-placement timings.",
-             "Attempts/discards count timing pairs; pairs that violate the clock lease are discarded.", "",
+def lease_released(execution: dict[str, Any]) -> bool:
+    clock = execution.get("clock", {})
+    return bool(clock.get("healthy") and clock.get("stopped"))
+
+
+def qualification_lines(payload: dict[str, Any]) -> list[str]:
+    """Describe the outer GPU window and clock lease that a correctness stage ran under."""
+    execution = payload.get("qualification_execution")
+    if not execution:
+        return []
+    clock = execution.get("clock", {})
+    returned = NUMBER_WORDS.get(execution.get("command_returncode"), execution.get("command_returncode"))
+    if clock_status(execution) == "locked":
+        lease = (f", and its {clock.get('sm_mhz')} MHz clock lease "
+                 + ("stayed healthy and was released." if lease_released(execution)
+                    else "was not healthy or was not released."))
+    else:
+        lease = ", with unlocked SM clocks (no lease)."
+    lines = ["", "## Qualification window", "", f"The qualification command returned {returned}{lease}"]
+    if execution.get("window", {}).get("contended"):
+        lines[-1] += (" Other work shared the GPU during the run (`admitted=false`), which leaves these "
+                      "correctness results valid but means they support **no timing or performance claim**.")
+    lines.append("The JSON record keeps the complete command, the native output and the numerical results, "
+                 "with the outer execution record under `qualification_execution`.")
+    return lines
+
+
+def definitive_lines(rows: list[dict[str, Any]], payload: dict[str, Any]) -> list[str]:
+    results = [(label, result) for row in rows for label, result in row.get("ratios", {}).items()]
+    executions = [result["execution"] for _, result in results]
+    r1 = [result for label, result in results if label == "R1"]
+    r1_pass = sum(result["verdict"] == "PASS" for result in r1)
+    diagnostic = sum(label != "R1" and result["status"] == "PASS" for label, result in results)
+    admitted = sum(execution["admitted"] for execution in executions)
+    mhz = sorted({execution.get("clock", {}).get("sm_mhz") or "unlocked" for execution in executions}, key=str)
+    lines = ["", "## Admission and prerequisites", "",
+             f"{admitted} of {len(results)} comparisons were admitted: {r1_pass} of {len(r1)} R1 comparisons "
+             f"pass, and {NUMBER_WORDS.get(diagnostic, diagnostic)} R3 comparisons completed as context."]
+    if admitted == len(results) and r1_pass == len(r1):
+        lines[-1] = (f"All {len(results)} comparisons were admitted: the {r1_pass} R1 comparisons pass, and the "
+                     f"{NUMBER_WORDS.get(diagnostic, diagnostic)} R3 comparisons completed as context.")
+    if executions and all(not execution.get("window", {}).get("contended") for execution in executions) \
+            and all(execution.get("command_returncode") == 0 for execution in executions) \
+            and all(lease_released(execution) for execution in executions):
+        lines[-1] += (" Every timing window was uncontended, every native command returned zero, and every "
+                      + (f"{'/'.join(map(str, mhz))} MHz clock lease stayed healthy and was released."
+                         if all(clock_status(execution) == "locked" for execution in executions)
+                         else "run completed cleanly; clocks were not (all) locked."))
+    ratios = [result["ratio"] for result in r1 if result.get("ratio") is not None]
+    if ratios:
+        lines.append(f"R1 ranges from **{min(ratios):.9f}** to **{max(ratios):.9f}** against the 0.97 floor; "
+                     "R3 has no threshold.")
+    if "sm90-gate.json" in payload.get("prerequisites", []) and (RESULTS / "sm90-gate.json").is_file():
+        gate = load_json(RESULTS / "sm90-gate.json") if (RESULTS / "sm90-gate.json").is_file() else {}
+        sanitize = load_json(RESULTS / "sm90-sanitize.json") if (RESULTS / "sm90-sanitize.json").is_file() else {}
+        gate_cells = len(gate.get("cases", []))
+        sanitize_cells = sanitize.get("cases", [])
+        tools = sum(len(row["checks"]) for row in sanitize_cells)
+        lines += ["", f"Timing required passing [numerical gates on all {gate_cells} cells](sm90-gate.md) and "
+                  f"[sanitizer runs on {NUMBER_WORDS.get(len(sanitize_cells), len(sanitize_cells))} representative "
+                  f"cells, {tools} tool invocations](sm90-sanitize.md) from the same build."]
+    lines += ["", "The JSON record keeps every raw block, event duration, wall interval, numerical check and "
+              "admission record; it and the raw native, window and clock logs stay local and are not published."]
+    return lines
+
+
+NUMBER_WORDS = {0: "zero", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
+
+
+def markdown_report(name: str, rows: list[dict[str, Any]], payload: dict[str, Any]) -> str:
+    if name in ("sm90-gate", "sm90-sanitize"):
+        checks = [(row, label, result) for row in rows for label, result in row["checks"].items()]
+        passed = sum(row["status"] == "PASS" for row in rows)
+        if name == "sm90-gate":
+            lines = [f"# {name}", "", f"{passed}/{len(rows)} cells pass their numerical gates. These are the same "
+                     "cells that the definitive run times.", "",
+                     "For each cell, the linked and control outputs must match bitwise over the full O and LSE "
+                     "tensors (Gate A), and each must match an independent FP32 reference on the boundary rows of O "
+                     "(Gate B) and LSE (Gate C). Where the stock FA3 image supports the cell, it is checked against "
+                     "the same FP32 reference; it has no bitwise partner. The `linked/sass` row confirms that the "
+                     "linked image's SASS keeps both setmaxnreg register-reconfiguration instructions (increase and "
+                     "decrease). These are functional checks and make no timing claim.", "",
+                     "| Cell | Pipeline | Check | Verdict |", "|---|---|---|---|"]
+            lines += [f"| {row['case_id']} | {row['pipeline']} | {label} | {'PASS' if result['passed'] else 'FAIL'} |"
+                      for row, label, result in checks]
+        else:
+            tools = [tool for tool in SANITIZER_TOOLS if any(label.endswith(f"/{tool}") for _, label, _ in checks)]
+            findings = [f"{tool} {'hazards' if tool == 'racecheck' else 'errors'}" for tool in tools]
+            findings = ", ".join(findings[:-1]) + (" or " if len(findings) > 1 else "") + findings[-1]
+            lines = [f"# {name}", "", f"{passed}/{len(rows)} representative cells pass, and "
+                     f"{sum(result['passed'] for _, _, result in checks)}/{len(checks)} sanitizer invocations "
+                     f"report zero {findings}.", "",
+                     "Each invocation runs the `paired-reload-v2-check` path under compute-sanitizer: the same "
+                     "shared buffers and module reload that definitive timing uses, with two queued complete calls "
+                     "per image in each half instead of the full timed sequence. Numerical checks run before the "
+                     "work, after the reload and after the work. A control-reference run executes the linked and "
+                     "control images; a stock-reference run executes stock as well.", "",
+                     "Long cells are too slow to race-check, so the sanitizers run on shorter representative cells. "
+                     "A timed cell without its own record counts as covered when a passing record exists for another "
+                     "cell of the same pipeline with the same executable inputs in the same build; a recorded "
+                     "failure is never covered this way. These are correctness "
+                     "checks and make no timing claim.", "",
+                     "| Representative | Pipeline | Paired reference / tool | Hazards or errors | Verdict |",
+                     "|---|---|---|---:|---|"]
+            lines += [f"| {row['case_id']} | {row['pipeline']} | {label} | "
+                      f"{result.get('hazards', result.get('errors'))} | {'PASS' if result['passed'] else 'FAIL'} |"
+                      for row, label, result in checks]
+        return "\n".join(lines + qualification_lines(payload)) + "\n"
+    statuses = [clock_status(result["execution"]) if "execution" in result else clock_status(row)
+                for row in rows for result in row.get("ratios", {}).values()]
+    if any(row.get("protocol") == "paired-reload-v2" for row in rows):
+        lines = [f"# {name}", "", *banner(statuses),
+                 "Each row compares the linked image (A) with a reference image (B) on one cell. R1 uses the "
+                 "same-source control as the reference and must reach a ratio of at least 0.97. R3 uses stock FA3 "
+                 "and is reported for context, with no threshold.", "",
+                 "The `paired-reload-v2` protocol times eight blocks in balanced ABBA/BAAB order. Each block has "
+                 "four batches of exactly ten complete calls, so a comparison scores 32 batches (320 calls) after "
+                 "32 unscored warmup calls. After the fourth block both modules are unloaded and reloaded, reference "
+                 "first, in the same context and with the same fixture. Each block yields a B/A time "
+                 "ratio, and the reported ratio is sqrt(median of the first four × median of the last four), so "
+                 "values above 1 mean the linked image is faster. The eight blocks balance order effects; they are "
+                 "not independent samples.", "",
+                 "Each comparison runs once; no result triggers a retry. It is admitted when the native command "
+                 "completes inside an uncontended GPU window under a healthy, qualified clock lease and returns a "
+                 "valid result. There is no minimum duration and no per-image telemetry requirement.", "",
+                 "| Cell | Pipeline | Comparison | Ratio | Blocks | Calls/batch | Clock MHz | Admitted | Verdict |",
+                 "|---|---|---|---:|---:|---:|---:|---|---|"]
+        for row in rows:
+            for label, result in row.get("ratios", {}).items():
+                lines.append(f"| {row['case_id']} | {row['pipeline']} | {label} | "
+                             f"{format(result['ratio'], '.9f') if result.get('ratio') is not None else 'unavailable'} | "
+                             f"{len(result.get('pair', {}).get('blocks', []))} | "
+                             f"10 | {result['execution'].get('clock', {}).get('sm_mhz') or 'unlocked'} | "
+                             f"{result['execution']['admitted']} | {result['verdict']} |")
+        return "\n".join(lines + definitive_lines(rows, payload)) + "\n"
+    lines = [f"# {name}", "", *banner(statuses), "R1 compares linked with control and must reach 0.97. R2 (control/stock) and "
+             "R3 (linked/stock) are reported for context.", "",
+             "Each ratio is the median of paired iterations/s ratios from the slot timer; absolute latencies "
+             "come from a separate timer. Attempts and discards count timing pairs, and a pair is discarded "
+             "when its clock leaves the lease.", "",
              "| Cell | Pipeline | Comparison | Reference iterations/s | Candidate iterations/s | Ratio | Clock mode | Observed MHz | Valid pairs | Attempts | Discards | Verdict |",
              "|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|---|"]
     for row in rows:
@@ -401,7 +641,7 @@ def markdown_report(name: str, rows: list[dict[str, Any]]) -> str:
             summary = result.get("summary", {})
             lines.append(f"| {row['case_id']} | {row['pipeline']} | {label} | "
                          f"{result['reference_iterations_per_s_median']} | {result['candidate_iterations_per_s_median']} | "
-                         f"{result['ratio']} | {row.get('clock', 'locked (legacy)')} | {result['clock_mhz']} | "
+                         f"{result['ratio']} | {row.get('clock', 'unknown')} | {result['clock_mhz']} | "
                          f"{result['pair_valid_count']} | {summary.get('attempted_pairs', '')} | "
                          f"{summary.get('discarded_pairs', '')} | {result['verdict']} |")
         if "ratios" not in row:
@@ -423,16 +663,19 @@ def require_prior(stage: str, work: list[tuple[str, str]]) -> None:
         images = check_images(cell, pipeline)
         current = input_paths(list(images.values()))
         if (row.get("status") == "PASS" and row.get("build_generation") == generation
-                and row.get("input_paths") == current):
+                and row.get("input_paths") == current
+                and (stage != "sanitize" or row.get("sanitizer_protocol") == "paired-reload-v2-check")):
             continue
-        # Sanitizers check the executed code (slot incl. its combine kernel, link, cubins), not
-        # the length: a PASS on the same roles and paths in this build at another cell of the
-        # pipeline covers long cells too slow to race-check. Cell-specific selection data is
-        # excluded; an explicit record for this cell always wins.
+        # Sanitizers check the executed code (the slot with its combine kernel, the link and the
+        # cubins), which does not depend on sequence length. A PASS from this build at another
+        # cell of the pipeline, with the same roles and paths, therefore covers long cells that
+        # are too slow to race-check. Cell-specific selection data is ignored in the comparison,
+        # and an explicit record for this cell always takes precedence.
         code = {role: path for role, path in current.items() if role != "selection"}
         if stage == "sanitize" and not row and any(
                 other["status"] == "PASS" and key[1] == pipeline
                 and other.get("build_generation") == generation
+                and other.get("sanitizer_protocol") == "paired-reload-v2-check"
                 and {r: p for r, p in other.get("input_paths", {}).items() if r != "selection"} == code
                 for key, other in rows.items()):
             continue
@@ -462,7 +705,7 @@ def read_clocks(gpus: list[int]) -> list[dict[str, Any]]:
 def timed_run(gpus: list[int], clock_mhz: int | None):
     """Observe clocks without mutation unless an explicit lease was requested."""
     commands: list[dict[str, Any]] = []
-    clock = {"clock": "unlocked" if clock_mhz is None else "locked",
+    clock = {"clock": "unlocked" if clock_mhz is None else "locked", "clock_locked": clock_mhz is not None,
              "clock_mhz": clock_mhz, "clock_observation_scope": "timed command"}
 
     def checked(command: list[str]) -> None:
@@ -498,6 +741,88 @@ def timed_run(gpus: list[int], clock_mhz: int | None):
                 raise EvidenceError(f"gpulockd stop failed: {stop}")
 
 
+def paired_request(cell: str, reference_kind: str, *, check: bool = False) -> dict[str, Any]:
+    return {"schema_version": "attention-paired-request-v2", "action": "paired-check" if check else "paired",
+            "case_id": cell, "reference_kind": reference_kind, "protocol": "paired-reload-v2"}
+
+
+def paired_command(cell: str, pipeline: str, reference_kind: str) -> list[str]:
+    command = image(cell, pipeline, "linked")["command"]
+    if reference_kind == "stock":
+        stock = image(cell, pipeline, "stock")
+        command += [f"--stock-cubin={stock['inputs']['stock']}",
+                    f"--stock-meta={stock['inputs']['stock_meta']}"]
+    return command
+
+
+def paired_check_pass(result: dict[str, Any] | None, cell: str, reference_kind: str) -> bool:
+    if not result:
+        return False
+    correctness = result.get("correctness", {})
+    images = ["linked", "control"] + (["stock"] if reference_kind == "stock" else [])
+    return (result.get("action") == "paired-check" and result.get("protocol") == "paired-reload-v2"
+            and result.get("case_id", result.get("cell")) == cell
+            and result.get("reference_kind") == reference_kind and result.get("timing") is False
+            and result.get("queued_calls_per_arm_per_half") == 2 and result.get("halves") == 2
+            and result.get("images_executed") == images
+            and all(correctness.get(key) is True for key in
+                    ("all_true", "checked_before_work", "checked_after_reload", "checked_after_work",
+                     "gate_a_bitwise", "gate_b_linked", "gate_b_control", "gate_c_lse"))
+            and (reference_kind != "stock" or correctness.get("gate_stock") is True))
+
+
+def paired_definitive(work: list[tuple[str, str]], gpus: list[int], clock_mhz: int | None) -> dict[str, Any]:
+    sys.path.insert(0, str(REPO))
+    from evaluator.harness.parity.fixed_count import run_native_pair
+    require_prior("gate", work)
+    require_prior("sanitize", work)
+    generation = build_generation()
+    records = []
+    root = RESULTS / "sm90-definitive"
+    # Earlier records are kept: a rerun needs a new results directory.
+    root.mkdir(parents=True, exist_ok=False)
+    for cell, pipeline in work:
+        images = check_images(cell, pipeline)
+        require_inputs(list(images.values()))
+        ratios = {}
+        for reference_kind in ("control", "stock") if stock_supported(CELLS[cell]) else ("control",):
+            label = "R1" if reference_kind == "control" else "R3"
+            execution = run_native_pair(
+                paired_command(cell, pipeline, reference_kind), env=os.environ.copy(),
+                gpus=gpus, clock_mhz=clock_mhz, out_dir=root / f"{cell}.{pipeline}" / label,
+                input=json.dumps(paired_request(cell, reference_kind)), timeout=1800)
+            native = execution.get("payload") or {}
+            pair = native.get("pair") or {}
+            correct = native.get("correctness", {})
+            valid = (execution["admitted"] and native.get("case_id") == cell
+                     and native.get("reference_kind") == reference_kind
+                     and all(correct.get(key) is True for key in
+                             ("all_true", "checked_before_warmup", "checked_after_reload",
+                              "gate_a_bitwise", "gate_b_linked", "gate_b_control", "gate_c_lse"))
+                     and (reference_kind != "stock" or correct.get("gate_stock") is True))
+            ratio = pair.get("ratio_onetu_over_linked")
+            verdict = ("INVALID" if not valid else "DIAGNOSTIC" if label == "R3"
+                       else "PASS" if ratio >= 0.97 else "MISS")
+            ratios[label] = {"status": "PASS" if valid and verdict != "MISS" else "FAIL",
+                             "diagnostic_only": label != "R1", "verdict": verdict, "ratio": ratio,
+                             "pair": pair, "execution": execution}
+        records.append({"case_id": cell, "pipeline": pipeline, "spec": SPEC,
+                        "protocol": "paired-reload-v2", "gpu": gpus[0],
+                        "case_config": case_config(cell, pipeline), "ratios": ratios,
+                        "build_generation": generation,
+                        "input_paths": input_paths(list(images.values())),
+                        "binary_sha256": binary_hashes(input_paths(list(images.values()))),
+                        "status": "PASS" if all(r["status"] == "PASS" for r in ratios.values()) else "FAIL"})
+    payload = write_report("sm90-definitive", records,
+                           {"protocol": "paired-reload-v2", "gpus": gpus,
+                            "clock": "locked" if clock_mhz else "unlocked",
+                            "clock_locked": bool(clock_mhz), "clock_mhz": clock_mhz,
+                            "prerequisites": ["sm90-gate.json", "sm90-sanitize.json"]})
+    if not payload["all_passed"]:
+        raise EvidenceError("one or more fixed-count comparisons failed; retained all raw results")
+    return payload
+
+
 def parity(stage: str, work: list[tuple[str, str]], gpus: list[int], include_r2: bool,
            clock_mhz: int | None) -> dict[str, Any]:
     # The shared discovery module captures these settings at import time.
@@ -514,9 +839,6 @@ def parity(stage: str, work: list[tuple[str, str]], gpus: list[int], include_r2:
     plans = {(cell, pipeline): comparisons(cell, pipeline, include_r2) for cell, pipeline in work}
     for plan in plans.values():
         require_inputs([description for pair in plan.values() for description in pair])
-    if stage == "definitive":
-        require_prior("smoke", work)
-        require_prior("sanitize", work)
     root = RESULTS / name
     if root.exists():
         shutil.rmtree(root)
@@ -538,8 +860,7 @@ def parity(stage: str, work: list[tuple[str, str]], gpus: list[int], include_r2:
                 ratios = {}
                 for label, (reference, linked) in plans[cell, pipeline].items():
                     archive = root / run_id / label
-                    protocol = (Protocol.smoke(archive, config) if stage == "smoke"
-                                else Protocol.definitive(archive, config))
+                    protocol = Protocol.smoke(archive, config)
                     reference_spec = image_spec(reference, "reference", ImageSpec)
                     linked_spec = image_spec(linked, "linked", ImageSpec)
                     pair_error = None
@@ -723,7 +1044,7 @@ def seam_cost(work: list[tuple[str, str]], gpus: list[int], clock_mhz: int | Non
                 candidate = measurements["candidate"]["latency_us"]
                 reference = measurements["reference"]["latency_us"]
                 delta = {"absolute_delta_us": candidate - reference,
-                         "latency_ratio": candidate / reference}
+                         "speedup_over_reference": reference / candidate}
             records.append({
                 "case_id": cell, "spec": SPEC, "pipeline": pipeline, "gpu": gpus[0],
                 "case_config": case_config(cell, pipeline),
@@ -740,7 +1061,7 @@ def seam_cost(work: list[tuple[str, str]], gpus: list[int], clock_mhz: int | Non
         "candidate": "linked production score-identity with needs_score_mod clear",
         "reference": "same-source no-score-seam control with identical launch/params/layout",
         "delta_definition": "candidate latency minus reference latency",
-        "latency_ratio_definition": "candidate latency / reference latency",
+        "speedup_definition": "reference latency / candidate latency (higher is faster)",
         "cells_json": str(CELLS_JSON),
         "gpus": gpus, "lock_commands": commands, **clock,
         "timing": {"mode": "absolute", "clock_mhz": clock_mhz, "cuda_graphs": False,
@@ -759,7 +1080,7 @@ def seam_cost(work: list[tuple[str, str]], gpus: list[int], clock_mhz: int | Non
     return payload
 
 
-def checks(stage: str, work: list[tuple[str, str]], gpus: list[int]) -> dict[str, Any]:
+def checks(stage: str, work: list[tuple[str, str]], gpus: list[int], *, resume: bool = False) -> dict[str, Any]:
     generation = build_generation()
     plans = {(cell, pipeline): check_images(cell, pipeline) for cell, pipeline in work}
     for images in plans.values():
@@ -774,33 +1095,50 @@ def checks(stage: str, work: list[tuple[str, str]], gpus: list[int]) -> dict[str
     precheck = run_command(gpu_status_command(gpus))
     if precheck["returncode"] != 0:
         raise EvidenceError(f"GPU precheck failed: {precheck}")
+    checkpoint = None
+    if stage == "sanitize":
+        identity = {"build_generation": generation, "gpus": gpus, "cells_document": CELLS_DOCUMENT,
+                    "sanitizer_protocol": "paired-reload-v2-check",
+                    "work": [{"cell": cell, "pipeline": pipeline,
+                              "input_paths": input_paths(list(plans[cell, pipeline].values())),
+                              "binary_sha256": binary_hashes(input_paths(list(plans[cell, pipeline].values())))}
+                             for cell, pipeline in work]}
+        checkpoint = SanitizerCheckpoint(RESULTS / "sm90-sanitize.partial.json", identity, resume=resume)
     records = []
     for index, (cell, pipeline) in enumerate(work):
         gpu = gpus[index % len(gpus)]
         images = plans[cell, pipeline]
         outcomes = {}
-        for mode, description in images.items():
-            for tool in (("racecheck", "synccheck") if stage == "sanitize" else ("gate",)):
+        if stage == "sanitize":
+            kinds = ("control", "stock") if stock_supported(CELLS[cell]) else ("control",)
+            for reference_kind in kinds:
+                for tool in SANITIZER_TOOLS:
+                    command = [str(executable), "--tool", tool, "--error-exitcode", "99",
+                               *paired_command(cell, pipeline, reference_kind)]
+                    key = f"{cell}-{pipeline}-paired-{reference_kind}-{tool}"
+                    previous = checkpoint.get(key, command)
+                    if previous is not None:
+                        outcomes[f"paired-{reference_kind}/{tool}"] = previous
+                        continue  # Failed completed legs are retained, never implicitly retried.
+                    run = run_command(command, env={**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu)},
+                                      stdin=json.dumps(paired_request(cell, reference_kind, check=True)))
+                    result = slot_result(run)
+                    count = sanitizer_count(run["stdout"] + "\n" + run["stderr"], tool)
+                    passed = run["returncode"] == 0 and count == 0 and paired_check_pass(result, cell, reference_kind)
+                    outcomes[f"paired-{reference_kind}/{tool}"] = {
+                        "command": run, "slot_result": result, "passed": passed,
+                        "hazards" if tool == "racecheck" else "errors": count}
+                    checkpoint.save(key, outcomes[f"paired-{reference_kind}/{tool}"],
+                                    paired_request(cell, reference_kind, check=True))
+        else:
+            for mode, description in images.items():
                 request = gate_request(cell, description["image_id"], gpu)
                 request.update(case_config=case_config(cell, pipeline), image_role=mode)
-                if stage == "sanitize":
-                    request["action"] = "sanitize"
-                command = description["command"]
-                if stage == "sanitize":
-                    command = [str(executable), "--tool", tool, "--error-exitcode", "99", *command]
-                run = run_command(command, env={**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu)},
+                run = run_command(description["command"], env={**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu)},
                                   stdin=json.dumps(request, separators=(",", ":")))
                 result = slot_result(run)
-                passed = run["returncode"] == 0 and isinstance(result, dict)
-                outcome = {"command": run, "slot_result": result}
-                if stage == "sanitize":
-                    count = sanitizer_count(run["stdout"] + "\n" + run["stderr"], tool)
-                    passed = (passed and count == 0 and result.get("action") == "sanitize"
-                              and result.get("images_executed") == [mode])
-                    outcome["hazards" if tool == "racecheck" else "errors"] = count
-                else:
-                    passed = passed and gates_pass(result, mode)
-                outcomes[f"{mode}/{tool}"] = {**outcome, "passed": passed}
+                outcomes[f"{mode}/gate"] = {"command": run, "slot_result": result,
+                                           "passed": run["returncode"] == 0 and gates_pass(result, mode)}
         if stage == "gate":
             audit, command = sass_audit(Path(images["linked"]["image_path"]), cuda, results=RESULTS)
             outcomes["linked/sass"] = {"audit": audit, "command": command,
@@ -808,6 +1146,8 @@ def checks(stage: str, work: list[tuple[str, str]], gpus: list[int]) -> dict[str
         records.append({"case_id": cell, "spec": SPEC, "pipeline": pipeline,
                         "gpu": gpu, "checks": outcomes, "build_generation": generation,
                         "input_paths": input_paths(list(images.values())),
+                        "binary_sha256": binary_hashes(input_paths(list(images.values()))),
+                        **({"sanitizer_protocol": "paired-reload-v2-check"} if stage == "sanitize" else {}),
                         "status": "PASS" if all(check["passed"] for check in outcomes.values()) else "FAIL"})
     payload = write_report(f"sm90-{stage}", records, {"gpus": gpus, "gpu_precheck": precheck})
     if any(row["status"] != "PASS" for row in records):
@@ -886,13 +1226,25 @@ def sass() -> dict[str, Any]:
                                for module in (comparison, normalization)],
         "pipelines": records,
     }
+    RESULTS.mkdir(parents=True, exist_ok=True)
+    (RESULTS / "sm90-sass.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (RESULTS / "sm90-sass.md").write_text(sass_markdown(payload), encoding="utf-8")
+    return payload
+
+
+def sass_markdown(payload: dict[str, Any]) -> str:
+    records, versions = payload["pipelines"], payload["tool_versions"]
     lines = [
         "# SM90 attention SASS diagnostic", "",
-        "Diagnostic only: differences never admit or reject an image. All device functions",
-        "are normalized in dump order with evaluator/gates. Counts and resources below",
-        "are control / linked; resource tuples are REG/STACK/LOCAL (stack/local in bytes).",
-        "N counts operand deltas, not distinct instructions; N=0 alone does not imply equality.",
-        "JSON retains the first 200 deltas, full delta-class counts, checks and tool output.", "",
+        "This report compares the SASS of each pipeline's linked image with its same-source control.",
+        "It is a diagnostic: differences inform, but never accept or reject an image.",
+        "",
+        "All device functions are normalized in dump order with `evaluator/gates` and compared as",
+        "ordered streams. Instruction counts and resources are shown as control / linked; resources",
+        "are REG/STACK/LOCAL, with stack and local sizes in bytes. N counts operand deltas, not",
+        "distinct instructions, and structural differences are checked separately, so read the",
+        "Equal column for equality. The JSON record keeps the first 200 deltas, the full delta-class",
+        "counts, the checks and the tool output.", "",
         "| Pipeline | Instructions C / L | Equal | N | Resources C / L | Delta classes |",
         "|---|---:|:---:|---:|---|---|",
     ]
@@ -910,32 +1262,59 @@ def sass() -> dict[str, Any]:
         lines.append(f"| {row['pipeline']} | {counts['control']} / {counts['linked']} | "
                      f"{row['normalized_sass_equal']} | {row['N']} | {' / '.join(resources)} | "
                      f"{', '.join(classes) or 'none'} |")
-    lines.extend(["", "Delta classes describe ordered-stream differences, not proven seam attribution.",
-                  "Numeric, sanitizer and performance evidence remain separate acceptance criteria.",
+    lines.extend(["", "Delta classes name where the ordered streams differ; they do not attribute a",
+                  "difference to a particular seam. Acceptance rests on the numerical, sanitizer and",
+                  "performance evidence.",
                   "", "## Tool versions", ""])
-    for tool, version in versions.items():
+    for tool in sorted(versions, key=lambda name: (name != "nvcc", name)):
+        version = versions[tool]
         lines.extend([f"### {tool}", "", "```text", version["stdout"].strip(), "```", ""])
-    RESULTS.mkdir(parents=True, exist_ok=True)
-    (RESULTS / "sm90-sass.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (RESULTS / "sm90-sass.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return payload
+    return "\n".join(lines) + "\n"
+
+
+REPORT_STAGES = ("sm90-gate", "sm90-sanitize", "sm90-definitive")
+
+
+def render() -> list[str]:
+    """Rewrite the Markdown reports from the JSON records in RESULTS (CPU only)."""
+    written = []
+    for name in REPORT_STAGES:
+        path = RESULTS / f"{name}.json"
+        if path.is_file():
+            payload = load_json(path)
+            path.with_suffix(".md").write_text(markdown_report(name, payload["cases"], payload), encoding="utf-8")
+            written.append(str(path.with_suffix(".md")))
+    path = RESULTS / "sm90-sass.json"
+    if path.is_file():
+        path.with_suffix(".md").write_text(sass_markdown(load_json(path)), encoding="utf-8")
+        written.append(str(path.with_suffix(".md")))
+    return written
 
 
 def main() -> int:
-    global RESULTS
+    global RESULTS, OUT, SLOT
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     subparsers = parser.add_subparsers(dest="command", required=True)
     sass_parser = subparsers.add_parser("sass", help="GPU-free linked/control SASS diagnostic")
     sass_parser.add_argument("--dry-run", action="store_true", help="print image paths without inputs or outputs")
     sass_parser.add_argument("--results", type=Path, default=RESULTS, help="output directory")
+    sass_parser.add_argument("--out-root", type=Path, default=OUT)
+    render_parser = subparsers.add_parser("render", help="CPU-only: rewrite Markdown reports from --results JSON")
+    render_parser.add_argument("--results", type=Path, required=True, help="directory holding the JSON records")
     for name in ("stock-baseline", "gate", "sanitize", "smoke", "definitive", "absolute", "seam-cost"):
         command = subparsers.add_parser(name)
-        command.add_argument("--gpus", default="0", help="physical GPU IDs (timed commands require one)")
+        command.add_argument("--gpus", default=os.environ.get("PIPELINK_GPUS", "").split(",")[0],
+                             help="physical GPU IDs (timed commands require one); default: first of PIPELINK_GPUS")
         command.add_argument("--results", type=Path, default=RESULTS, help="output and prerequisite evidence directory")
+        command.add_argument("--out-root", type=Path, default=OUT, help="artifact tree including build-report.json")
         if name not in ("gate", "sanitize"):
-            command.add_argument("--clock-mhz", type=int, help="request a gpulockd lease at N MHz; default: unlocked")
+            command.add_argument("--clock-mhz", type=int,
+                                 help="request a gpulockd lease at N MHz; 0 = unlocked; "
+                                      "default: PIPELINK_LOCK_SM_MHZ (unlocked when unset, empty or 0)")
         command.add_argument("--cells-json", type=Path, default=CELLS_JSON, help="shared pipelink-sm90-cells-v1 file")
         command.add_argument("--dry-run", action="store_true", help="print commands/configs without inputs or GPUs")
+        if name == "sanitize":
+            command.add_argument("--resume", action="store_true", help="reuse completed checkpoint legs with identical provenance")
         if name != "stock-baseline":
             command.add_argument("--cells", help="comma-separated IDs; all = supported cells; "
                                  "default = W1-8k,W1-32k,W2a-32k for seam-cost, six W1/W2 cells otherwise")
@@ -948,6 +1327,11 @@ def main() -> int:
             command.add_argument("--modes", default=",".join(MODES), help="comma-separated linked,control,stock")
     args = parser.parse_args()
     RESULTS = args.results.resolve()
+    if args.command == "render":
+        print(json.dumps({"written": render()}, indent=2))
+        return 0
+    OUT = args.out_root.resolve()
+    SLOT = OUT / "bin" / "attention-slot-sm90"
     if args.command == "sass":
         if args.dry_run:
             payload = {"stage": "sass", "dry_run": True, "diagnostic_only": True,
@@ -976,7 +1360,7 @@ def main() -> int:
     elif args.cells == "all":
         cells = [cell for cell, row in CELLS.items() if supported(row)]
     else:
-        defaults = SEAM_CELLS if stage == "seam-cost" else BASE_CELLS
+        defaults = SEAM_CELLS if stage == "seam-cost" else PRIMARY_CELLS if stage == "definitive" else BASE_CELLS
         cells = args.cells.split(",") if args.cells is not None else list(defaults)
     if not cells or len(set(cells)) != len(cells) or set(cells) - CELLS.keys():
         parser.error("cell selection must contain unique IDs from --cells-json")
@@ -988,17 +1372,24 @@ def main() -> int:
     if is_absolute and any(not available_modes(cell, modes) for cell in cells):
         parser.error("no requested image implements one or more cells; use linked,control")
     work = [(cell, pipeline_for(CELLS[cell])) for cell in cells]
+    if not args.gpus:
+        parser.error("--gpus is required when PIPELINK_GPUS is empty")
     try:
         gpus = [int(item) for item in args.gpus.split(",")]
     except ValueError:
         parser.error("--gpus must be a comma-separated list of physical GPU IDs")
     if len(set(gpus)) != len(gpus) or any(gpu < 0 for gpu in gpus):
         parser.error("--gpus must select unique non-negative physical GPU IDs")
-    clock_mhz = getattr(args, "clock_mhz", None)
+    clock_mhz = None
+    if stage not in ("gate", "sanitize"):
+        requested = args.clock_mhz if args.clock_mhz is not None else default_clock_mhz()
+        if requested < 0:
+            parser.error("--clock-mhz must be a positive MHz value, or 0 for unlocked")
+        clock_mhz = requested or None
     if stage not in ("gate", "sanitize") and len(gpus) != 1:
         parser.error("timed sm90 evidence requires exactly one physical GPU")
-    if clock_mhz is not None and clock_mhz <= 0:
-        parser.error("--clock-mhz must be positive")
+    if stage == "definitive" and args.include_r2:
+        parser.error("paired definitive has no R2; R2 remains a separate smoke diagnostic")
     if args.dry_run:
         plans = []
         for cell, pipeline in work:
@@ -1013,6 +1404,10 @@ def main() -> int:
             elif stage in ("gate", "sanitize"):
                 images = check_images(cell, pipeline)
                 requests = {}
+            elif stage == "definitive":
+                kinds = ("control", "stock") if stock_supported(CELLS[cell]) else ("control",)
+                images = {kind: {"command": paired_command(cell, pipeline, kind)} for kind in kinds}
+                requests = {kind: paired_request(cell, kind) for kind in kinds}
             else:
                 images = {label: {"reference": pair[0], "linked": pair[1]}
                           for label, pair in comparisons(cell, pipeline, args.include_r2).items()}
@@ -1036,7 +1431,9 @@ def main() -> int:
     elif is_absolute:
         payload = absolute(args.tag, work, modes, gpus, clock_mhz)
     elif stage in ("gate", "sanitize"):
-        payload = checks(stage, work, gpus)
+        payload = checks(stage, work, gpus, resume=getattr(args, "resume", False))
+    elif stage == "definitive":
+        payload = paired_definitive(work, gpus, clock_mhz)
     else:
         payload = parity(stage, work, gpus, args.include_r2, clock_mhz)
     print(json.dumps({"stage": stage, "all_passed": payload["all_passed"],

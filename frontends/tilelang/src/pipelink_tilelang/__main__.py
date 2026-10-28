@@ -18,7 +18,7 @@ def main():
         parser.error("--demo requires --composition")
     cuda_home = os.environ["PIPELINK_CUDA_HOME"]
     os.environ["CUDA_HOME"] = cuda_home
-    # Lowering is CPU-only; never create a CUDA context on a shared GPU.
+    # Lowering is CPU-only; hiding all GPUs keeps it from creating a CUDA context.
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     import numpy as np
     from tilelang import tvm
@@ -44,12 +44,17 @@ def main():
         for channel in module.STAGE.channels:
             if channel.partner.profile != context.profile:
                 raise AnnotationError("profile", f"{channel.partner.path} is packed for {channel.partner.profile}, not {context.profile}")
-    random.seed(module.SEED)
-    np.random.seed(module.SEED)
+    from .explicit import DEFAULT_SEED, DEFAULT_PASS_CONFIGS, emit
+    seed = getattr(module, "SEED", DEFAULT_SEED)
+    random.seed(seed)
+    np.random.seed(seed)
     target = tvm.target.Target({"kind": "cuda", "arch": context.profile})
 
     def lower(*arguments):
-        result = capture(module.program(*arguments), target=target, pass_configs=module.PASS_CONFIGS)
+        stage = getattr(module, "STAGE", None)
+        program = stage.program if stage is not None and stage.program is not None else module.program
+        result = capture(program(*arguments), target=target,
+                         pass_configs=getattr(module, "PASS_CONFIGS", DEFAULT_PASS_CONFIGS))
         generated = {"source": result.kernel_source, "tir": result.snapshots["pre_codegen"],
                      "facts": result.facts, "passes": result.passes, "snapshots": result.snapshots,
                      "modules": result.modules, "layout_objects": result.layout_objects}
@@ -65,8 +70,9 @@ def main():
         from .tensor_export import emit
         emit(args.out, module, lower())
     elif hasattr(module, "STAGE"):
-        generated = {depth: lower(depth) for depth in module.DEPTHS} if module.DEPTHS else {None: lower()}
-        module.EMITTER(args.out, module, generated)
+        depths = getattr(module, "DEPTHS", ())
+        generated = {depth: lower(depth) for depth in depths} if depths else {None: lower()}
+        getattr(module, "EMITTER", emit)(args.out, module, generated)
     elif hasattr(module, "EMITTER"):
         module.EMITTER(args.out, module, lower())
     elif module.KIND == "ws_gemm":

@@ -12,17 +12,29 @@ struct Request {
   std::string image_id;
   std::string image_role;
   std::string protocol_version;
+  std::string reference_kind;
   int warmups = -1;
   double slot_seconds = -1.0;
   double discard_seconds = -1.0;
   double steady_seconds = -1.0;
   double batch_quantum_ms = -1.0;
+  bool paired() const { return action == "paired" || action == "paired-check"; }
 };
 
 Request read_request() {
   Request r;
   std::string raw{std::istreambuf_iterator<char>(std::cin), std::istreambuf_iterator<char>()};
   Json request = JsonParser(raw).parse();
+  if (request.at("schema_version").string() == "attention-paired-request-v2") {
+    r.action = request.at("action").string();
+    r.case_id = request.at("case_id").string();
+    r.reference_kind = request.at("reference_kind").string();
+    r.protocol_version = request.at("protocol").string();
+    if (!r.paired() || r.protocol_version != "paired-reload-v2" ||
+        (r.reference_kind != "control" && r.reference_kind != "stock"))
+      throw std::runtime_error("invalid paired request");
+    return r;
+  }
   if (request.at("schema_version").string() != "m3-parity-slot-request-v1") {
     throw std::runtime_error("unsupported request schema");
   }

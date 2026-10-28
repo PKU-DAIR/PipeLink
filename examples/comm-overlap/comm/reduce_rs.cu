@@ -1,5 +1,5 @@
-// Owner code, NOT part of the linked GEMM+push image. Launched on the same rank
-// stream after GEMM+push. Its bounded resident grid persists over owner tiles.
+// Owner-local reduction kernel, built outside the linked GEMM+push image and launched
+// after it on the same rank stream. Its bounded resident grid loops over owner tiles.
 #include "comm.h"
 #include "push_gather.cuh"
 #include "rs_reduce.cuh"
@@ -13,12 +13,12 @@ extern "C" __global__ __launch_bounds__(128) void comm_rs_reduce(const __grid_co
   const auto* slots = reinterpret_cast<const float4*>(p.slots[p.rank]) + size_t(parity) * p.world * source_stride;
   const auto* counters = reinterpret_cast<const uint32_t*>(p.counters[p.rank]) + parity * tiles;
   const uint32_t target = uint32_t(((generation >> 1) + 1) * uint64_t(p.world - 1));
-  // Current-generation peer producers are GEMM+push kernels with NO current-gen
-  // waits. Local own-slot writes completed on this stream before this launch.
+  // Peer producers of this generation are GEMM+push kernels that wait on nothing in it.
+  // Own-slot writes completed on this stream before this launch.
   for (int tile = blockIdx.x; tile < tiles; tile += gridDim.x) {
     if (threadIdx.x == 0)
       while (!reached(load_acquire_sys(counters + tile), target)) __nanosleep(32);
-    // The acquiring lane hands peer publication to every reader, not via shuffle.
+    // The barrier and fence hand the acquiring lane's view of peer stores to every reader.
     __syncthreads();
     fence_acq_rel_sys();
     rs::reduce<128>(p, slots, source_stride, tile, threadIdx.x);

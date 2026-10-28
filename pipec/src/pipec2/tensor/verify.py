@@ -1,4 +1,4 @@
-"""Exact annotation-versus-owner-layout evidence, not GPU instruction validation."""
+"""Exact comparison of placement annotations with the owner's layout (no GPU instructions are checked)."""
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -46,22 +46,22 @@ def verify_export_map(
     """Compare one export placement's components with an independent owner table.
 
     ``placements`` is a parsed ``PlacementView.components`` mapping. Coordinate
-    ``domains`` and ``bindings`` are the declared, disjoint finite domains, not
-    domains inferred from the observations. Observation keys follow lexical name
-    order across BOTH mappings; values contain the observed physical components.
-    Owner-specific address decoding and relocation belong to the caller and must
-    not evaluate the declared expressions to manufacture expected observations.
+    ``domains`` and ``bindings`` are the declared, disjoint finite domains (not
+    inferred from the observations). Observation keys follow lexical name order
+    across BOTH mappings; values contain the observed physical components. The
+    caller decodes and relocates owner-specific addresses, and must derive the
+    observations from the owner, never by evaluating the declared expressions.
 
-    Grounding follows C1's lexical referenced-domain order, but comparison covers
-    the full declared Cartesian product, including unreferenced dimensions and
-    every binding value. A missing observation is a failure, never a skipped row.
-    Only the first ``max_mismatches`` witnesses are retained; the entire product
-    is still checked and counted. ``expected`` is the owner value, ``declared``
-    the grounded annotation value. A missing row has ``expected=None`` and names
-    its exact coordinate and binding values.
+    Grounding follows C1's lexical referenced-domain order; comparison covers the
+    full declared Cartesian product, including unreferenced dimensions and every
+    binding value. A missing observation counts as a failure. The whole product
+    is checked and counted, but only the first ``max_mismatches`` witnesses are
+    kept. ``expected`` is the owner value and ``declared`` the grounded annotation
+    value; a missing row has ``expected=None`` and names its exact coordinate and
+    binding values.
 
-    Inputs are already sort/domain checked. This gate does not repeat contract or
-    relation validation; undefined expressions retain ``expr.ground``'s errors.
+    Inputs must already be sort/domain checked; contract and relation validation
+    is the caller's job. Undefined expressions raise ``expr.ground``'s errors.
     """
     if type(max_mismatches) is not int or max_mismatches < 0:
         raise ValueError("max_mismatches must be a nonnegative integer")

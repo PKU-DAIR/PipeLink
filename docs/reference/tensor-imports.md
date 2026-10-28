@@ -9,17 +9,16 @@ compiler plans, certifies and generates the adapter that moves the data.
 Generated transport is exact, read-only and stays within one CTA. It performs no
 arithmetic and no numeric conversion; supported element types are f32, bf16 bits,
 f16, i32 and u32. Each export carries one generation; write multi-slot rings in
-stage code over a channel endpoint, as in [T2](../tutorials/T2-ring-pipeline.md).
-[T4](../tutorials/T4-tensor-import.md) builds one consumer against three producer
-placements, and [T6](../tutorials/T6-tilelang.md) derives the consumer
+stage code over a channel endpoint. The
+[TileLang frontend](../../frontends/tilelang/README.md) derives consumer
 declarations from partner manifests.
 
 ## Authoring
 
 ### Callable ABI
 
-The producer exports callables; it does not publish its placement through the
-consumer's parameter list. A parameter whose meaning is `source_base` has type
+The producer exports callables; its placement never appears in the consumer's
+parameter list. A parameter whose meaning is `source_base` has type
 `pipelink_tensor_source` from `<pipelink/tensor_source.h>` (included by
 `stage.hpp`). Providers return `pl::source_of(pointer)` or
 `pl::source_of_tmem(address)`, and adapters unpack the handle according to the
@@ -53,20 +52,38 @@ produce → ready → import → arithmetic → done → release
 Outer barrier lends remain resource claims even when the selected route needs no
 synchronization. Missing outer events fail planning with `T-PLAN-RENDEZVOUS`.
 
+An owner may read one completed export in several binding-indexed chunks:
+
+```text
+produce → ready → (import(chunk) → arithmetic → done)* → release
+```
+
+Each `done` completes the current chunk before the next import reuses scratch.
+All chunks re-read the same generation of the export. Because the site calls
+`done` once per chunk, it must not promise `single_completion` for this
+schedule.
+
+For a transport site covering only part of a CTA, lend a positive-ID named
+barrier for its inner store-to-load rendezvous; its arrival count is derived
+from the data site's participants. Outer ready/done rendezvous may use barrier
+zero over the whole CTA; the inner rendezvous never reuses an outer barrier
+whose cohort differs from the data site's.
+
 ### Lends and frames
 
-Consumer lends (`pl::smem`, `pl::regs`, `pl::cta_barrier`, ...) are capacities, not
-reservations. The certified program's accessed high-water mark, plus the barriers
-it and its rendezvous use, is the reservation, aggregated per physical handle by
-maximum. An unused shared-memory lend claims nothing and its handle resolves to 0.
+Consumer lends (`pl::smem`, `pl::regs`, `pl::cta_barrier`, ...) are capacities
+the generated program may draw on. What it actually reserves is the certified
+program's accessed high-water mark plus the barriers it and its rendezvous use,
+aggregated per physical handle by maximum.
+An unused shared-memory lend claims nothing and its handle resolves to 0.
 Lend names are stage-global; the TileLang frontend qualifies them with the import
 name so independent imports can reuse local names such as `"scratch"`.
 
 A register export requires exactly one
 `pl::frame(name, words, handle, owner, from, to)` lend with enough positions per
 participant. It describes the storage passed to `produce`
-(`binding: "caller_frame"`), not adapter scratch. Missing or short frames fail with
-`T-PLAN-FRAME`.
+(`binding: "caller_frame"`), so it is separate from any adapter scratch. Missing
+or short frames fail with `T-PLAN-FRAME`.
 
 A generated scratch claim takes the lending import's tensor-event lifetime when
 its handle belongs to exactly one connection; a handle shared across connections
@@ -77,7 +94,8 @@ completion. See [claim lifetimes](annotations.md#lifetimes).
 ## Manifest and pipeline contracts
 
 A stage manifest may carry a `tensor` section (`tensor-v1`), validated at load.
-Normative facts never live in unchecked `hints`.
+Every normative fact lives in this section; the unchecked `hints` field is
+informational only.
 
 - **Exports and imports** record logical identity (result, work, version,
   coordinate domains, dtype, interpretation), placements (guard, space, units,
@@ -88,12 +106,13 @@ Normative facts never live in unchecked `hints`.
 - **Sites** declare participants, invocation, convergence, permitted operations
   and observations. The guarantees `enter_once` (one entry per CTA) and
   `single_completion` (one completion call per entry, no later import call) are
-  independent and never inferred from participant counts.
+  independent and must be declared; participant counts do not imply them.
 - **Bindings** carry declared finite domains, observation scopes and lifetimes.
-  They are runtime inputs, not solver-chosen allocations.
+  They are runtime inputs; the solver does not choose them.
 - **Resources** declare producer storage and consumer scratch, private fragments,
   metadata and barriers. A view that may need to materialize shared-source data
-  declares private `view_transit` storage; the planner never invents it.
+  must declare private `view_transit` storage; the planner only uses storage
+  that is declared.
 - **Context** names the target profile and its primitive catalogue:
   `tcgen05-readonly-v1` on `sm_10xa`, and `warp-readonly-v1` (the same table
   without TMEM receipt) on `sm_90a` and `sm_12xa`. A `tmem` placement on a target
@@ -101,11 +120,11 @@ Normative facts never live in unchecked `hints`.
 
 Map expressions are fitted at pack time: every finite map must equal a
 tensor-v2 expression exactly, or packing fails with `T-FIT` and the first
-inconsistent row. There is no sampled fit or table fallback.
+inconsistent row, with no sampled fit or table fallback.
 
 The pipeline's optional `tensor_connections` list names, for each connection, the
 producer stage, the consumer's import, the mode and the model/solver profile.
-Tensor records never enter ordinary endpoint pairing. One export may feed several
+Tensor records stay out of ordinary endpoint pairing. One export may feed several
 imports only when they are independent: no reclaiming handoff, disjoint
 participants, and disjoint shared-memory or named-barrier storage after
 placement. Dependent fanout fails with `T-CONTRACT` at
@@ -118,7 +137,7 @@ TMEM→register receipt, shared→register load, register→shared store, regist
 copy, cross-lane shuffle, rendezvous and readiness. A route is
 `bring? · relay? · deliver?` with an optional shuffle, each primitive guarded by
 preconditions over the site's lends, guarantees and capabilities. Routes are
-tried in a fixed structural order, not by measured performance:
+tried in a fixed structural order, independent of measured performance:
 
 - positions: constructive routes first (`direct_constructed`, `warp_constructed`,
   `staged_constructed`, ...), then bounded Z3 search (`direct_receipt`,
@@ -128,8 +147,26 @@ tried in a fixed structural order, not by measured performance:
 Constructive staging picks one XOR-shear permutation of scratch words from a
 bounded family by exact per-warp bank-conflict scoring. Every proposal passes the
 public checker and a replay of the terminal demand; a failed static premise falls
-back to exact exploration, never to a pass. Certification is relative to the
-declared model; it is not a hardware-correctness proof.
+back to exact exploration, never to a pass. Certification proves the route
+correct against the declared model; it is not a proof of hardware behavior.
+
+Positions staging compacts the distinct identities demanded in each binding
+world into scratch, filtering the register source bank to those values. The
+scratch capacity is the largest demanded set across worlds, in scalar bytes,
+not the full export size. Source positions, source-owner cohorts and compact
+addresses may depend on bindings; fitting must remain exact in every declared
+world. Source guards restrict stores to active owners, while all data-site
+participants still execute the inner rendezvous. A 32-column chunk
+of a 128×256 f32 export therefore needs at most 16 KiB of staging scratch.
+The export still describes the complete tensor, and its caller frame must
+cover the full published register placement.
+
+Direct imports can likewise guard a binding-dependent subset of the site's
+destination owners: a register-native column chunk may need copies on only some
+warps while every site participant calls the import and the outer completion
+rendezvous. Guards depend only on physical participants and immutable declared
+bindings; the checker evaluates ownership, phase ordering and delivered
+identities separately in every binding world.
 
 | Outcome | Clause | Meaning |
 |---|---|---|
@@ -140,6 +177,33 @@ declared model; it is not a hardware-correctness proof.
 | `BOUNDED_UNSAT`, `UNKNOWN` | `T-PLAN` | Bounded search found nothing or ran out. |
 | `LOWERING_UNSUPPORTED` | `T-LOWER` | Every certified route failed to lower. |
 | `NATIVE_RESOURCE_REJECTED` | — | The linked kernel's observed register allocation, adapter included, does not fit the register pool. |
+
+### Optional delivery layouts
+
+A frontend can request a delivery-layout hint derived from the export. A
+binding-free register placement is returned directly. For TMEM, complete
+aligned column packets and whole physical warps permit a binding-independent
+layout, including cohorts larger than the TMEM lane count. Warps sharing a
+lane quadrant split whole packets round-robin, so no value is duplicated.
+With 128 TMEM lanes, 16-column packets and 256 participants starting at zero,
+the layout is:
+
+```text
+participant = dp + 128 * ((column / 16) % 2)
+position    = 16 * (column / 32) + column % 16
+```
+
+Here `column` excludes the separately declared additive TMEM base, and `/`
+denotes integer division. Each 32-column chunk delivers 16 values per thread.
+Cohorts with a partial additional lane cycle distribute packets only among the
+warps present for each quadrant. Unsupported or unaligned placements return no
+hint; an adopted hint still goes through ordinary planning and certification.
+
+Native receipt lowering fits decoded DP/column offsets exactly over the
+participant and non-base binding domains, then adds the runtime TMEM base.
+Affine and bitfield layouts therefore use arithmetic addresses in place of a
+packet-index selector. Maps outside the fitting templates keep exact finite
+selection; every declared world still passes the source-base relocation check.
 
 ## Link flow
 
@@ -152,7 +216,7 @@ With tensor connections, `pipec2 link` runs:
    resource claims and barrier requests, and a domain admission report.
 3. Pair and unify ordinary endpoints, expand protocols and lay out params.
 4. Solve resources with the generated claims merged in. A failure is reported as
-   `T-PLAN`, not as an impossibility.
+   `T-PLAN`, which means this plan did not fit, not that no plan can.
 5. Lower the program to an adapter through TileLang. If a route does not lower,
    it is recorded as `LOWERING_UNSUPPORTED` and the next route is tried, re-solving
    the pipeline. An unusable backend (`PIPELINK_TILELANG_PYTHON` unset or not
@@ -171,6 +235,14 @@ With tensor connections, `pipec2 link` runs:
 `link.json` publishes every connection under `tensor`, and selected shared-memory
 overlaps under `tensor.smem_reuse`.
 
+A scratch lend is a capacity offered to the generated connection; it is not an
+allocation the owner can use. Only the selected route's required bytes are
+reserved, and a direct register copy may reserve none, so owner code must not
+reuse an unused lend as a private shared tile. The TileLang contract frontend's
+`internal_storage` arena has a whole-stage lifetime, so it cannot express an
+epilogue-only owner tile that overlaps a producer arena through
+`tensor_ready`/`import_done`.
+
 ### Environment
 
 Adapter lowering needs three variables. Every profile declares the two include
@@ -184,14 +256,13 @@ the interpreter runs the TileLang lowering:
 | `PIPELINK_TILELANG_PYTHON` | The TileLang frontend's interpreter, `frontends/tilelang/.venv/bin/python` |
 
 The include roots are the linker's own headers for generated code. The adapter
-never includes a stage's headers: the import declaration comes from the manifest.
-Set up the TileLang environment as in [T4](../tutorials/T4-tensor-import.md).
+takes the import declaration from the manifest and includes no stage headers.
+Set up the TileLang environment as in the [TileLang frontend](../../frontends/tilelang/README.md#environment).
 
 ## Trust and evidence
 
-The tensor path adds planning, certification and a generated provider, but it
-does not re-verify opaque packed payloads; the [trust model](../../pipec/README.md#trust-model)
-is unchanged. Neither a model certificate nor equal whole-kernel SASS replaces
-native numerical and sanitizer checks.
-[One epilogue, many producers](../../examples/one-epilogue-many-producers/README.md)
-records the evidence for each profile.
+The tensor path adds planning, certification and a generated provider, and keeps
+the same [trust model](../../pipec/README.md#trust-model): opaque packed payloads
+are not re-verified. A model certificate, or even identical whole-kernel SASS,
+does not replace native numerical and sanitizer checks; each campaign, for example
+[CODA](../../campaigns/coda/README.md), runs them on its own kernels.

@@ -100,7 +100,7 @@ struct SmemRing {
 }  // namespace pipelink::attention
 
 // SM90 owns its score-transform descriptor.
-// PL_TYPE restates this flat global type in generated callee bindings.
+// PL_TYPE names its members; pipec prints the flat global type into generated callee bindings.
 #ifndef PIPELINK_ATTENTION_SM90_WORK_DESC_DEFINED
 #define PIPELINK_ATTENTION_SM90_WORK_DESC_DEFINED
 struct pipelink_attention_sm90_work_desc {
@@ -121,6 +121,10 @@ struct pipelink_attention_sm90_work_desc {
 #endif
 static_assert(sizeof(pipelink_attention_sm90_work_desc) == 52);
 static_assert(alignof(pipelink_attention_sm90_work_desc) == 4);
+// Every stage TU whose callables take this descriptor registers it with `PIPELINK_SM90_WORK_DESC_PL_TYPE;`.
+#define PIPELINK_SM90_WORK_DESC_PL_TYPE PL_TYPE(pipelink_attention_sm90_work_desc, q_block, batch, kv_head, \
+    kv_steps, seqlen_q, seqlen_k, q_causal_offset, split_idx, flags, qhead_per_kvhead, mask_param, score_param, \
+    score_param_inv)
 
 namespace pipelink::attention::sm90 {
 using WorkDesc = pipelink_attention_sm90_work_desc;

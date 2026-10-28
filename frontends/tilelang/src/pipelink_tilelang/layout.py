@@ -1,9 +1,19 @@
 """Exact pl-layout-v2 conversion for TileLang's structurally recognized layouts.
 
 Bank constructors tile the contiguous axis into 32/64/128-byte atoms; wider
-planes therefore have a split shape/stride mode, not a row-major affine map.
-The pinned tcgen05 constructor ignores ``k_major`` and cannot represent a
-column-major contract. Such contracts fail closed rather than silently transpose.
+planes therefore have a split shape/stride mode instead of a row-major affine map.
+The pinned tcgen05 constructor ignores ``k_major``, so column-major contracts
+are rejected.
+
+A rank >= 3 plane ``(R, C, H, ...)`` canonicalizes to the 2-D plane
+``(R, C*H*...)``: its trailing modes concatenate colexicographically into the
+contiguous column axis, ``(r, c, h) -> (r, h*C + c)``. Only planes whose
+concatenated column equals TileLang's bank-tiled (or linear) column are accepted.
+
+``origin_bits`` is the plane's offset from its storage base and stays outside
+the TileLang map. It must be element-aligned and, under a bank swizzle, aligned
+to the swizzle repeat (``1 << (B + 7)`` bytes, 1024 B for 128 B) so that the
+relative XOR equals the hardware's absolute-address XOR.
 """
 from math import prod
 
@@ -41,7 +51,6 @@ def _expanded(layout, profile):
             _require(value[key] == expansion[key], f"{key} conflicts with profile atom {atom!r}")
         value = {**expansion, **value}
     _require(value.get("encoding") == "pl-layout-v2", "expected pl-layout-v2 encoding")
-    _require(value.get("origin_bits", 0) == 0, "nonzero origin_bits is unsupported")
     _require(value.get("pointer_flag_bits", 0) == 0, "nonzero pointer_flag_bits is unsupported")
     bits = value.get("elem_bits")
     _require(type(bits) is int and bits > 0 and bits & (bits - 1) == 0,
@@ -75,8 +84,10 @@ def _modes(value):
     if type(shape) is int:
         shape, stride = [shape], [stride]
     _require(isinstance(shape, (list, tuple)) and isinstance(stride, (list, tuple))
-             and len(shape) == len(stride) and len(shape) in (1, 2),
-             "only one- or two-dimensional logical planes are supported")
+             and len(shape) == len(stride) and bool(shape), "shape and stride ranks differ")
+    if len(shape) > 2:
+        # Trailing modes form one colexicographic column: (r, c, h) -> (r, h*C + c).
+        shape, stride = [shape[0], list(shape[1:])], [stride[0], list(stride[1:])]
     return [_mode(s, d) for s, d in zip(shape, stride)]
 
 
@@ -138,6 +149,10 @@ def _affine(value):
                  "MN-major/column-major layouts are unsupported: TileLang's pinned constructor ignores k_major")
     expected = _plane(shape, bits, bank)
     _require(modes == _modes(expected), "affine coordinates do not match TileLang's bank-tiled or linear map")
+    origin = value.get("origin_bits", 0)
+    _require(origin % max(8, bits) == 0, "origin_bits must be byte- and element-aligned")
+    _require(not bank or origin // 8 % (1 << (bank + 7)) == 0,
+             f"origin_bits must align to the {16 << bank}B swizzle repeat of {1 << (bank + 7)} bytes")
     return shape, bank
 
 
@@ -153,7 +168,7 @@ def _buffer(buffer):
 
 
 def to_tilelang(layout, buffer, *, profile):
-    """Use TileLang's own constructor, or reject the contract without approximation."""
+    """Build the layout with TileLang's own constructor, or reject the contract."""
     value = _expanded(layout, profile)
     shape, bank = _affine(value)
     buffer_shape, bits = _buffer(buffer)
@@ -166,11 +181,25 @@ def to_tilelang(layout, buffer, *, profile):
     return _BANKS[bank](buffer) if bank else tl_layout.make_linear_layout(buffer)
 
 
+def plane_shape(layout, *, profile) -> tuple[int, ...]:
+    """The TileLang buffer shape of one plane: rank >= 3 planes become ``(rows, prod(cols))``."""
+    return _affine(_expanded(layout, profile))[0]
+
+
+def origin_bytes(layout, *, profile, base_align: int) -> int:
+    """The plane's byte offset from a storage base aligned to ``base_align`` bytes."""
+    value = _expanded(layout, profile)
+    _, bank = _affine(value)
+    _require(not bank or base_align % (1 << (bank + 7)) == 0,
+             f"storage base alignment {base_align} is below the {16 << bank}B swizzle repeat")
+    return value.get("origin_bits", 0) // 8
+
+
 def from_captured(layout_object, *, elem_bits: int, buffer) -> dict:
     """Recover only structurally recognized maps; rank three denotes a plane ring.
 
-    ``ring_stride_elements`` is metadata for the endpoint ring, not a layout-schema
-    field. Callers emitting manifests put it in the ring declaration separately.
+    ``ring_stride_elements`` describes the endpoint ring; callers emitting
+    manifests move it from the layout into the ring declaration.
     """
     shape, bits = _buffer(buffer)
     _require(bits == elem_bits, "captured buffer dtype differs from elem_bits")
@@ -196,6 +225,7 @@ def tmem_shape(layout, *, profile) -> tuple[int, int]:
     value = _expanded(layout, profile)
     _require(not set(value) - {"encoding", "elem_bits", "origin_bits", "lanes", "cols"},
              "unsupported TMEM layout fields")
+    _require(value.get("origin_bits", 0) == 0, "nonzero TMEM origin_bits is unsupported")
     lanes, cols = value.get("lanes"), value.get("cols")
     _require(isinstance(lanes, (list, tuple)) and len(lanes) == 2
              and all(type(lane) is int for lane in lanes) and lanes[0] == 0 and 0 < lanes[1] <= 128,

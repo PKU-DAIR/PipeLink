@@ -1,4 +1,4 @@
-// Same stage sources and link-time bindings; no alternate operator implementation.
+// One-TU control: the linked image's stage sources and link-time bindings in one TU.
 #include MOK_BINDING_STUB
 #include MOK_INTERPRETER
 #include "comm/comm.cu"

@@ -24,8 +24,8 @@ from tools.stagebuild import CommandRecorder, manifest_of, pack_cu, write_json
 
 CUTLASS = REPO / "third_party" / "cutlass"
 HOPPER = REPO / "third_party" / "flash-attention" / "hopper"
-# The comm owner's shared device code (push_gather.cuh) used by kv-gather.
-COMM = REPO / "examples" / "comm-overlap" / "comm"
+# The comm owner's device code (push_gather.cuh) used by kv-gather.
+COMM = HERE / "src" / "sm90" / "comm"
 SPECS = {"d128-sm90-c": "ATTENTION_BUILD_D128_SM90_C"}
 PROFILE = "sm_90a"
 # Stages, controls and slot are compiled and code-generated with fast math, like upstream FA3.
@@ -65,7 +65,7 @@ def command_record(command: list[str], cwd: Path, log: Path, env: dict[str, str]
         "cwd": str(cwd),
         "returncode": completed.returncode,
         "wall_seconds": elapsed,
-        "log": str(log.relative_to(HERE)),
+        "log": os.path.relpath(log, HERE),
     }
     if completed.returncode != 0:
         raise BuildError(
@@ -95,7 +95,7 @@ def common_flags() -> list[str]:
         "-Isrc", "-I../../third_party/cutlass/include",
         "-I../../third_party/cutlass/tools/util/include",
         f"-I{PIPEC / 'src' / 'pipec2' / 'pack' / 'include'}",
-        "-I../../third_party/flash-attention/hopper", "-I../../examples/comm-overlap/comm",
+        "-I../../third_party/flash-attention/hopper", "-Isrc/sm90/comm",
         *SM90_FLAGS,
     ]
 
@@ -143,7 +143,7 @@ def selected_stages(value: str, configs: list[str],
 
 
 def publish_artifacts(configs: list[str], stages: set[str] | None = None) -> None:
-    """Publish selected packages; retain every other package as it is."""
+    """Copy the selected packages into frozen/; other frozen packages stay in place."""
     for spec in configs:
         for stage in STAGES_BY_SPEC[spec]:
             if stages is not None and stage not in stages:
@@ -164,7 +164,7 @@ def control_source(spec: str, pipeline: str) -> str:
 
 
 def require_sm90_inputs(configs: list[str], first: int, stages: set[str] | None) -> None:
-    """P2a can build the stock adapter without P3 family packages or pipelines."""
+    """Check the family sources or pipelines the first step needs; the stock baseline needs neither."""
     for spec in configs:
         if first <= STEPS.index("pack"):
             required = [HERE / "src" / SOURCE_BY_STAGE[stage]
@@ -177,8 +177,8 @@ def require_sm90_inputs(configs: list[str], first: int, stages: set[str] | None)
         missing = [str(path.relative_to(HERE)) for path in required if not path.is_file()]
         if missing:
             raise BuildError(
-                f"{spec}: P3 family inputs are not available: {', '.join(missing)}; "
-                "use --from slot or --from stock for the P2a stock baseline")
+                f"{spec}: family inputs are not available: {', '.join(missing)}; "
+                "use --from slot, or --from stock for the stock FA3 baseline")
 
 
 def build_stock(cuda: Path, env: dict[str, str], jobs: int) -> list[dict[str, Any]]:
@@ -210,8 +210,8 @@ def build_stock(cuda: Path, env: dict[str, str], jobs: int) -> list[dict[str, An
         records.append(command_record(
             [str(cuda / "bin" / "cuobjdump"), "--dump-elf-symbols", str(output)],
             HERE, log, env))
-        # cuobjdump marks kernel ELF symbols with STT_FUNC and STO_ENTRY; helper
-        # device functions must not be mistaken for launchable kernel entries.
+        # Kernel entries carry both STT_FUNC and STO_ENTRY; device helper
+        # functions carry only STT_FUNC.
         symbols = [line.split()[-1] for line in log.read_text().splitlines()
                    if "STT_FUNC" in line and "STO_ENTRY" in line]
         if len(symbols) != 1 or "device_kernel" not in symbols[0]:
@@ -230,13 +230,22 @@ def main() -> int:
     parser.add_argument("--configs", default="all")
     parser.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 4) // 4))
     parser.add_argument("--from", dest="from_step", choices=STEPS, default="pack")
+    parser.add_argument("--slot-only", action="store_true",
+                        help="compile only the two slot executables; leave kernel and stock images in place")
+    parser.add_argument("--out-root", type=Path, default=HERE / "out",
+                        help="isolated output tree (nondefault requires --slot-only)")
     parser.add_argument(
         "--stages", default="all",
-        help="comma-separated stage suffixes to pack/freeze; retain other frozen packages "
-             "(link, controls and slot remain unfiltered)")
+        help="comma-separated stage suffixes to pack and freeze; other frozen packages stay "
+             "in place (link, controls and slot always cover every stage)")
     args = parser.parse_args()
     if args.jobs <= 0:
         parser.error("--jobs must be positive")
+    out_root = args.out_root.resolve()
+    if out_root != (HERE / "out").resolve() and not args.slot_only:
+        parser.error("an isolated --out-root requires --slot-only")
+    if args.slot_only:
+        args.from_step = "slot"
     configs = selected_configs(args.configs, parser)
     stages = selected_stages(args.stages, configs, parser)
 
@@ -252,9 +261,13 @@ def main() -> int:
     env["PATH"] = str(cuda / "bin") + os.pathsep + env.get("PATH", "")
     env["LD_LIBRARY_PATH"] = str(cuda / "lib64") + os.pathsep + env.get("LD_LIBRARY_PATH", "")
 
-    for directory in ("out/logs", "out/manifests", "out/packaged",
-                      "out/pack-reports", "out/links", "out/controls", "out/bin", "frozen"):
-        (HERE / directory).mkdir(parents=True, exist_ok=True)
+    if args.slot_only:
+        for directory in ("logs", "bin"):
+            (out_root / directory).mkdir(parents=True, exist_ok=True)
+    else:
+        for directory in ("out/logs", "out/manifests", "out/packaged",
+                          "out/pack-reports", "out/links", "out/controls", "out/bin", "frozen"):
+            (HERE / directory).mkdir(parents=True, exist_ok=True)
 
     first = STEPS.index(args.from_step)
     require_sm90_inputs(configs, first, stages)
@@ -262,18 +275,23 @@ def main() -> int:
     started = time.monotonic()
     flags = common_flags()
     generation = uuid4().hex
+    prior_path = out_root / "build-report.json"
+    prior = json.loads(prior_path.read_text()) if prior_path.is_file() else {}
     report = {
         "schema": "pipelink-attention-build-v1",
         "build_generation": generation,
         "configs": configs,
         "jobs": args.jobs,
         "from_step": args.from_step,
+        "slot_only": args.slot_only,
+        "out_root": str(out_root),
+        "parent_build_generation": prior.get("build_generation"),
         "stages": sorted(stages) if stages is not None else "all",
         "gpu_executed": False,
     }
-    # Invalidate prior sanitizer evidence before any build output can change,
-    # including when this invocation later fails.
-    write_json(HERE / "out" / "build-report.json", report)
+    # Replace the build report before any output changes, so prior sanitizer
+    # evidence is invalidated even if this build fails.
+    write_json(out_root / "build-report.json", report)
 
 
     if first <= STEPS.index("pack"):
@@ -362,17 +380,17 @@ def main() -> int:
                 str(nvcc), *flags, "-arch=sm_90a", f"--frandom-seed={name}",
                 str(HERE / "src" / source),
                 f"-L{cuda / 'lib64'}", f"-L{cuda / 'lib64' / 'stubs'}", "-lcuda",
-                "-o", str(HERE / "out" / "bin" / name),
+                "-o", str(out_root / "bin" / name),
             ]
-            items.append((command, HERE, HERE / "out" / "logs" / f"{name}-compile.log"))
+            items.append((command, HERE, out_root / "logs" / f"{name}-compile.log"))
         commands.extend(pool_run(items, args.jobs, env))
 
-    if first <= STEPS.index("stock"):
+    if not args.slot_only and first <= STEPS.index("stock"):
         commands.extend(build_stock(cuda, env, args.jobs))
 
     elapsed = time.monotonic() - started
     report.update(wall_seconds=elapsed, commands=commands)
-    write_json(HERE / "out" / "build-report.json", report)
+    write_json(out_root / "build-report.json", report)
     print(json.dumps({"configs": configs, "wall_seconds": elapsed,
                       "commands": len(commands)}, sort_keys=True))
     return 0

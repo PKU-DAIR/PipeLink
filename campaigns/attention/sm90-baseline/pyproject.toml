@@ -6,30 +6,32 @@ requires-python = ">=3.11,<3.13"
 dependencies = [
     "torch==2.14.0",
     "triton==3.8.0",
-    "einops",
-    "packaging",
-    "ninja",
-    "numpy",
-    "setuptools",
-    "wheel",
+    "einops==0.8.2",
+    "packaging==26.3",
+    "ninja==1.13.2",
+    "numpy==2.4.6; python_version < '3.12'",
+    "numpy==2.5.3; python_version >= '3.12'",
+    "setuptools==84.0.0",
+    "wheel==0.48.0",
+    # Version is derived from the source tree; the path source and its tree pin fix it.
     "flash-attn-4",
     "nvidia-cutlass-dsl[cu13]==4.7.0",
     "quack-kernels==0.6.5",
-    "flashinfer-python",
-    "flash-msa",
+    "flashinfer-python==0.7.0",
+    "flash-msa==0.1.1",
 ]
 
 [tool.uv]
 package = false
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
-# flash-msa 5834d91 declares torch 2.12.0; use the plan's torch pin for all paths.
+# flash-msa 5834d91 declares torch 2.12.0; override it so every path uses torch 2.14.0.
 override-dependencies = ["torch==2.14.0"]
 
 [tool.uv.extra-build-variables]
 flashinfer-python = { BUILD_NVEP = "0" }
 
 [dependency-groups]
-dev = ["pytest"]
+dev = ["pytest==9.1.1"]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"

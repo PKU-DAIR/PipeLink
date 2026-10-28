@@ -1,6 +1,6 @@
 # Contract gallery
 
-This GPU-free example reuses the T2 mbarrier-ring producer package with the original affine-ReLU consumer and a square consumer, then checks six intentionally wrong consumer contracts at their actual rejection phase. The checker invokes the `pipec2` CLI, requires `P-INIT` at pack with no package produced, and requires the other five clauses only after a successful pack. It uses the shared T2 pipeline builder, machine-local `.env` defaults, and ignored `out/<profile>/` artifacts; it never launches a kernel.
+This example needs no GPU. It links the T2 mbarrier-ring producer package with two consumers, the original affine-ReLU and a square, then feeds `pipec2` six deliberately wrong consumer contracts. Each must fail with the expected clause at the expected phase: `P-INIT` fails at pack and produces no package; the other five pack successfully and fail at link. The checker reuses the T2 pipeline builder and `.env` defaults, writes to the ignored `out/<profile>/`, and launches no kernels.
 
 ## Commands
 

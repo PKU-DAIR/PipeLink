@@ -46,7 +46,8 @@ def pack_cu(
             raise PackError(failures)
         out.parent.mkdir(parents=True, exist_ok=True)
         report = container.pack(manifest_obj, compilation.object_path.read_bytes(), out)
-        params = next(record for record in compilation.registry["records"] if record["kind"] == "params")
+        params = next((record for record in compilation.registry["records"] if record["kind"] == "params"),
+                      {**{key: manifest_obj["params"][key] for key in ("type", "bytes", "align")}, "members": []})
         report["params"] = {key: params[key] for key in ("type", "bytes", "align", "members")}
         report["compile"] = compilation.compile
     report.update({"stage_id": manifest.id, "allowlist_version": symbols.ALLOWLIST_VERSION,

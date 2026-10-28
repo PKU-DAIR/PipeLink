@@ -60,8 +60,8 @@ CUTLASS_DEVICE void transform_scores(TensorS& scores, WorkDesc const& work) {
 }
 #endif
 
-// The coordinate partition is the same one as flash::Mask. Metadata changes the
-// source of the column coordinate, not its association with the MMA fragment.
+// The coordinate partition is the same one as flash::Mask. Metadata supplies
+// the column coordinate; its association with the MMA fragment is unchanged.
 template <class Config, bool FirstStep = false, class TensorS, class Meta>
 CUTLASS_DEVICE void mask_scores(TensorS& scores, Meta const& meta,
                                 WorkDesc const& work, int thread_idx) {
@@ -103,9 +103,9 @@ CUTLASS_DEVICE void mask_scores(TensorS& scores, Meta const& meta,
     CUTLASS_PRAGMA_UNROLL
     for (int m = 0; m < size<0>(sr); ++m) {
       int const q_pos = work.q_causal_offset + get<0>(rc(m, _0{}));
-      // The callee is pure. Gate it on the step-uniform policy flag, not on
-      // the per-element tail/causal predicate: short-circuit control flow
-      // makes the unrolled N=176 window path retain excessive predicates.
+      // The callee is pure, so gate it on the step-uniform policy flag. Gating
+      // on the per-element tail/causal predicate would short-circuit and leave
+      // the unrolled N=176 window path with excessive predicates.
       bool mod_keep = true;
       if (flags & KvFlags::needs_mask_mod) {
         mod_keep = pipelink_call_mask_mod(q_pos, kv_pos, work);

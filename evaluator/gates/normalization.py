@@ -1,7 +1,7 @@
-"""Strict SASS extraction and one-to-one first-use register normalization.
+"""Extract SASS from cuobjdump output and rename registers one-to-one in first-use order.
 
-Every opcode and every decimal/hexadecimal operand remains byte-exact. Only
-address and scheduler-control dump fields and register names are normalized.
+Only addresses, scheduler-control fields and register names are normalized;
+opcodes and decimal/hexadecimal operands stay byte-exact.
 """
 from __future__ import annotations
 

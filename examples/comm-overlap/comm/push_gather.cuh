@@ -2,8 +2,8 @@
 // Comm owner's shared device code: push copies, the rank-local ticket queue,
 // system-scope counters, the device-resident launch generation, the
 // cross-launch `released` flags and the CTA read-drain's last-arriver ticket.
-// Stage TUs adapt it to one CTA contract each; nothing here names a GEMM or
-// attention fact. Every function is executed by one whole warp unless noted.
+// Each stage TU adapts it to one CTA contract, so it names no GEMM or attention
+// fact. Every function is executed by one whole warp unless noted.
 #include <stdint.h>
 
 namespace comm_overlap {

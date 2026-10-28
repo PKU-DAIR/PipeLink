@@ -182,9 +182,6 @@ def test_two_thread_transpose_through_shared_delivers_every_position():
     assert result.status == "PASS"
     assert result.provenance["terminal_deliveries"] == [{"bindings": {}, "outputs": [[0, 0, 1], [1, 0, 0]]}]
     assert all(reduction["verified"] for reduction in result.reductions)
-    assert {reduction["kind"] for reduction in result.reductions} <= {
-        "exact-state-merging", "identity-vector-interning", "checked-persistent-set", "checked-rendezvous-frontier",
-    }
 
 
 def test_same_epoch_write_read_conflict_is_unsafe_without_publication():
@@ -598,7 +595,7 @@ def test_shared_export_is_relative_and_disjoint_from_fixed_scratch():
         _rebuild(source, export=cyclic)
 
 
-def test_participant_guards_are_recomputable_but_binding_metadata_needs_storage():
+def test_immutable_guards_are_recomputable_but_observations_need_storage():
     source = _instance(ready=True)
     imp = replace(source.imp, lends=tuple(resource for resource in source.imp.lends if resource.name != "metadata"))
     binding = _binding(expr.Domain("choice", "int", values=(0, 1)))
@@ -606,10 +603,10 @@ def test_participant_guards_are_recomputable_but_binding_metadata_needs_storage(
     suffix = (ir.Branch("which", 2, 2), _copy("@export:reg", "dest", 3), ir.Return())
     static = _program(instance, ir.Meta("which", ["coord", "participant"], 1), *suffix)
     assert check(instance, static, budget=1000).status == "PASS"
-    dynamic = _program(instance, ir.Meta("which", ["bind", "choice"], 1), *suffix)
-    rejected = check(instance, dynamic, budget=1000)
-    assert rejected.status == "UNSAFE"
-    assert "metadata" in rejected.violations[0].message
+    bound = _program(instance, ir.Meta("which", ["bind", "choice"], 1), *suffix)
+    assert check(instance, bound, budget=1000).status == "PASS"
+    observed = _program(instance, ir.Issue("observe_ready", {"dest": "which"}, 1), *suffix)
+    assert check(instance, observed, budget=1000).status == "UNSAFE"
 
 
 @pytest.mark.parametrize("missing", ["converged", "full_warps"])

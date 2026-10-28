@@ -101,10 +101,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m evaluator.harness.parity")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    catalog = subparsers.add_parser("stream-catalog", help="dump frozen namespace/role/equivalence catalog")
+    catalog = subparsers.add_parser("stream-catalog", help="write the namespace, role and sharing-class catalog")
     catalog.add_argument("--output", type=Path, required=True)
 
-    stream_map = subparsers.add_parser("stream-map", help="validate resolved cases and write canonical stream-map.json")
+    stream_map = subparsers.add_parser("stream-map", help="validate resolved cases and write stream-map.json")
     stream_map.add_argument("--input", type=Path, required=True)
     stream_map.add_argument("--output", type=Path, required=True)
 
@@ -113,17 +113,17 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--output", type=Path, required=True)
 
     assignment = subparsers.add_parser(
-        "discover-assign", help="discover, lock, and assign idle nonzero GPUs"
+        "discover-assign", help="discover, lock and assign idle GPUs from PIPELINK_GPUS"
     )
     assignment.add_argument("--cases", required=True, help="comma-separated case IDs")
     assignment.add_argument("--archive", type=Path, required=True)
     assignment.add_argument("--max-devices", type=int, default=4)
 
-    failover = subparsers.add_parser("failover-record", help="validate an objective trigger and write failover-record.json")
+    failover = subparsers.add_parser("failover-record", help="validate a failover trigger and write failover-record.json")
     failover.add_argument("--input", type=Path, required=True)
     failover.add_argument("--output", type=Path, required=True)
 
-    run = subparsers.add_parser("run", help="run one definitive/smoke/rehearsal comparison")
+    run = subparsers.add_parser("run", help="run one comparison under the chosen --protocol")
     run.add_argument("--case-id", required=True)
     run.add_argument("--images", type=Path, required=True, help="JSON with reference and linked ImageSpec objects")
     run.add_argument("--case-config", type=Path, required=True)
@@ -138,7 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--gap-row-case",
         action="append",
         default=[],
-        help="closed allowlisted gap-row case ID; repeat for each permitted case",
+        help="allowlisted gap-row case ID; repeat for each case",
     )
 
     return parser

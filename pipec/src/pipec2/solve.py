@@ -161,7 +161,8 @@ def _candidate_values(
         if name in pipeline.forced_bindings:
             allowed &= {pipeline.forced_bindings[name]}
         if not allowed:
-            _reject("L-HANDLE", f"pipeline.handles.{name}.values", "selected-value constraints have an empty intersection")
+            _reject("L-REGS" if name == "pipelink_launch_regs" else "L-HANDLE",
+                    f"pipeline.handles.{name}.values", "selected-value constraints have an empty intersection")
         if handle.cls == "regs":
             launch_cap = name == "pipelink_launch_regs" and handle.owner == "reg_group:launch"
             maximum = profile.caps.launch_regs_max if launch_cap else profile.caps.regs_max
@@ -209,6 +210,8 @@ def _claim_refs(stages: list[StageManifest]) -> tuple[dict[str, list[_ClaimRef]]
     registers: list[_ClaimRef] = []
     for stage in stages:
         for claim in sorted(stage.claims, key=lambda item: (item.domain, item.handle)):
+            if claim.domain == "regs" and claim.handle == "pipelink_launch_regs":
+                continue  # A launch-wide value constraint, not a role allocation group.
             roles = tuple(sorted(claim.roles or ()))
             if claim.domain == "warp" and not roles:
                 if len(stage.roles) != 1:
@@ -390,12 +393,10 @@ def _register_groups(
         return None
 
     pool = sum(value * (hi - lo) * 32 for _, _, lo, hi, _, value in specs)
-    # This pre-link pool inequality is a sound prune, not the L-REGS gate.
-    # ptxas may under-allocate below the requested cap, so observed pools
-    # can be smaller than cap * threads and a pre-link pass does not guarantee
-    # a post-link pass. Rejection here remains sound because the observed
-    # allocation never exceeds the requested cap. The fail-closed post-link
-    # observed-REG check in link.py is the definitive L-REGS gate.
+    # A sound pre-link prune; the post-link observed-register check in link.py is
+    # the L-REGS gate. ptxas may allocate below the requested cap, so passing here
+    # does not guarantee passing there, but observed allocation never exceeds the
+    # cap, so rejecting here is safe.
     launch_handle = pipeline.handles.get("pipelink_launch_regs")
     if launch_handle is not None:
         if launch_handle.cls != "regs" or "pipelink_launch_regs" not in values:
@@ -430,23 +431,25 @@ def _topology(
     stages: list[StageManifest],
     profile: Profile,
 ) -> tuple[int, int, tuple[int, int, int] | str]:
-    cta_groups = {stage.topology.cta_group for stage in stages}
+    # Role-less stages may leave topology undeclared: only absent declarations are skipped.
+    declared = [stage for stage in stages if stage.topology is not None]
+    cta_groups = {stage.topology.cta_group for stage in declared}
     if len(cta_groups) != 1:
         _reject("L-TOPO", "stages.topology.cta_group", "stages disagree on compiled cta_group")
     cta_group = next(iter(cta_groups))
     if cta_group not in profile.caps.cta_group_legal:
         _reject("L-TOPO", "stages.topology.cta_group", "compiled cta_group is not target-legal")
-    for stage in stages:
+    for stage in declared:
         if stage.topology.persistent != pipeline.topology.persistent:
             _reject("L-TOPO", f"stages.{stage.id}.topology.persistent", "stage and pipeline persistence disagree")
         if stage.topology.scheduler != pipeline.topology.scheduler:
             _reject("L-TOPO", f"stages.{stage.id}.topology.scheduler", "stage and pipeline schedulers disagree")
-    fixed = {stage.topology.cluster_compiled for stage in stages if stage.topology.cluster_compiled != "dynamic"}
+    fixed = {stage.topology.cluster_compiled for stage in declared if stage.topology.cluster_compiled != "dynamic"}
     if len(fixed) > 1:
         _reject("L-TOPO", "stages.topology.cluster.compiled", "compiled cluster shapes disagree")
-    x_multiple = math.lcm(cta_group, *(stage.topology.cluster_launch.x_multiple_of for stage in stages))
+    x_multiple = math.lcm(cta_group, *(stage.topology.cluster_launch.x_multiple_of for stage in declared))
     maximum = tuple(
-        min(stage.topology.cluster_launch.max[axis] for stage in stages)
+        min(stage.topology.cluster_launch.max[axis] for stage in declared)
         for axis in range(3)
     )
     if x_multiple > maximum[0] or any(value < 1 for value in maximum):
@@ -828,7 +831,7 @@ def solve(
     """
     del canon
     ordered_stages = sorted(stages, key=lambda item: item.id)
-    # Canonicalize complete claim/variant keys, not just domain+handle ties.
+    # Sort claims and variants by their complete keys, so domain+handle ties stay deterministic.
     ordered_stages = [
         dataclass_replace(
             stage,
@@ -839,8 +842,8 @@ def solve(
     ]
     if len({stage.id for stage in ordered_stages}) != len(ordered_stages):
         _reject("L-TOPO", "stages", "stage ids are not unique")
-    # Expansion coupling has already been materialized into shared handles and
-    # claims by protocol.py. The old solver only checked channel uniqueness here.
+    # protocol.py has already materialized expansion coupling into shared handles
+    # and claims; only channel uniqueness is checked here.
     if len({item.channel for item in expansions}) != len(expansions):
         _reject("L-PROTO", "protocol_expansions", "protocol expansion channels are not unique")
     _, _, cluster = _topology(pipeline, ordered_stages, profile)

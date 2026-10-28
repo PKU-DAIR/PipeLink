@@ -1,13 +1,14 @@
 # Communication-overlapped GEMM on Hopper
 
-AllGather→GEMM and GEMM→ReduceScatter built from the
+AllGather→GEMM and GEMM→ReduceScatter, built from the
 [hopper-gemm-split](../hopper-gemm-split/README.md) packages and an independent communication owner.
-Peer memory is caller-owned, and all transport and arithmetic are owner code—not synthesized by the linker.
+The caller owns peer memory, and all transport and arithmetic are owner code; the linker
+synthesizes none of it.
 
-**RS is a two-kernel step:** a linked **GEMM+push** kernel, followed on the same stream by an
-owner-local reduction kernel. The reduction is **not inside the linked kernel**. Both kernels are
-included in end-to-end timing and placement. A separate push-only phase measurement prevents the
-common reduction kernel from hiding a linked/one-TU regression.
+**ReduceScatter (RS) is a two-kernel step:** a linked **GEMM+push** kernel, followed on the same
+stream by an owner-local reduction kernel that sits outside the linked image. End-to-end timing and
+placement include both kernels. A separate push-only measurement keeps the shared reduction kernel
+from hiding a linked/one-TU regression.
 
 ## Compositions and ownership
 
@@ -17,46 +18,50 @@ common reduction kernel from hiding a linked/one-TU regression.
 | `rs` | unchanged host-bearing GEMM `load` + `mma`, new `comm.epilogue.rs` push stage | Local and peer receive slots; then `comm_rs_reduce` produces `sum_q(A_q @ B_q.T)[r*M/W:(r+1)*M/W]` |
 | `base` | unchanged host-bearing GEMM `load` + `mma`, unchanged `epilogue_store` | Full local GEMM; used by the sequential baselines |
 
-The RS owner ships `comm_rs.so`, its stage package, `rs/reduce.cubin`, and public `comm/comm.h`.
-The runner passes the companion kernel the **opaque provider-produced residue slice** already
-published in the host session. It does not rebuild descriptors or instantiate owner device templates.
-Per-generation sessions have distinct output allocations but share slots, counters, generation and
-completion flags. Every graph replay includes the push and completion kernels in stream order.
+The RS owner ships `comm_rs.so`, its stage package, `rs/reduce.cubin` and the public `comm/comm.h`.
+The runner passes the reduction kernel the **opaque residue slice** that the provider already
+published in the host session; it neither rebuilds descriptors nor instantiates owner device
+templates. Each generation's session has its own output allocation; all share the slots, counters,
+generation and completion flags. Every graph replay includes the push and completion kernels in
+stream order.
 
-The original GEMM sources/packages are not modified. RS copies its `load.plink`, `mma.plink`,
-`provider.so` and public header from `hopper-gemm-split/out/host-sm_90a/owner/`.
-AG has a separate `gemm.owner.ag` host group: `build.py` stages the original MMA source unchanged,
-with its relative host-annotation include routed to the AG owner header. Only **MMA device code** is
-reused by AG; the AG and RS MMA packages are distinct.
+The GEMM sources and packages are reused as is. RS copies `load.plink`, `mma.plink`, `provider.so`
+and the public header from `hopper-gemm-split/out/host-sm_90a/owner/`. AG has its own
+`gemm.owner.ag` host group: `build.py` stages the original MMA source unchanged and routes its
+relative host-annotation include to the AG owner header. AG reuses only the **MMA device code**, so
+the AG and RS MMA packages are distinct.
 
 ## AllGather protocol
 
 Each rank has a symmetric gathered bf16 `[M,K]` buffer; its own shard already occupies rows
-`[r*M/W,(r+1)*M/W)`. One comm warp (warp 10) independently drains a rank-local launch-reset ticket
-queue. A ticket copies a 128-row × 256-column chunk to one peer. Every writing lane fences at system
-scope, the warp synchronizes, and one lane performs `red.release.sys` on the peer's row-block counter.
+`[r*M/W,(r+1)*M/W)`. One comm warp (warp 10) drains a rank-local ticket queue, reset at each launch,
+independently of the GEMM. A ticket copies a 128-row × 256-column chunk to one peer. Every writing
+lane fences at system scope, the warp synchronizes, and one lane performs `red.release.sys` on the
+peer's row-block counter.
 
 `load_ag` uses the original load schedule plus:
 - one `ld.acquire.sys` readiness wait per remote CTA row-block, then `fence.proxy.async.global` before TMA;
 - a final non-consuming full-phase wait for every filled ring slot, then the linker-bound CTA-local
   `gather_reads_done` signal to comm.
 
-The last locally completed comm CTA advances generation and publishes `released`. Before overwriting a
-peer's gathered buffer in the next generation, the comm warp waits for that peer's previous reads.
-Independent queue draining avoids a dependency on whether the matching consumer CTA is resident.
+The last comm CTA to finish locally advances the generation and publishes `released`. Before
+overwriting a peer's gathered buffer in the next generation, the comm warp waits until that peer has
+finished its previous reads. Because the queue drains independently, progress does not depend on
+whether the matching consumer CTA is resident.
 
-Read/write access views have different channel names over the same caller sources:
+Read and write views of the same caller sources have different channel names:
 `comm.ag.gather` / `gemm.ag.a`, `comm.ag.ready` / `gemm.ag.ready`, and the respective `gen` views.
 Chunk dimensions flow through host facts; counter slots use a linker `gmem_counter` binding.
 Each owner declares `PL_HOST_DOMAIN(1, "tp")`; symmetric channels use `.peer("tp")`.
 Providers obtain rank and world through `plk_find_domain(common, 1)`. The caller uses
 `symmetric(..., domain="tp")` and opens rank `r` with `domains={"tp": Domain(r, W)}`.
-`comm/push_gather.cuh` remains the shared AG/CP communication implementation.
+`comm/push_gather.cuh` holds the communication code shared by AG and context-parallel (CP)
+attention.
 
 ## ReduceScatter protocol
 
-The default push stage uses **two comm warps**, 9–10. Together with the unchanged eight MMA warps and
-load warp this is 352 threads, with 196,768 bytes of dynamic shared memory and operand-ring depth 4.
+The default push stage uses **two comm warps**, 9–10. With the eight MMA warps and the load warp
+this makes 352 threads, with 196,768 bytes of dynamic shared memory and operand-ring depth 4.
 
 ### Push-only GEMM epilogue
 
@@ -66,83 +71,84 @@ For each 128×128 f32 accumulator tile:
    The owner copies its own partial into its own local slot.
 3. Every remote-writing lane executes one `fence.acq_rel.sys` **after its entire stripe**, then all comm
    threads join a comm-only counted named barrier. One lane issues one non-returning `red.release.sys`
-   on the owner's tile counter. There are **W−1 arrivals**, not W; the owner does not signal itself.
-4. Only the first comm warp supplies the original **32** drained arrivals. Extra readers have completed
-   their shared-memory reads before that arrival, through the comm-only barrier. The frozen MMA channel
-   remains byte-for-byte compatible.
+   on the owner's tile counter. There are **W−1 arrivals**: the owner does not signal itself.
+4. Only the first comm warp supplies the original **32** drained arrivals; the comm-only barrier
+   ensures the extra readers have finished their shared-memory reads before that arrival. The MMA
+   channel contract is therefore unchanged, byte for byte.
 
-No push CTA waits for current-generation work, takes a last-arriver reduction, or reads remote slots.
-There are no remote output stores. Own-slot visibility comes from the subsequent same-stream kernel
-boundary; no separate local-ready queue or publication flag is needed.
+A push CTA never waits for current-generation work, performs a last-arriver reduction or reads
+remote slots, and nothing stores to remote outputs. The next kernel boundary on the same stream
+makes the owner's own slot visible, so no local-ready queue or publication flag is needed.
 
 ### Owner-local completion kernel
 
 `comm/reduce_rs.cu` runs on the same stream after GEMM+push:
 - 128 threads/CTA, no shared memory, a persistent grid of
   `min(owner_tiles, driver_max_active_clusters)` unit-cluster CTAs;
-- the evidenced H200 build admits 528 resident CTAs (132 SMs × 4); smaller problems use fewer;
+- on the H200 build measured here, 528 CTAs are resident (132 SMs × 4); smaller problems use fewer;
 - each CTA walks its assigned tiles, and lane 0 acquire-waits on the **local** peer counter;
 - `__syncthreads()` hands that acquire to all readers, followed by their system fences;
 - all receive-slot reads and output stores are **local**;
-- the sum starts from slot 0 and adds slots 1…W−1 in fixed rank order, preserving bitwise repeatability;
+- the sum starts from slot 0 and adds slots 1…W−1 in fixed rank order, so results are bitwise repeatable;
 - the final completion CTA advances the u64 generation and publishes the narrowed u32 completion flags.
 
-For generation `g`, parity counters reach
-`uint32(((g >> 1) + 1) * (W-1))`. The division is performed before narrowing: retaining the u64 generation
-keeps the parity offset correct at u32 generation wrap when the contributor count is odd.
+For generation `g`, parity counters reach `uint32(((g >> 1) + 1) * (W-1))`. The division happens
+before narrowing; keeping the generation in u64 keeps the parity offset correct when the u32
+generation wraps and the contributor count is odd.
 
 ### Progress and cross-launch WAR proof
 
 **Progress:** a waiting completion kernel depends only on current-generation peer GEMM+push kernels.
 Those producers never wait on completion, and its own producers already finished on the same stream.
 If a peer has reached completion, its pushes are already published. If it has not reached this generation,
-its dependencies lie in previous generations. The completion grid is bounded by simultaneous residency;
-there is no dependency on an unscheduled producer or reduction CTA on its own GPU.
+its dependencies lie in previous generations. The completion grid fits within simultaneous residency,
+so it never waits on an unscheduled producer or reduction CTA on its own GPU.
 
-An unconditional in-grid owner-CTA spin would not have this property: different ranks could occupy all
-SMs with different owner tiles, leaving the required peer producer CTAs unscheduled. The protocol does not
-assume matching CUDA block scheduling across GPUs.
+An unconditional spin by the owner CTA inside the GEMM grid would lose this property: different ranks
+could fill all SMs with different owner tiles, leaving the peer producer CTAs they wait for
+unscheduled. The protocol makes no assumption that CUDA schedules blocks identically across GPUs.
 
 **Double-buffer WAR:** a launch-g+2 push would overwrite slots read in g. Before rank p starts g+2, its
 stream must finish its g+1 owner reduction, which requires rank o's g+1 push. Rank o can issue that push
-only after finishing g, including all reads of the slots p would overwrite. Thus stream order plus the
-intervening generation and double buffering already enforce WAR. RS needs no per-tile cross-launch
-`released` wait; AG/CP require that wait to protect their gathered buffers.
+only after finishing g, including all reads of the slots p would overwrite. Stream order, the
+intervening generation and double buffering therefore enforce WAR, and RS needs no per-tile
+cross-launch `released` wait. AG and CP do need that wait to protect their gathered buffers.
 
 These guarantees require W≥2, one serialized stream per rank, consistent generation identity, and
-lockstep steps across ranks. A caller must launch the companion reduction, not just the push kernel.
-`released` remains a published completion flag, but is not polled on the RS push path.
+ranks stepping in lockstep. The caller must launch the reduction kernel as well as the push kernel.
+`released` is still published as a completion flag, but the RS push path does not poll it.
 
 ## Build and run
 
 ```sh
+source tools/env.sh
 # GPU-free; default RS push width is two warps.
 uv run --project pipec --locked python examples/comm-overlap/build.py --profile sm_90a
 
 uv run --project pipec --locked python examples/comm-overlap/run.py check --profile sm_90a --tp 2 4
 uv run --project pipec --locked python examples/comm-overlap/run.py sanitize --profile sm_90a --composition rs --tp 2
 uv run --project pipec --locked python examples/comm-overlap/run.py sanitize --profile sm_90a --composition rs --tp 4
-uv run --project pipec --locked python examples/comm-overlap/run.py time --profile sm_90a --lock-mhz 1300
+uv run --project pipec --locked python examples/comm-overlap/run.py time --profile sm_90a --lock-mhz "$PIPELINK_LOCK_SM_MHZ"
 uv run --project pipec --locked python examples/comm-overlap/run.py sass --profile sm_90a
 ```
 
-Commands default to the physical GPU list in the machine's `PIPELINK_GPUS`.
-An explicit `--gpus` overrides that list; logical rank IDs are never physical GPU IDs.
+Commands use the physical GPU list in `PIPELINK_GPUS` unless `--gpus` overrides it. Ranks are
+logical and numbered independently of physical GPU IDs.
 
 `--composition ag` runs the AG legs. `build.py --composition rs` builds RS plus its base-GEMM baseline;
 `--out DIR` and runner `--artifacts DIR` select an isolated artifact tree. Every link has a whole-program
-same-source one-TU control and a backend-matched LTO diagnostic. RS also builds the common reduction cubin.
+same-source one-TU control and a backend-matched LTO diagnostic. RS also builds the shared reduction cubin.
 
-Providers run outside graph capture. `CudaBackend.current()` scopes CUDA work and the reused independent
-cuBLAS oracle. Peer access and allocations are caller responsibilities; `fixture.symmetric` supplies
-peer tables. All step launches, including graph launches, are issued to every rank before any host wait.
+Providers run outside graph capture. `CudaBackend.current()` scopes CUDA work and the shared
+independent cuBLAS oracle. The caller is responsible for peer access and allocations;
+`fixture.symmetric` supplies peer tables. Every step's launches, graph launches included, are issued
+to every rank before any host wait.
 
-## Campaign-clock results — 1300 MHz
+## Results at a locked 1230 MHz clock
 
-Measurements use the H200 measurement host with CUDA 13.3 and driver 580.126.09.
-The runner maps the configured device set to logical ranks 0…W−1.
-A gpulockd preflight and timing lease hold the **1300 MHz target**, with
-**1305 MHz readback**, zero violations and healthy status.
+Measured on the H200 host with CUDA 13.3 and driver 580.126.09. The runner maps the configured
+devices to logical ranks 0…W−1. For TP2 and TP4, timing runs held the SM clock at **1230 MHz**
+(target and readback) with zero violations, stayed healthy and released the lock cleanly.
 
 ### Correctness
 
@@ -151,52 +157,55 @@ A gpulockd preflight and timing lease hold the **1300 MHz target**, with
 - RS: small problems from generation 0 and both wrap presets at each TP, plus the two large problems
   (eight cells).
 
-The full direct, per-rank graph, and six-changing-generation pipelined legs ran, including delayed
-rank starts, concurrent SM contention, distinct per-generation outputs, and no cross-rank joins on
+Each cell ran the direct, per-rank graph and pipelined (six changing generations) legs, with delayed
+rank starts, concurrent SM contention, a distinct output per generation and no cross-rank joins on
 the launch streams. Every saved output was compared with the independent cuBLAS oracle at
 rtol=atol=1e−3. Maximum absolute error was **0 for AG** and **5.65e−4 for RS**.
 Linked/one-TU and repeated-graph outputs were bitwise equal in every cell. The large timing cases
-and sequential baselines also passed their oracle checks, and post-timing outputs remained bitwise.
+and sequential baselines also passed their oracle checks, and outputs after timing were still
+bitwise equal.
 
 ### Seam parity and absolute throughput
 
-The global problem remains **8192×8192×4096**. AG uses per-rank N=8192/W; RS uses per-rank K=4096/W.
-The complete step uses the unchanged all-rank boundary: starts on every rank, N asynchronous lockstep
-steps, ends on every rank, then all-rank synchronization; step time is `max_rank(elapsed)/N`.
-Eight balanced ABBA/BAAB blocks are used. Ratios are medians of balanced block ratios, while displayed
-times are scored means. All duration checks and the ≤1.03 parity bounds passed.
+The global problem is **8192×8192×4096**. AG uses per-rank N=8192/W; RS uses per-rank K=4096/W.
+A complete step is measured across all ranks: start events on every rank, N asynchronous lockstep
+steps, end events on every rank, then an all-rank synchronization; step time is
+`max_rank(elapsed)/N`. Eight balanced ABBA/BAAB blocks are used. Speedups are medians of per-block
+baseline milliseconds / linked milliseconds (higher is better); displayed times are means.
+All duration checks and the ≥1/1.03 (≈0.970874×) parity floors passed.
 
-| Composition | TP | Linked / one-TU step | Linked complete step ms | Aggregate TFLOP/s |
+| Composition | TP | One-TU / linked step speedup | Linked complete step ms | Aggregate TFLOP/s |
 |---|---:|---:|---:|---:|
-| AG | 2 | **0.99972** | 0.7927 | 693.5 |
-| AG | 4 | **0.99951** | 0.4953 | 1110.0 |
-| RS | 2 | **1.00039** | 0.8242 | 667.0 |
-| RS | 4 | **1.00002** | 0.9325 | 589.5 |
+| AG | 2 | **1.00004** | 0.8385 | 655.7 |
+| AG | 4 | **1.00023** | 0.5157 | 1066.0 |
+| RS | 2 | **1.00057** | 0.8691 | 632.5 |
+| RS | 4 | **1.00074** | 0.9496 | 579.0 |
 
-RS's separate **GEMM+push-only** parity gate also passed; the common completion kernel cannot hide
-a seam regression:
+RS's separate **GEMM+push-only** parity check also passed, so the shared completion kernel does not
+mask a seam regression:
 
-| TP | GEMM+push linked / one-TU | Linked push phase ms |
+| TP | GEMM+push one-TU / linked speedup | Linked push phase ms |
 |---|---:|---:|
-| 2 | **1.00032** | 0.6809 |
-| 4 | **0.99902** | 0.8225 |
+| 2 | **0.99937** | 0.7198 |
+| 4 | **1.00093** | 0.8353 |
 
-### End-to-end placement (descriptive, not gated)
+### End-to-end placement (no pass/fail threshold)
 
-| Composition | TP | Composed step ms | Sequential baseline ms | Composed / sequential |
+| Composition | TP | Composed step ms | Sequential baseline ms | Sequential / composed speedup |
 |---|---:|---:|---:|---:|
-| AG | 2 | 0.7920 | 0.8353 | **0.9479** |
-| AG | 4 | 0.4955 | 0.5480 | **0.9044** |
-| RS | 2 | 0.8248 | 1.3653 | **0.6041** |
-| RS | 4 | 0.9319 | 1.3226 | **0.7047** |
+| AG | 2 | 0.8387 | 0.8850 | **1.0550** |
+| AG | 4 | 0.5158 | 0.5747 | **1.1137** |
+| RS | 2 | 0.8713 | 1.4283 | **1.6389** |
+| RS | 4 | 0.9514 | 1.3619 | **1.4317** |
 
-AG's baseline is peer-copy gather followed by unchanged GEMM. RS's is unchanged GEMM plus separate
-rank-order reduction and the existing readiness/WAR joins. **Both RS kernels** are included in the
-composed measurement. Placement uses its own balanced paired trials, so its means need not exactly
-equal the seam-parity trial means.
+AG's baseline is a peer-copy gather followed by the GEMM. RS's is the GEMM followed by a separate
+rank-order reduction with the same readiness and WAR joins. The composed RS measurement includes
+**both RS kernels**. Placement runs its own balanced paired trials, so its means can differ slightly
+from the seam-parity means.
 
-Evidence: `out/sm_90a/results-time-1300.json` (also the current `results-time.json`),
-`results-check.json`, and `clock-preflight-1300.json`.
+Timing and clock-lock evidence: `out/sm_90a/results-time-1230-tp2.json` and
+`results-time-1230-tp4.json`. Clock-independent checks are in `results-check.json`; both timing
+records also pass the timing-shape oracle and post-timing bitwise checks.
 
 ## Clock-independent correctness and traffic evidence
 
@@ -225,19 +234,18 @@ Evidence: `out/sm_90a/results-time-1300.json` (also the current `results-time.js
 
 Normalized linked/direct-one-TU SASS is **N=0**: RS GEMM+push 584/584 instructions, no local traffic or calls.
 Push uses 90 registers/thread. The separate reducer uses 125 registers, no spill/stack and no shared memory;
-its binary is identical between linked and control steps. AG remains 1432/1432 with no local traffic/calls.
+its binary is identical between linked and control steps. AG is 1432/1432 with no local traffic/calls.
 
 | New-stage source | Device annotation statements | Host statements |
 |---|---:|---:|
-| `comm/ag_gather.cu` | 8 | 15 |
-| `comm/epilogue_rs.cu` | 9 | 14 |
-| `gemm_ag/load_ag.cu` | 8 plus two shared GEMM macros | 0 |
-| `gemm_ag/host_annotations.cuh` | 0 | 19 |
+| `comm/ag_gather.cu` | 6 | 14 |
+| `comm/epilogue_rs.cu` | 6 | 13 |
+| `gemm_ag/load_ag.cu` | 6 plus two shared GEMM macros | 0 |
+| `gemm_ag/host_annotations.cuh` | 0 | 18 |
 
-The standalone reduction kernel has zero PipeLink stage annotations: it is explicitly outside the linked
-image. Provider-local ABI type counts remain 2/2/7 for comm AG / comm RS / GEMM AG; no neutral ABI inventory
-is restated. One additional named-barrier claim covers the multi-warp RS handoff.
+The standalone reduction kernel has no PipeLink stage annotations because it is outside the linked
+image. Provider-local ABI type counts are 2/2/7 for comm AG / comm RS / GEMM AG, and none restates
+the neutral ABI inventory. One extra named-barrier claim covers the multi-warp RS handoff.
 
-
-Evidence is under ignored `out/sm_90a/`: `results-{check,time,sass,sanitize}.json`,
+Evidence is under the ignored `out/sm_90a/`: `results-{check,time,sass,sanitize}.json`,
 `results-sanitize-tp4.json`, `sanitize/`, and `sass/`.

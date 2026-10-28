@@ -1,0 +1,31 @@
+{
+  "sources": [
+    "campaigns/coda/producers/sm90/producer.cu"
+  ],
+  "includes": [
+    "third_party/mixture-of-kittens/third_party/ThunderKittens/include",
+    "pipec/src/pipec2/host/include"
+  ],
+  "defines": {
+    "KITTENS_HOPPER": 1
+  },
+  "std": "c++20",
+  "compile_flags": [
+    "--expt-relaxed-constexpr",
+    "--expt-extended-lambda"
+  ],
+  "profile": "sm_90a",
+  "host_group": "coda.sm90.params",
+  "provider": {
+    "build": [
+      "uv",
+      "run",
+      "--project",
+      "pipec",
+      "python",
+      "campaigns/coda/producers/sm90/build.py"
+    ],
+    "artifact": "campaigns/coda/out/sm_90a/producer/provider.so",
+    "header": "campaigns/coda/producers/sm90/provider.h"
+  }
+}

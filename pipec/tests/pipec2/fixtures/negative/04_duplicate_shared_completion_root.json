@@ -1,6 +1,5 @@
 {
   "name": "duplicate_shared_completion_root",
-  "reference": "design §8.3",
   "description": "The shared-completion sum lists its root twice.",
   "base": "shared_completion",
   "phase": "schema.stage",

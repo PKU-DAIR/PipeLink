@@ -32,10 +32,10 @@ class _ClcSm100:
     def _map(self, m, n, l, valid, offset_m=0, offset_n=0):
         """Pinned CUTLASS sm100_tile_scheduler.hpp:697–802, transpose:668–676.
 
-        Use the executable mapping (788–789), not the comment's serpentine
-        example: this revision does not implement a serpentine flip. Residual
-        cluster rows/columns are unchanged, and AlongN transposes cluster
-        coordinates while retaining the intra-cluster CTA remainder.
+        Follows the code (788–789); the serpentine example in its comment is not
+        implemented at this revision. Residual cluster rows/columns keep their
+        coordinates, and AlongN transposes cluster coordinates while keeping
+        the intra-cluster CTA remainder.
         """
         cm, cn, size = self.cluster_shape_m, self.cluster_shape_n, self.swizzle_size
         # Guard the divisor even in eagerly evaluated Select arms for size=0.
@@ -72,10 +72,11 @@ class _ClcSm100:
 def clc_sm100_v1(partner_strategy, params):
     """Bind strategy inputs to Python constants or TileLang scalar expressions.
 
-    ``raster_order`` is CUTLASS detail::RasterOrder (AlongM=0, AlongN=1),
-    not RasterOrderOptions (which also contains Heuristic). The string names
+    ``raster_order`` is CUTLASS detail::RasterOrder (AlongM=0, AlongN=1); the
+    RasterOrderOptions value Heuristic is not accepted. The string names
     AlongM/AlongN are accepted for static specialization. Grid extents come
-    from the active T.Kernel/T.ClusterKernel launch, never problem dimensions.
+    (in CTAs, not problem dimensions) from the active T.Kernel/T.ClusterKernel
+    launch unless ``grid_m``/``grid_n`` are given.
     """
     strategy_id = _field(partner_strategy, "id") if partner_strategy is not None else None
     if strategy_id != "clc-sm100-v1":
@@ -83,8 +84,8 @@ def clc_sm100_v1(partner_strategy, params):
     if tuple(_field(partner_strategy, "inputs")) != _INPUTS:
         raise ValueError("clc-sm100-v1 strategy inputs differ from the pinned contract")
     values = {name: _field(params, name) for name in _INPUTS}
-    # Extracted device roles execute in the linker's runtime grid, not their
-    # authoring launch. Explicit runtime grid expressions override that launch.
+    # Extracted device roles run in the linker's runtime grid, which can differ
+    # from their authoring launch; grid_m/grid_n supply its extents.
     for name in ("grid_m", "grid_n"):
         values[name] = params.get(name) if isinstance(params, Mapping) else getattr(params, name, None)
     order = values["raster_order"]

@@ -2,7 +2,7 @@
 #include "tensor_source.h"
 #include "host_view.h"
 
-// The device object never includes registration machinery or evaluates annotations.
+// Registration machinery exists only in the emit build; the device object never evaluates annotations.
 #if defined(PIPELINK_EMIT)
 #include <pipelink_host_abi_v2.h>
 #include <algorithm>
@@ -28,13 +28,13 @@ struct __nv_bfloat16;
 #endif
 
 namespace pl {
-// Strings and initializer-list aggregates (including nested trees) are borrowed
-// views. Named constexpr annotations need static backing lists at every nesting
-// level; inline PL_* arguments live until registration copies their data.
-// Device builders own scalar fields and endpoint binds without allocating.
+// Strings and initializer-list aggregates, nested ones included, are borrowed
+// views. A named constexpr annotation needs static backing lists at every nesting
+// level; inline PL_* arguments live until registration copies them. Device
+// builders store scalar fields and endpoint binds by value, without allocating.
 using strings = std::initializer_list<const char*>;
-// A sub-byte channel can name an alias of host_storage<uint8_t, 2>: two
-// logical storage elements in one compiler-sized C storage unit.
+// A sub-byte channel can name an alias of host_storage<uint8_t, 2> to pack two
+// logical elements into one C storage unit whose size the compiler reports.
 template <typename T, unsigned Elements> struct host_storage {};
 struct coord { const char* name; int lo, hi; };
 struct values { const char* name; const char* sort; std::initializer_list<int> elements; };
@@ -49,16 +49,18 @@ struct identity {
   const char* interpretation; std::initializer_list<coord> coords;
 };
 struct readiness { const char* after; const char* reuse_after; };
-// Event-bounded claim storage, relative to this stage's tensor export/import.
-// An omitted end lasts through kernel end. Before arriving at `to`, the owner
-// completes all accesses in every proxy (including TMA, cp.async, WGMMA/tcgen05),
-// and invalidates embedded mbarriers only after a collective point following
-// every owner's wait/arrive. release() must not touch the ended range.
-// Accessing threads outside the generated event cohort also issue
-// fence.proxy.async.shared::cta after their last generic access; the linker
-// fences cohort threads. No access may precede observing `from`.
-// Readiness is published once per CTA. Export backing must remain live through
-// completion; dead operand storage is not backing for register/TMEM exports.
+// Claim storage live between two events of this stage's tensor export or import.
+// Without `to`, it lasts until the kernel ends. Rules for the owner:
+// - Access nothing before observing `from`.
+// - Before arriving at `to`, complete all accesses in every proxy (including TMA,
+//   cp.async, WGMMA/tcgen05). Invalidate embedded mbarriers only after a
+//   collective point that follows every owner's wait/arrive.
+// - release() must not touch the ended range.
+// - Threads outside the generated event cohort issue fence.proxy.async.shared::cta
+//   after their last generic access; the linker fences cohort threads.
+// Readiness is published once per CTA. An export's backing storage must stay live
+// until completion; dead operand storage does not count as backing for register
+// or TMEM exports.
 struct during { const char* tensor; const char* from; const char* to = nullptr; };
 struct calls { const char* produce; const char* release = nullptr; };
 struct sync { int generations, capacity; };
@@ -92,8 +94,8 @@ constexpr lend cta_barrier(const char* name, int base, const char* owner,
 }
 struct arg { const char* name; const char* meaning; };
 using args = std::initializer_list<arg>;
-// "enter_once": one site entry per CTA. "single_completion": the import's
-// completion helper is called exactly once per entry, with no later import call.
+// "enter_once": the site is entered once per CTA. "single_completion": the import's
+// completion helper is called exactly once per entry, and no import call follows it.
 using guarantees = strings;
 struct fixed_binding { const char* name; int value; };
 using fixed_bindings = std::initializer_list<fixed_binding>;
@@ -222,6 +224,42 @@ struct ring {
   constexpr ring(handle depth, int stride) : depth_handle(depth.name), stage_stride_bytes(stride) {}
 };
 
+// Callable interfaces. A cohort of N threads is a converged, contiguous, N-aligned group of
+// the caller's threads; the export's interface and every call site must name the same N.
+struct cohort { int threads; };
+struct collective_kind { const char* kind; const char* handle = nullptr; };
+namespace collective {
+// Synchronization the callee performs over its cohort.
+inline constexpr collective_kind none{"none"};
+inline constexpr collective_kind warp{"warp"};   // __syncwarp: cohort 32
+inline constexpr collective_kind cta{"cta"};     // __syncthreads: cohort = CTA threads
+// A named barrier the callee stage claims (PL_CLAIM_EX of `handle` in named_barrier).
+constexpr collective_kind named(const char* handle) { return {"named", handle}; }
+}
+// One pointer parameter, by its index in the C signature.
+//   space:  smem | gmem | generic | local | value
+//   access: r | w | rw
+//   dtype:  a tile dtype name
+//   extent: in elements
+// The export states what it touches and each call site what it provides. smem parameters
+// may also give their pl-layout-v2 layout.
+struct param {
+  int index; const char* space; const char* access; const char* dtype; int extent;
+  std::optional<affine> layout{};
+};
+using params_list = std::initializer_list<param>;
+struct interface {
+  pl::cohort cohort; collective_kind collectives; params_list params{};
+};
+struct site {
+  pl::cohort cohort; params_list params{};
+};
+// Exports of this stage from whose bodies a nested PL_CALL is made.
+struct in_exports {
+  strings names;
+  constexpr in_exports(strings names) : names(names) {}
+};
+
 namespace detail {
 struct unspecified {};
 struct no_layout {};
@@ -236,8 +274,9 @@ struct endpoint_fields {
 struct endpoint_bind { const char* key; const char* handle; };
 }
 
-// Layout/protocol and bind types follow the builder, so missing protocols are a
-// compile-time error and bind chains have no fixed capacity or borrowed nodes.
+// Each builder call returns a new type carrying the layout, protocol and binds, so a
+// missing protocol fails at compile time and bind chains need no fixed capacity or
+// borrowed nodes.
 template <typename Layout = detail::unspecified, typename Protocol = detail::unspecified,
           typename Binds = std::tuple<>> struct endpoint {
   detail::endpoint_fields fields;
@@ -275,8 +314,8 @@ template <typename Layout = detail::unspecified, typename Protocol = detail::uns
     }
   }
   constexpr endpoint& ring(pl::ring value) { fields.ring = std::optional<pl::ring>{value}; return *this; }
-  // Provided exports of this stage whose bodies use this endpoint: it leaves the interface
-  // of a pipeline in which every one of them is unreferenced.
+  // Provided exports of this stage whose bodies use this endpoint. A pipeline that
+  // references none of them drops the endpoint from its interface.
   constexpr endpoint& exports(strings names) { fields.exports = names; return *this; }
   template <typename Depth> constexpr endpoint& ring(Depth depth, int stride) { return ring(pl::ring(depth, stride)); }
   constexpr auto bind(const char* key, const char* handle) const {
@@ -286,9 +325,9 @@ template <typename Layout = detail::unspecified, typename Protocol = detail::uns
 };
 endpoint(const char*, const char*, const char*) -> endpoint<>;
 
-// Completion-only endpoints have no data footprint; the full mbarrier is their
-// only resource. Release "never" is one-shot; "external" delegates reuse ordering.
-// Inside an exported callable the role may be omitted (runs in the caller's role).
+// A completion-only endpoint carries no data; its full mbarrier is its only resource.
+// Release "never" makes it one-shot; "external" leaves reuse ordering to someone else.
+// Inside an exported callable the role may be omitted; it then runs in the caller's role.
 constexpr auto signal_endpoint(const char* name, const char* direction, const char* role = nullptr) {
   return endpoint<detail::no_layout>{name, direction, role}
       .space("none").scope("cta").proxy("generic").ring(pl::fixed(1), 0);
@@ -323,8 +362,8 @@ struct claim {
 };
 
 namespace detail {
-// nvcc's host lowering cannot name an inline lambda type in a CTAD result.
-// Captureless lambdas have a constexpr function-pointer conversion; named
+// nvcc's host lowering cannot name an inline lambda type in a CTAD result, so
+// captureless lambdas decay to function pointers (a constexpr conversion). Named
 // stateful callables keep their concrete type and are copied into the registry.
 template <typename T, typename = void> struct map_type { using type = T; };
 template <typename T> struct map_type<T, std::void_t<decltype(+std::declval<T>())>> {
@@ -574,8 +613,8 @@ int endpoint(const char* name, const pl::endpoint<Layout, Protocol, Binds>& x) {
     const auto& f = x.fields;
     if (!f.name || name != std::string(f.name))
       throw std::runtime_error(std::string("PL_ENDPOINT ") + name + ": macro name must match endpoint builder name");
-    // An endpoint inside an exported callable may omit its role (nullptr): it runs in the caller's
-    // role. Register tiles keep their role, which fixes their thread-value layout.
+    // An endpoint inside an exported callable may omit its role (nullptr) and run in the caller's
+    // role. Register tiles always name a role, because the role fixes their thread-value layout.
     const bool roleless = !f.role && f.space && std::strcmp(f.space, "reg") != 0;
     if (!f.direction || (!f.role && !roleless) || !f.space || !f.scope || !f.proxy)
       throw std::runtime_error(std::string("PL_ENDPOINT ") + name + ": requires direction, role, space, scope and proxy");
@@ -607,28 +646,102 @@ int endpoint(const char* name, const pl::endpoint<Layout, Protocol, Binds>& x) {
   return 0;
 }
 
+template <typename T, int Index = -1> std::string type_name();
+template <typename T> void type_prelude(std::string& out);
+// One member named by PL_TYPE, captured from the compiler: `align` is the member's
+// alignment in T (alignas included), `natural` its type's alignment, `elements` the
+// extent of a one-dimensional array member (0 for a scalar).
+struct type_member {
+  const char* name;
+  std::size_t offset, bytes, align, natural, elements;
+  std::string (*ctype)();
+  void (*prelude)(std::string&);
+};
+template <typename M> constexpr type_member describe_member(const char* name, std::size_t offset, std::size_t align) {
+  static_assert(std::rank_v<M> <= 1, "PL_TYPE members are scalars or one-dimensional arrays");
+  using E = std::remove_extent_t<M>;
+  return {name, offset, sizeof(M), align, alignof(M), std::extent_v<M>, &type_name<E, -1>, &type_prelude<E>};
+}
 template <typename T> struct registered_type {
   static constexpr const char* name = nullptr;
-  static constexpr const char* members = nullptr;
 };
-template <typename T> int register_type(const char* name) {
-  static_assert(std::is_class_v<T>, "PL_TYPE requires a class or struct type");
+// Converts to any member type: T{initializer...} accepts exactly as many initializers as
+// T has scalar/class members plus array elements (brace elision splits arrays only).
+struct type_initializer {
+  template <typename U> constexpr operator U() const;
+};
+template <std::size_t> using indexed_initializer = type_initializer;
+template <typename T, typename... A> constexpr auto initializes(int) -> decltype(void(T{std::declval<A>()...}), true) {
+  return true;
+}
+template <typename T, typename...> constexpr bool initializes(...) { return false; }
+template <typename T, std::size_t... I> constexpr bool initializes_with(std::index_sequence<I...>) {
+  return initializes<T, indexed_initializer<I>...>(0);
+}
+template <typename T> constexpr std::size_t named_initializers() {
+  std::size_t count = 0;
+  for (const auto& m : registered_type<T>::fields) count += m.elements ? m.elements : 1;
+  return count;
+}
+// Completeness: the named members account for every initializer of T.
+template <typename T, std::size_t N = named_initializers<T>()> constexpr bool type_names_every_member() {
+  static_assert(std::is_class_v<T> && std::is_aggregate_v<T>, "PL_TYPE requires an aggregate class type");
   static_assert(std::is_standard_layout_v<T>, "PL_TYPE requires a standard-layout type");
   static_assert(std::is_trivially_copyable_v<T>, "PL_TYPE requires a trivially copyable type");
+  return initializes_with<T>(std::make_index_sequence<N>{}) && !initializes_with<T>(std::make_index_sequence<N + 1>{});
+}
+// Layout: laying out the named members in order reproduces every offset, sizeof and alignof of T.
+template <typename T> constexpr bool type_names_layout() {
+  std::size_t end = 0, align = 1;
+  for (const auto& m : registered_type<T>::fields) {
+    std::size_t member_align = m.align > m.natural ? m.align : m.natural;
+    std::size_t offset = (end + member_align - 1) / member_align * member_align;
+    if (offset != m.offset) return false;
+    end = offset + m.bytes;
+    if (member_align > align) align = member_align;
+  }
+  return alignof(T) >= align && (end + alignof(T) - 1) / alignof(T) * alignof(T) == sizeof(T);
+}
+template <typename T> int register_type(const char* name) {
+  std::string members = "[";
+  for (const auto& m : registered_type<T>::fields) {
+    if (members.size() > 1) members += ',';
+    members += "{" + text("name", m.name) + ',' + field("ctype", quote(m.ctype())) + ',' + number("extent", m.elements)
+        + ',' + number("offset", m.offset) + ',' + number("bytes", m.bytes) + ',' + number("align", m.align) + '}';
+  }
   return add("type", name, text("name", name) + ',' + number("bytes", sizeof(T)) + ',' + number("align", alignof(T))
-      + ',' + text("members", registered_type<T>::members));
+      + ',' + field("members", members + ']'));
 }
 template <typename T> void type_prelude(std::string& out) {
-  if constexpr (std::is_reference_v<T> || std::is_const_v<T>) {
-    type_prelude<std::remove_const_t<std::remove_reference_t<T>>>(out);
+  if constexpr (std::is_reference_v<T> || std::is_const_v<T> || std::is_volatile_v<T>) {
+    type_prelude<std::remove_cv_t<std::remove_reference_t<T>>>(out);
   } else if constexpr (std::is_pointer_v<T>) {
     type_prelude<std::remove_pointer_t<T>>(out);
   } else if constexpr (registered_type<T>::name != nullptr) {
+    // A member pointing back at T needs no definition of T ahead of T's own.
+    static bool printing = false;
+    if (printing) return;
+    printing = true;
+    for (const auto& m : registered_type<T>::fields) m.prelude(out);
+    printing = false;
     std::string name = registered_type<T>::name;
     auto split = name.rfind("::");
-    auto definition = "struct " + (split == std::string::npos ? name : name.substr(split + 2))
-        + " { " + registered_type<T>::members + " };";
+    std::string body;
+    std::size_t align = 1;
+    for (const auto& m : registered_type<T>::fields) {
+      body += ' ';
+      if (m.align > m.natural) body += "alignas(" + std::to_string(m.align) + ") ";
+      body += m.ctype() + ' ' + m.name + (m.elements ? '[' + std::to_string(m.elements) + ']' : std::string()) + ';';
+      align = std::max(align, std::max(m.align, m.natural));
+    }
+    auto definition = std::string("struct ") + (alignof(T) > align ? "alignas(" + std::to_string(alignof(T)) + ") " : "")
+        + (split == std::string::npos ? name : name.substr(split + 2)) + " {" + body + " };";
     if (split != std::string::npos) definition = "namespace " + name.substr(0, split) + " { " + definition + " }";
+    definition += "\nstatic_assert(sizeof(" + name + ") == " + std::to_string(sizeof(T)) + " && alignof(" + name + ") == "
+        + std::to_string(alignof(T)) + ", \"PL_TYPE layout\");";
+    for (const auto& m : registered_type<T>::fields)
+      definition += "\nstatic_assert(__builtin_offsetof(" + name + ", " + m.name + ") == " + std::to_string(m.offset)
+          + ", \"PL_TYPE layout\");";
     std::string guard = name;
     for (auto& c : guard) {
       if (c >= 'a' && c <= 'z') c -= 'a' - 'A';
@@ -639,7 +752,7 @@ template <typename T> void type_prelude(std::string& out) {
     if (out.find(definition) == std::string::npos) out += definition;
   }
 }
-template <typename T, int Index = -1> std::string type_name() {
+template <typename T, int Index> std::string type_name() {
   if constexpr (std::is_lvalue_reference_v<T>) return type_name<std::remove_reference_t<T>, Index>() + "&";
   else if constexpr (std::is_rvalue_reference_v<T>) return type_name<std::remove_reference_t<T>, Index>() + "&&";
   else if constexpr (std::is_const_v<T>) {
@@ -748,7 +861,11 @@ int host_residue(std::uint64_t id, const char* name, const char* type, std::uint
   return add("host_residue", name, number("id", id) + ',' + text("name", name)
       + ',' + text("type", type) + ',' + number("type_id", type_id)
       + ',' + number("bytes", allocated ? sizeof(T) : 0) + ',' + number("align", alignof(T))
-      + ',' + host_semantics(json(reads)));
+      + ',' + number("type_bytes", sizeof(T)) + ',' + host_semantics(json(reads)));
+}
+inline int domain_capacity(const char* domain, long long capacity) {
+  if (capacity <= 0) throw std::runtime_error(std::string("PL_DOMAIN_CAPACITY ") + domain + ": capacity must be positive");
+  return add("domain_capacity", domain, text("domain", domain) + ',' + number("capacity", capacity));
 }
 template <typename T> struct host_storage_bits {
   static constexpr std::size_t value = sizeof(T) * 8;
@@ -770,6 +887,39 @@ template <typename Fn> int call(const char* name, const char* symbol, const char
   }
   return add("call", name, callable<Fn>(name, symbol) + ',' + text("direction", direction)
       + ',' + text("role", role_or_export) + (exported ? ',' + text("export", exported) : ""));
+}
+// A nested call site: made from inside the named exports of this stage, in their caller's role.
+template <typename Fn> int call(const char* name, const char* symbol, const char* direction,
+                               pl::in_exports from, const char* exported) {
+  if (std::strcmp(direction, "produce") != 0 || !from.names.size())
+    throw std::runtime_error(std::string("PL_CALL ") + name + ": pl::in_exports requires pl::produce and at least one export");
+  return add("call", name, callable<Fn>(name, symbol) + ',' + text("direction", direction)
+      + ',' + field("role", "null") + ',' + text("export", exported) + ',' + field("exports", json(from.names)));
+}
+inline std::string json(params_list items) {
+  std::string out = "[";
+  for (const auto& p : items) {
+    if (out.size() > 1) out += ',';
+    out += "{" + number("index", p.index) + ',' + text("space", p.space) + ',' + text("access", p.access)
+        + ',' + text("dtype", p.dtype) + ',' + number("extent", p.extent);
+    if (p.layout) out += ',' + field("layout", json(*p.layout));
+    out += '}';
+  }
+  return out + ']';
+}
+inline std::string json(cohort x) { return "{" + number("threads", x.threads) + '}'; }
+inline int interface(const char* name, const pl::interface& x) {
+  auto collectives = "{" + text("kind", x.collectives.kind)
+      + (x.collectives.handle ? ',' + text("handle", x.collectives.handle) : std::string()) + '}';
+  return add("interface", name, text("name", name) + ',' + field("cohort", json(x.cohort))
+      + ',' + field("collectives", collectives) + ',' + field("params", json(x.params)));
+}
+inline int call_site(const char* name, const pl::site& x) {
+  return add("call_site", name, text("name", name) + ',' + field("cohort", json(x.cohort))
+      + ',' + field("params", json(x.params)));
+}
+inline int entry_rendezvous(int barrier, int threads) {
+  return add("entry_rendezvous", "", number("barrier", barrier) + ',' + number("threads", threads));
 }
 inline std::string lifetime_json(const char* value) { return quote(value); }
 inline std::string lifetime_json(during value) {
@@ -1141,8 +1291,8 @@ struct channel {
   channel& read() { access = "read"; return *this; }
   channel& write() { access = "write"; return *this; }
   channel& read_write() { access = "read_write"; return *this; }
-  // One caller-lent allocation symmetric over a declared PL_HOST_DOMAIN. domain() alone is
-  // local access to it; peer()/multicast() add the views build receives.
+  // Makes the channel one caller-lent allocation, symmetric over a declared PL_HOST_DOMAIN.
+  // domain() alone gives local access; peer() and multicast() add the views build receives.
   channel& domain(const char* x) {
     if (domain_value && std::strcmp(domain_value, x) != 0)
       throw std::runtime_error("pl::host::channel " + name + ": views name different domains");
@@ -1355,78 +1505,87 @@ inline int host_fact(const host::fact& builder) { return host_declaration("host_
 
 #define PL_DETAIL_JOIN_I(a, b) a##b
 #define PL_DETAIL_JOIN(a, b) PL_DETAIL_JOIN_I(a, b)
+// Symbols are stringized after expansion, so a macro that builds the symbol name records the real name.
+#define PL_DETAIL_STR_I(...) #__VA_ARGS__
+#define PL_DETAIL_STR(...) PL_DETAIL_STR_I(__VA_ARGS__)
 #define PL_DETAIL_REGISTER(...) static const int PL_DETAIL_JOIN(pl_registration_, __COUNTER__) = (__VA_ARGS__)
 #define PL_DETAIL_CHECKED_REGISTER(...) PL_DETAIL_REGISTER(::pl::detail::checked_registration([] { return (__VA_ARGS__); }))
 #define PL_DETAIL_FIELD(T, m) ::pl::detail::member{#m, offsetof(T, m), sizeof(((T*)nullptr)->m), __alignof__(((T*)nullptr)->m)}
-#define PL_DETAIL_FIELDS_1(T, a) PL_DETAIL_FIELD(T, a)
-#define PL_DETAIL_FIELDS_2(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_1(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_3(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_2(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_4(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_3(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_5(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_4(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_6(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_5(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_7(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_6(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_8(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_7(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_9(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_8(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_10(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_9(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_11(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_10(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_12(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_11(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_13(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_12(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_14(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_13(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_15(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_14(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_16(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_15(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_17(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_16(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_18(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_17(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_19(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_18(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_20(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_19(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_21(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_20(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_22(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_21(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_23(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_22(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_24(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_23(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_25(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_24(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_26(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_25(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_27(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_26(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_28(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_27(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_29(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_28(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_30(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_29(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_31(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_30(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_32(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_31(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_33(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_32(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_34(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_33(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_35(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_34(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_36(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_35(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_37(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_36(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_38(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_37(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_39(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_38(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_40(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_39(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_41(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_40(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_42(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_41(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_43(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_42(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_44(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_43(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_45(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_44(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_46(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_45(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_47(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_46(T, __VA_ARGS__)
-#define PL_DETAIL_FIELDS_48(T, a, ...) PL_DETAIL_FIELD(T, a), PL_DETAIL_FIELDS_47(T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_1(F, T, a) F(T, a)
+#define PL_DETAIL_FIELDS_2(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_1(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_3(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_2(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_4(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_3(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_5(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_4(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_6(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_5(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_7(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_6(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_8(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_7(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_9(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_8(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_10(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_9(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_11(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_10(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_12(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_11(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_13(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_12(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_14(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_13(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_15(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_14(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_16(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_15(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_17(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_16(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_18(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_17(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_19(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_18(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_20(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_19(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_21(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_20(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_22(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_21(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_23(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_22(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_24(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_23(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_25(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_24(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_26(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_25(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_27(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_26(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_28(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_27(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_29(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_28(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_30(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_29(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_31(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_30(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_32(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_31(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_33(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_32(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_34(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_33(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_35(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_34(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_36(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_35(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_37(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_36(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_38(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_37(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_39(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_38(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_40(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_39(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_41(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_40(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_42(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_41(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_43(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_42(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_44(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_43(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_45(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_44(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_46(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_45(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_47(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_46(F, T, __VA_ARGS__)
+#define PL_DETAIL_FIELDS_48(F, T, a, ...) F(T, a), PL_DETAIL_FIELDS_47(F, T, __VA_ARGS__)
 #define PL_DETAIL_PARAMS_NARGS_I(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z,aa,ab,ac,ad,ae,af,ag,ah,ai,aj,ak,al,am,an,ao,ap,aq,ar,av,at,au,aw,N,...) N
 #define PL_DETAIL_PARAMS_NARGS(...) PL_DETAIL_PARAMS_NARGS_I(__VA_ARGS__,48,47,46,45,44,43,42,41,40,39,38,37,36,35,34,33,32,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1)
 #define PL_DETAIL_NARGS_I(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,N,...) N
 #define PL_DETAIL_NARGS(...) PL_DETAIL_NARGS_I(__VA_ARGS__,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1)
 #define PL_STAGE(id, version) PL_DETAIL_REGISTER(::pl::detail::add("stage", id, ::pl::detail::text("id", id) + ',' + ::pl::detail::text("version", version)))
-#define PL_PARAMS(T, ...) PL_DETAIL_CHECKED_REGISTER(::pl::detail::params<T>(&::pl::detail::translation_unit_params, #T, {PL_DETAIL_JOIN(PL_DETAIL_FIELDS_, PL_DETAIL_PARAMS_NARGS(__VA_ARGS__))(T, __VA_ARGS__)}))
+#define PL_PARAMS(T, ...) PL_DETAIL_CHECKED_REGISTER(::pl::detail::params<T>(&::pl::detail::translation_unit_params, #T, {PL_DETAIL_JOIN(PL_DETAIL_FIELDS_, PL_DETAIL_PARAMS_NARGS(__VA_ARGS__))(PL_DETAIL_FIELD, T, __VA_ARGS__)}))
 #define PL_NO_PARAMS() PL_DETAIL_CHECKED_REGISTER(::pl::detail::no_params(&::pl::detail::translation_unit_params))
 #define PL_PARAMS_OPAQUE(T) PL_DETAIL_CHECKED_REGISTER(::pl::detail::opaque_params<T>(&::pl::detail::translation_unit_params, #T))
-#define PL_DETAIL_TYPE_LAYOUT(T, shadow, ...) \
-  struct shadow { __VA_ARGS__ }; \
-  static_assert(sizeof(shadow) == sizeof(T) && alignof(shadow) == alignof(T), "PL_TYPE members do not restate " #T "'s layout")
+#define PL_DETAIL_TYPE_FIELD(T, m) \
+  ::pl::detail::describe_member<decltype(T::m)>(#m, offsetof(T, m), __alignof__(((T*)nullptr)->m))
+// Member names only, in declaration order; types, offsets and alignment come from the compiler.
 #define PL_TYPE(T, ...) \
-  PL_DETAIL_TYPE_LAYOUT(T, PL_DETAIL_JOIN(pl_type_shadow_, __COUNTER__), __VA_ARGS__); \
   template <> struct pl::detail::registered_type<T> { \
     static constexpr const char* name = #T; \
-    static constexpr const char* members = #__VA_ARGS__; \
+    static constexpr ::pl::detail::type_member fields[] = { \
+        PL_DETAIL_JOIN(PL_DETAIL_FIELDS_, PL_DETAIL_PARAMS_NARGS(__VA_ARGS__))(PL_DETAIL_TYPE_FIELD, T, __VA_ARGS__)}; \
   }; \
+  static_assert(::pl::detail::type_names_every_member<T>(), "PL_TYPE must name every member of " #T " exactly once"); \
+  static_assert(::pl::detail::type_names_layout<T>(), "PL_TYPE must name the members of " #T " in declaration order"); \
   PL_DETAIL_REGISTER(::pl::detail::register_type<T>(#T))
-#define PL_ROLE(name, fn, warps) PL_DETAIL_REGISTER(::pl::detail::role<decltype(&fn)>(#name, #fn, warps))
-#define PL_EXPORT(name, fn) PL_DETAIL_REGISTER(::pl::detail::add("export", #name, ::pl::detail::callable<decltype(&fn)>(#name, #fn)))
-#define PL_CALL(name, fn, ...) PL_DETAIL_REGISTER(::pl::detail::call<decltype(&fn)>(#name, #fn, __VA_ARGS__))
+// Every role reaches `bar.sync barrier, threads` at entry before touching partner-visible state.
+#define PL_ENTRY_RENDEZVOUS(barrier, threads) PL_DETAIL_CHECKED_REGISTER(::pl::detail::entry_rendezvous(barrier, threads))
+#define PL_ROLE(name, fn, warps) PL_DETAIL_REGISTER(::pl::detail::role<decltype(&fn)>(#name, PL_DETAIL_STR(fn), warps))
+#define PL_EXPORT(name, fn) PL_DETAIL_REGISTER(::pl::detail::add("export", #name, ::pl::detail::callable<decltype(&fn)>(#name, PL_DETAIL_STR(fn))))
+#define PL_CALL(name, fn, ...) PL_DETAIL_CHECKED_REGISTER(::pl::detail::call<decltype(&fn)>(#name, PL_DETAIL_STR(fn), __VA_ARGS__))
+#define PL_INTERFACE(export_name, ...) PL_DETAIL_CHECKED_REGISTER(::pl::detail::interface(#export_name, __VA_ARGS__))
+#define PL_CALL_SITE(name, ...) PL_DETAIL_CHECKED_REGISTER(::pl::detail::call_site(#name, __VA_ARGS__))
 #define PL_ENDPOINT(name, ...) PL_DETAIL_CHECKED_REGISTER(::pl::detail::endpoint(#name, __VA_ARGS__))
 // Keep lifetime in the variadic tail so pl::during{tensor, from, to} needs no parentheses.
 #define PL_CLAIM(handle, domain, extent, align, ...) PL_DETAIL_REGISTER(::pl::detail::claim(handle, domain, extent, align, __VA_ARGS__))
@@ -1434,9 +1593,10 @@ inline int host_fact(const host::fact& builder) { return host_declaration("host_
 #define PL_CLAIM_EX(...) PL_DETAIL_CHECKED_REGISTER(::pl::detail::claim(__VA_ARGS__))
 #define PL_CLAIM_REGS(handle, reg_group, ...) PL_DETAIL_CHECKED_REGISTER(::pl::detail::claim_regs(handle, reg_group, __VA_ARGS__))
 #define PL_VARIANT(index, ...) PL_DETAIL_CHECKED_REGISTER(::pl::detail::variant(index, __VA_ARGS__))
-// Braces do not group macro arguments. Move the final function token ahead of
-// the key fragments before stringizing it; named fixed_bindings also work.
-#define PL_DETAIL_VARIANT_ENTRY(fn, index, ...) PL_DETAIL_CHECKED_REGISTER(::pl::detail::variant_entry<decltype(&fn)>(index, __VA_ARGS__, #fn))
+// Braces do not group macro arguments, so a braced key splits into several arguments.
+// These helpers move the final function token ahead of the key fragments before
+// stringizing it. Named fixed_bindings also work.
+#define PL_DETAIL_VARIANT_ENTRY(fn, index, ...) PL_DETAIL_CHECKED_REGISTER(::pl::detail::variant_entry<decltype(&fn)>(index, __VA_ARGS__, PL_DETAIL_STR(fn)))
 #define PL_DETAIL_VARIANT_ENTRY_2(index, a1, fn) PL_DETAIL_VARIANT_ENTRY(fn, index, a1)
 #define PL_DETAIL_VARIANT_ENTRY_3(index, a1, a2, fn) PL_DETAIL_VARIANT_ENTRY(fn, index, a1, a2)
 #define PL_DETAIL_VARIANT_ENTRY_4(index, a1, a2, a3, fn) PL_DETAIL_VARIANT_ENTRY(fn, index, a1, a2, a3)
@@ -1459,10 +1619,11 @@ inline int host_fact(const host::fact& builder) { return host_declaration("host_
 #define PL_BINDING(...) PL_DETAIL_REGISTER(::pl::detail::binding(&::pl::detail::translation_unit, __VA_ARGS__))
 #define PL_SITE(name, ...) PL_DETAIL_REGISTER(::pl::detail::site(#name, __VA_ARGS__))
 #define PL_EXPORT_TENSOR(name, ...) PL_DETAIL_REGISTER(::pl::detail::export_tensor(&::pl::detail::translation_unit, #name, __VA_ARGS__))
-#define PL_IMPORT_TENSOR(name, fn, ...) PL_DETAIL_REGISTER(::pl::detail::import_tensor<decltype(&fn)>(&::pl::detail::translation_unit, #name, #fn, __VA_ARGS__))
+#define PL_IMPORT_TENSOR(name, fn, ...) PL_DETAIL_REGISTER(::pl::detail::import_tensor<decltype(&fn)>(&::pl::detail::translation_unit, #name, PL_DETAIL_STR(fn), __VA_ARGS__))
 #define PL_HINT(key, value) PL_DETAIL_REGISTER(::pl::detail::hint(key, value))
+#define PL_DOMAIN_CAPACITY(domain, capacity) PL_DETAIL_CHECKED_REGISTER(::pl::detail::domain_capacity(domain, capacity))
 #define PL_HOST_GROUP(owner, group, suffix, T, type_id, allocated) PL_DETAIL_CHECKED_REGISTER(::pl::detail::host_group<T>(owner, group, suffix, #T, type_id, allocated))
-#define PL_HOST_ABI_TYPE(id, T, ...) PL_DETAIL_CHECKED_REGISTER(::pl::detail::host_abi_type<T>(id, #T, {PL_DETAIL_JOIN(PL_DETAIL_FIELDS_, PL_DETAIL_PARAMS_NARGS(__VA_ARGS__))(T, __VA_ARGS__)}))
+#define PL_HOST_ABI_TYPE(id, T, ...) PL_DETAIL_CHECKED_REGISTER(::pl::detail::host_abi_type<T>(id, #T, {PL_DETAIL_JOIN(PL_DETAIL_FIELDS_, PL_DETAIL_PARAMS_NARGS(__VA_ARGS__))(PL_DETAIL_FIELD, T, __VA_ARGS__)}))
 #define PL_HOST_ABI_EMPTY(id, T) PL_DETAIL_CHECKED_REGISTER(::pl::detail::host_abi_type<T>(id, #T, {}))
 #define PL_HOST_RESIDUE(id, name, T, type_id, allocated, roles) PL_DETAIL_CHECKED_REGISTER(::pl::detail::host_residue<T>(id, name, #T, type_id, allocated, roles))
 #define PL_HOST_SCALARS(id, builder) PL_DETAIL_CHECKED_REGISTER(::pl::detail::host_builder("host_scalars", "", id, builder))
@@ -1479,7 +1640,7 @@ inline int host_fact(const host::fact& builder) { return host_declaration("host_
 namespace pl::detail {
 inline void neutral_host_abi_types() {
 #define PL_DETAIL_NEUTRAL_ABI(id, T, ...) \
-  host_abi_type<T>(id, #T, {PL_DETAIL_JOIN(PL_DETAIL_FIELDS_, PL_DETAIL_PARAMS_NARGS(__VA_ARGS__))(T, __VA_ARGS__)}, true);
+  host_abi_type<T>(id, #T, {PL_DETAIL_JOIN(PL_DETAIL_FIELDS_, PL_DETAIL_PARAMS_NARGS(__VA_ARGS__))(PL_DETAIL_FIELD, T, __VA_ARGS__)}, true);
   PLK_HOST_ABI_TYPES(PL_DETAIL_NEUTRAL_ABI)
 #undef PL_DETAIL_NEUTRAL_ABI
 }
@@ -1493,6 +1654,9 @@ inline void neutral_host_abi_types() {
 #define PL_ROLE(...)
 #define PL_EXPORT(...)
 #define PL_CALL(...)
+#define PL_INTERFACE(...)
+#define PL_CALL_SITE(...)
+#define PL_ENTRY_RENDEZVOUS(...)
 #define PL_ENDPOINT(...)
 #define PL_CLAIM(...)
 #define PL_CLAIM_SMEM(...)
@@ -1508,6 +1672,7 @@ inline void neutral_host_abi_types() {
 #define PL_EXPORT_TENSOR(...)
 #define PL_IMPORT_TENSOR(...)
 #define PL_HINT(...)
+#define PL_DOMAIN_CAPACITY(...)
 #define PL_HOST_GROUP(...)
 #define PL_HOST_ABI_TYPE(...)
 #define PL_HOST_ABI_EMPTY(...)

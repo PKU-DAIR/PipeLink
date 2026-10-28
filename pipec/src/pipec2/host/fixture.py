@@ -1,8 +1,8 @@
 """Caller-owned tensor loans and runner-side fixture fabrication.
 
-Providers receive only metadata and bounded addresses. Python ownership, input
-fabrication, launch-stream readiness and output readback stay on this side of
-the C seam and outside the session's launch path.
+Providers see only metadata and bounded addresses. Buffer ownership, input
+fabrication, launch-stream readiness and output readback stay on the Python
+side of the C ABI and outside the session's launch path.
 """
 from __future__ import annotations
 
@@ -28,11 +28,12 @@ class Resource:
     alignment: int
     origin_byte_offset: int = 0
     origin_bit_offset: int = 0
-    # Symmetric loans: `domain` names the caller domain this allocation is symmetric over
+    # Symmetric loans: `domain` names the caller domain the allocation is symmetric over
     # (one allocation per domain rank, same bytes and origin). `peers` is () or one base per
-    # domain rank addressable from this rank's context (peers[rank] == address); `multicast`
-    # is 0 or this allocation's base in the domain's multicast VA space. Local loans keep
-    # all three empty. Keyword-only so positional construction cannot shift a lender.
+    # domain rank, addressable from this rank's context (peers[rank] == address). `multicast`
+    # is 0 or the allocation's base in the domain's multicast VA space. Local loans leave
+    # all three empty. These fields are keyword-only so positional arguments cannot shift
+    # into `lender`.
     domain: str | None = field(default=None, kw_only=True)
     peers: tuple[int, ...] = field(default=(), kw_only=True)
     multicast: int = field(default=0, kw_only=True)
@@ -42,11 +43,10 @@ class Resource:
 class Fixture:
     """Own fabricated caller buffers until the enclosing host session has closed.
 
-    Data generation is supplied by the experiment/caller, never a provider DSO.
-    A Fixture is scoped inside its CUDA backend and outside open_host(). Inputs
-    are uploaded synchronously at fabrication, so they are ready on whichever
-    stream the caller launches on; outputs are read back by the caller through
-    readback() after it synchronized.
+    The experiment or caller generates the data; provider libraries never do.
+    Open a Fixture inside its CUDA backend and outside open_host(). Inputs are
+    uploaded synchronously, so they are ready on whichever stream the caller
+    launches on. After synchronizing, the caller reads outputs with readback().
     """
 
     def __init__(self, backend: Any):
@@ -79,7 +79,7 @@ class Fixture:
         return resource
 
     def readback(self) -> dict[str, bytes]:
-        """Copy every output allocation to host memory; the caller synchronized first."""
+        """Copy every output allocation to host memory. Synchronize first."""
         for name in self._outputs:
             resource = self.resources[name]
             self.outputs[name] = self.backend.readback(resource.address, resource.allocation_bytes)
@@ -89,8 +89,8 @@ class Fixture:
         return self
 
     def __exit__(self, *_: Any) -> None:
-        # A session drains before close returns, including its failure paths. An
-        # undrainable context is torn down, never treated as reusable allocation.
+        # Sessions drain before close returns, even on failure. A lost context is torn
+        # down by its backend, so its allocations are not freed here.
         if not getattr(self.backend, "lost", False):
             self.backend.synchronize()
             for address in reversed(self._allocations):
@@ -103,10 +103,10 @@ def symmetric(fixtures: Sequence[Fixture], name: str, *, domain: str, data: Sequ
               alignment: int, output: bool = False) -> list[Resource]:
     """Fabricate one allocation per rank of `domain` (domain rank r = fixtures[r]) with a peer table.
 
-    Each rank's ``Fixture`` allocates and uploads its own buffer; the returned
-    per-rank resources (also recorded in each fixture) share one peer table of
-    the ranks' addresses. In-process callers must have enabled peer access
-    (``CudaBackend.enable_peer_access``); the table is unified virtual addresses.
+    Each rank's ``Fixture`` allocates and uploads its own buffer. The returned
+    per-rank resources, also recorded in each fixture, share one peer table of the
+    ranks' unified virtual addresses, so in-process callers must first enable peer
+    access (``CudaBackend.enable_peer_access``).
     """
     if len(data) != len(fixtures):
         raise ValueError("symmetric fixtures need one data entry per rank")
@@ -123,11 +123,11 @@ def symmetric(fixtures: Sequence[Fixture], name: str, *, domain: str, data: Sequ
 def load_inputs(path: Path, fixture: Fixture) -> tuple[dict[str, Any], dict[str, Path]]:
     """Load explicit caller fixtures for ``pipec2 launch --host-inputs``.
 
-    Paths are relative to the input JSON. Every tensor declares its complete
-    allocation metadata; absent input data is an output allocation, not an
-    implicit random fixture. Returns the scalars and, for every resource that
-    names an ``output`` file, the resolved path the caller writes from
-    ``Fixture.readback()`` once its launches have drained.
+    Paths are relative to the input JSON. Every tensor declares its full
+    allocation metadata. A null ``data`` declares an output allocation; no random
+    input is generated. Returns the scalars and, for each resource that names an
+    ``output`` file, the resolved path the caller writes from ``Fixture.readback()``
+    once its launches have drained.
     """
     obj = json.loads(path.read_text())
     if not isinstance(obj, dict) or set(obj) != {"scalars", "resources"}:

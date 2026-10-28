@@ -666,12 +666,12 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "accelerate" },
-    { name = "einops" },
-    { name = "huggingface-hub" },
-    { name = "numpy" },
-    { name = "safetensors" },
-    { name = "torch" },
+    { name = "accelerate", specifier = "==1.14.0" },
+    { name = "einops", specifier = "==0.8.2" },
+    { name = "huggingface-hub", specifier = "==0.36.2" },
+    { name = "numpy", specifier = "==2.5.2" },
+    { name = "safetensors", specifier = "==0.8.0" },
+    { name = "torch", specifier = "==2.14.0" },
     { name = "transformers", specifier = "==4.48.3" },
 ]
 

@@ -1,9 +1,9 @@
 """Route model: primitives are typed edges, a candidate class is a route.
 
-Routes encode structural feasibility; the public checker certifies semantics.
+Routes encode structural feasibility; only ``check.check`` certifies semantics.
 This module owns the edge table (kind, endpoints, preconditions, realising
-families), the fact derivation, permission, and the candidate enumeration with
-its structural order. It proposes; ``check.check`` alone certifies.
+families), the fact derivation, permission, and the candidate enumeration in
+its structural order.
 """
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ def facts(export: TensorExport, imp: TensorImport, site: Site) -> frozenset[str]
 
 
 def permitted_families(available: frozenset[str]) -> frozenset[str]:
-    """Families of every edge whose preconditions hold (T1)."""
+    """Families of every edge whose preconditions hold."""
     return frozenset(family for edge in EDGES.values() if edge.requires <= available for family in edge.families)
 
 
@@ -114,7 +114,7 @@ class Route(_JsonMixin):
 
     @property
     def name(self) -> str:
-        """Legacy class label: derived, descriptive, never dispatched on."""
+        """Derived class label for display; no code dispatches on it."""
         label = self.label
         if self.sink == "smem":
             return label
@@ -142,7 +142,7 @@ class Route(_JsonMixin):
         return frozenset(family for name in names for family in EDGES[name].families)
 
     def searched(self, available: frozenset[str]) -> frozenset[str]:
-        """Tier-1 action domain: searched edge families, the permitted register copy, readiness."""
+        """Action domain for the bounded Z3 search: searched edge families, the permitted register copy, readiness."""
         names = set(self.edges) | {"observe"}
         if EDGES["copy"].requires <= available:
             names.add("copy")
@@ -194,13 +194,13 @@ def _subsets(spaces: tuple[Space, ...]):
 
 def candidates(sources: Space | Sequence[Space], sink: Space,
                available: frozenset[str]) -> tuple[list[Route], list[tuple[Route, frozenset[str]]]]:
-    """Ordered permitted routes, and the unpermitted ones with their missing facts (T4/T5).
+    """Ordered permitted routes, and the unpermitted ones with their missing facts.
 
     An export with guarded placements in several spaces is routed from every
     nonempty subset of them: singleton routes keep each space's own envelope
     (alias stays a candidate whenever the sink space is a source, an inert
-    placement never demands facts), and the joint route keeps the old global
-    domain in which one controller brings from several spaces.
+    placement never demands facts), and the joint route keeps the global domain
+    in which one controller brings from several spaces.
     """
     spaces = (sources,) if isinstance(sources, str) else tuple(sources)
     ordered = sorted((route for subset in _subsets(spaces) for route in _shapes(subset, sink)),

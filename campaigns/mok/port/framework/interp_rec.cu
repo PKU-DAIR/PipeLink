@@ -160,7 +160,7 @@ static __device__ __forceinline__ void mok_framework_run(const void* opaque, con
             }
         }
 
-        // Upstream :179-191: unchanged schedule completion and CTA-local transition.
+        // Upstream :179-191 verbatim: schedule completion and CTA-local transition.
         wait(schedule_arrived[clc_stage], (task_iter / 1) % 2);
         const auto schedule = clc::query(clc_handle[clc_stage]);
         cluster_idx = schedule.success ? static_cast<int>(schedule.x / 2) : -1;
@@ -175,7 +175,7 @@ static __device__ __forceinline__ void mok_framework_run(const void* opaque, con
 
     everyone::tma::cluster::sync();
 
-    // Upstream :193-213: unchanged CLC drain for no-op threadblocks.
+    // Upstream :193-213 verbatim: CLC drain for no-op threadblocks.
     if (cluster_idx >= 0 && warp::laneid() == 0) {
         const int stage = warpid();
         int iter = 0;
@@ -210,13 +210,12 @@ extern "C" __device__ void mok_framework_worker(const void* opaque, unsigned) {
     }
 }
 PL_STAGE("mok.interp.rec", "1.0.0");
-PL_NO_PARAMS();
 PL_ROLE(worker, mok_framework_worker, 8);
 PL_TOPOLOGY(pl::topology{2, pl::cluster{{2,1,1}, pl::launch{2,{2,1,1}}}, true, "clc"});
 PL_CLAIM_EX(pl::claim("pipelink_mok_worker_warps", "warp").extent(8).align(4).at(0).roles({"worker"}));
 PL_CLAIM("pipelink_mok_fw_clc", "smem", 144, 16, "kernel");
 PL_CLAIM("pipelink_mok_fw_sems", "smem", 144, 8, "kernel");
-// P2 §5: hidden arrivals remain live even though recompute has no down consumer.
+// Hidden arrivals remain live even though recompute has no down consumer.
 PL_CLAIM("pipelink_mok_cnt_x_routed_ready", "gmem_counter", MOK_SLOTS_X_ROUTED_READY, 1, "kernel");
 PL_CLAIM("pipelink_mok_cnt_gate_up_tile_ready", "gmem_counter", MOK_SLOTS_GATE_UP_TILE_READY, 1, "kernel");
 PL_CLAIM("pipelink_mok_cnt_hidden_row_block_ready", "gmem_counter", MOK_SLOTS_HIDDEN_ROW_BLOCK_READY, 1, "kernel");
@@ -233,10 +232,9 @@ PL_CALL(act_init, pipelink_call_act_init, pl::produce, "worker", "mok_act_init")
 PL_CALL(act_rec, pipelink_call_act_rec, pl::produce, "worker", "mok_act_rec");
 PL_HOST_GROUP("mok.framework", "mok.framework.params", "mok_framework", plk_header_v2, PLK_ABI_TYPE_ID(plk_header_v2), false);
 PL_HOST_DOMAIN(1, "ep");
-PL_HOST_ABI_EMPTY(100, MokFrameworkResidue);
 PL_HOST_ABI_TYPE(101, plk_role_view_mok_interp_rec_worker, residue, scalars);
 PL_HOST_RESIDUE(2, "mok.framework.residue", MokFrameworkResidue, 100, true, pl::host::roles({"mok.interp.rec:worker"}));
-// P2 §7: shape 1-9, bound controls 11-14, rec geometry 20-21/25-29,
+// Scalar slots: shape 1-9, bound controls 11-14, rec geometry 20-21/25-29,
 // and only the three rec slot bases 40-42. No combine/backward geometry reads.
 PL_HOST_SCALARS(1, pl::host::scalars(pl::host::roles({"mok.interp.rec:worker"}))
     .field(pl::host::scalar(1, "mok.num_local_tokens", "i64").caller("num_local_tokens"))
@@ -269,4 +267,3 @@ PL_HOST_FACT(pl::host::fact("mok.framework.EXPERT_PADDING").i32(256).owner("mok.
 PL_HOST_SCHEDULER(pl::host::scheduler("mok.framework", "mok.framework.clc-grid.v1",
     pl::host::schema().required("pass", pl::host::leaf::static_("i64")))
     .input("pass", pl::host::binding_ref("pipelink_mok_pass")));
-PL_HOST_TARGET();

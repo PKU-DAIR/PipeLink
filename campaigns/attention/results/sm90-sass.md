@@ -1,10 +1,14 @@
 # SM90 attention SASS diagnostic
 
-Diagnostic only: differences never admit or reject an image. All device functions
-are normalized in dump order with evaluator/gates. Counts and resources below
-are control / linked; resource tuples are REG/STACK/LOCAL (stack/local in bytes).
-N counts operand deltas, not distinct instructions; N=0 alone does not imply equality.
-JSON retains the first 200 deltas, full delta-class counts, checks and tool output.
+This report compares the SASS of each pipeline's linked image with its same-source control.
+It is a diagnostic: differences inform, but never accept or reject an image.
+
+All device functions are normalized in dump order with `evaluator/gates` and compared as
+ordered streams. Instruction counts and resources are shown as control / linked; resources
+are REG/STACK/LOCAL, with stack and local sizes in bytes. N counts operand deltas, not
+distinct instructions, and structural differences are checked separately, so read the
+Equal column for equality. The JSON record keeps the first 200 deltas, the full delta-class
+counts, the checks and the tool output.
 
 | Pipeline | Instructions C / L | Equal | N | Resources C / L | Delta classes |
 |---|---:|:---:|---:|---|---|
@@ -16,8 +20,9 @@ JSON retains the first 200 deltas, full delta-class counts, checks and tool outp
 | msa | 3816 / 3816 | True | 0 | pipelink_kernel: 168/0/0 / pipelink_kernel: 168/0/0 | none |
 | cp | 5728 / 5728 | True | 0 | pipelink_kernel: 168/72/0 / pipelink_kernel: 168/72/0 | none |
 
-Delta classes describe ordered-stream differences, not proven seam attribution.
-Numeric, sanitizer and performance evidence remain separate acceptance criteria.
+Delta classes name where the ordered streams differ; they do not attribute a
+difference to a particular seam. Acceptance rests on the numerical, sanitizer and
+performance evidence.
 
 ## Tool versions
 

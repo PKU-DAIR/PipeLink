@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run definitive MK parity cases through the shared evaluator.
+"""Run the local MK comparisons with the paired-reload-v2 protocol.
 
 Suite `reference` compares each all-ThunderKittens linked image with its same-source
 one-TU build. Suite `cute` does the same for the CuTe-attention composition and adds
@@ -11,31 +11,35 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
 import re
-import shutil
-import statistics
 import subprocess
 import sys
+import socket
+import statistics
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[4]
-EVIDENCE = ROOT / "campaigns" / "megakernel" / "evidence"
-SLOT = EVIDENCE / "parity" / "mk_slot.py"
 BUNDLES = ROOT / "campaigns" / "megakernel" / "host" / "bundles"
-RUNS = BUNDLES.parent / "runs"
 PORT_BUILD = ROOT / "campaigns" / "megakernel" / "port" / "build"
-# Suite-specific locations; select_suite() rebinds them (default: reference).
-ARCHIVE_ROOT = EVIDENCE / "archive" / "submission-2026-09-17"
-SANITIZER_RUNS = RUNS / "submission-2026-09-17" / "sanitizer"
-RESULTS_PATH = EVIDENCE / "results.json"
-RESULT_MARKDOWN_PATH = EVIDENCE / "RESULT.md"
+# Set by select_suite under --output-root, outside the published evidence directory:
+# <root>/p2/<bundle>/compare-<pipeline>.json holds the numerical receipts and
+# <root>/<suite>/ the sanitizer receipts, paired checks and timing results.
+RECEIPT_ROOT: Path
+P2_ROOT: Path
+OUTPUT_ROOT: Path
+SANITIZER_RUNS: Path
+RESULTS_PATH: Path
+RESULT_MARKDOWN_PATH: Path
 SUITE = "reference"
-GPU = int(os.environ["MK_GPU"]) if os.environ.get("MK_GPU") else None
-MAX_BATCH_TOKENS = 32
+# MK_GPU selects one of the configured devices; by default the first of PIPELINK_GPUS.
+_GPU = os.environ.get("MK_GPU") or os.environ.get("PIPELINK_GPUS", "").split(",")[0]
+GPU = int(_GPU) if _GPU.strip() else None
+HOST = BUNDLES.parent
+RUNNER = HOST / "build" / "mk_runner"
+PROVIDER = HOST / "build" / "provider.so"
 RATIO_FLOOR = 0.97
 
 
@@ -45,11 +49,14 @@ def build_record(pipeline: str) -> Path:
 
 
 def sanitize_receipt(pipeline: str) -> Path:
-    return EVIDENCE / ("sanitize-cute.json" if pipeline == "cute" else "sanitize.json")
+    return (RECEIPT_ROOT / "cute" / "sanitize-cute.json" if pipeline == "cute"
+            else RECEIPT_ROOT / "reference" / "sanitize.json")
 
 
 sys.path.insert(0, str(ROOT))
-from evaluator.harness.parity import ImageSpec, PairCapError, Protocol, run_case
+sys.path.insert(0, str(HOST))
+from launch import launch_command, paired_command
+from evaluator.harness.parity.fixed_count import PROTOCOL, run_native_pair
 from evaluator.harness.parity.constants import (
     REQUIRED_RACECHECK_HAZARDS,
     REQUIRED_SYNCCHECK_ERRORS,
@@ -116,8 +123,7 @@ CUTE_CASES = tuple(
     }
     for label, bundle, pos_id in CUTE_CONTEXTS
 ) + tuple(
-    # Candidate/reference is CuTe throughput over all-ThunderKittens throughput:
-    # the paired speedup of the composition. Not a seam-parity gate.
+    # Paired speedup of CuTe over all-ThunderKittens throughput; reported, not gated.
     {
         "case_id": f"MK-CUTE-VS-TK-{label}",
         "pipeline": "cute",
@@ -134,25 +140,23 @@ CUTE_CASES = tuple(
 SUITES = {
     "reference": {
         "cases": CASES, "pipelines": ("a", "rebind-smem", "rebind-regs", "rebind-opcode"),
-        "archive": EVIDENCE / "archive" / "submission-2026-09-17",
-        "sanitizer_runs": RUNS / "submission-2026-09-17" / "sanitizer",
-        "results": EVIDENCE / "results.json", "markdown": EVIDENCE / "RESULT.md",
     },
     "cute": {
         "cases": CUTE_CASES, "pipelines": ("cute",),
-        "archive": EVIDENCE / "archive" / "cute",
-        "sanitizer_runs": RUNS / "cute-20261007" / "p3-sanitizer",
-        "results": EVIDENCE / "cute-parity.json", "markdown": EVIDENCE / "CUTE-RESULT.md",
     },
 }
 
 
-def select_suite(name: str) -> None:
-    global SUITE, CASES, ARCHIVE_ROOT, SANITIZER_RUNS, RESULTS_PATH, RESULT_MARKDOWN_PATH
-    suite = SUITES[name]
-    SUITE, CASES = name, suite["cases"]
-    ARCHIVE_ROOT, SANITIZER_RUNS = suite["archive"], suite["sanitizer_runs"]
-    RESULTS_PATH, RESULT_MARKDOWN_PATH = suite["results"], suite["markdown"]
+def select_suite(name: str, output_root: Path) -> None:
+    global SUITE, CASES, RECEIPT_ROOT, P2_ROOT, OUTPUT_ROOT, SANITIZER_RUNS, RESULTS_PATH, RESULT_MARKDOWN_PATH
+    SUITE, CASES = name, SUITES[name]["cases"]
+    RECEIPT_ROOT = output_root.resolve()
+    P2_ROOT = RECEIPT_ROOT / "p2"
+    OUTPUT_ROOT = RECEIPT_ROOT / name
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    SANITIZER_RUNS = OUTPUT_ROOT / "image-sanitizers"
+    RESULTS_PATH = OUTPUT_ROOT / "results.json"
+    RESULT_MARKDOWN_PATH = OUTPUT_ROOT / "RESULT.md"
 
 
 def role_pipeline(case: dict[str, Any], role: str) -> str:
@@ -160,9 +164,8 @@ def role_pipeline(case: dict[str, Any], role: str) -> str:
 
 
 def sanitizer_bundle(case: dict[str, Any]) -> Path:
-    # Red cells use the P2-validated p1024-n8-red bundle (one token): the
-    # short-prompt p16-n1-red export stalls natively (2 partitions over a
-    # 16-token prompt; recorded 2026-09-17, deviation 9) and is not evidence.
+    # Reduction cells use the P2-validated p1024-n8-red bundle: the short-prompt
+    # p16-n1-red export (2 partitions over a 16-token prompt) stalls natively.
     return BUNDLES / ("p1024-n8-red" if case["bundle"].endswith("-red") else "p16-n2")
 
 
@@ -214,35 +217,6 @@ def build_generation(pipeline: str) -> str:
     return json.loads(build_record(pipeline).read_text(encoding="utf-8"))["build_generation"]
 
 
-def image_spec(case: dict[str, Any], role: str, image_hashes: dict[Path, str]) -> ImageSpec:
-    image = case[f"{role}_image"]
-    pipeline = role_pipeline(case, role)
-    path = image_path(pipeline, image)
-    command = [
-        sys.executable,
-        str(SLOT),
-        "--pipeline",
-        pipeline,
-        "--image",
-        image,
-        "--bundle",
-        str((BUNDLES / case["bundle"]).resolve()),
-        "--pos-id",
-        str(case["pos_id"]),
-    ]
-    return ImageSpec(
-        image_id=f"{case['case_id']}-{role}-{image}-{pipeline}",
-        command=tuple(command),
-        image_path=path,
-        image_sha256=image_hashes[path],
-        cwd=ROOT,
-        metadata={
-            "family": "megakernel-llama-1b",
-            "pipeline": pipeline,
-            "image": image,
-            "case_kind": case["kind"],
-        },
-    )
 
 
 def case_config(case: dict[str, Any]) -> dict[str, Any]:
@@ -291,80 +265,6 @@ def run_command(command: list[str], *, env: dict[str, str] | None = None) -> dic
     }
 
 
-def marker_path() -> Path:
-    state_dir = os.environ.get("PIPELINK_LOCK_STATE_DIR")
-    if not state_dir:
-        raise EvidenceError("PIPELINK_LOCK_STATE_DIR is not set; source tools/env.sh")
-    return Path(state_dir).expanduser() / f"gpu{GPU}.json"
-
-
-def read_marker() -> dict[str, Any]:
-    path = marker_path()
-    try:
-        marker = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise EvidenceError(f"cannot read gpulockd marker {path}: {exc}") from exc
-    if not isinstance(marker, dict):
-        raise EvidenceError(f"gpulockd marker is not an object: {path}")
-    return marker
-
-
-def lock_command(action: str, target_mhz: int | None = None) -> list[str]:
-    command = [sys.executable, str(ROOT / "tools" / "gpulockd.py"), action, "--gpus", str(GPU)]
-    if action == "start":
-        if target_mhz is None:
-            raise EvidenceError("lock start requires target MHz")
-        command.extend(["--sm-mhz", str(target_mhz)])
-    return command
-
-
-def check_lock(label: str, target_mhz: int) -> dict[str, Any]:
-    record = run_command(lock_command("status"))
-    record["label"] = label
-    if record["returncode"] != 0:
-        raise EvidenceError(
-            f"gpulockd status failed during {label}: rc={record['returncode']} "
-            f"stdout={record['stdout']!r} stderr={record['stderr']!r}"
-        )
-    marker = read_marker()
-    if (
-        marker.get("gpu") != GPU
-        or marker.get("sm_mhz") != target_mhz
-        or marker.get("violations") != 0
-    ):
-        raise EvidenceError(f"gpulockd marker violates held-clock contract during {label}: {marker}")
-    record["marker"] = marker
-    record["honored"] = True
-    return record
-
-
-def start_lock(target_mhz: int) -> dict[str, Any]:
-    record = run_command(lock_command("start", target_mhz))
-    if record["returncode"] == 3:
-        raise EvidenceError(
-            "gpulockd returned exit code 3: requested SM clock lock was not honored; "
-            f"stdout={record['stdout']!r} stderr={record['stderr']!r}"
-        )
-    if record["returncode"] != 0:
-        raise EvidenceError(
-            f"gpulockd start failed rc={record['returncode']}: "
-            f"stdout={record['stdout']!r} stderr={record['stderr']!r}"
-        )
-    record["target_sm_mhz"] = target_mhz
-    return record
-
-
-def stop_lock() -> dict[str, Any]:
-    return run_command(lock_command("stop"))
-
-
-SANITIZER_ADMISSION = (
-    "memcheck-zero + recorded racecheck/synccheck counts (owner review at Gate 2). "
-    "racecheck/synccheck report hazards on the same-source one-TU control in the "
-    "same class and magnitude as on the linked image, so they characterize the "
-    "upstream Megakernels/ThunderKittens source, not the link seam; their strict "
-    "verdicts are kept verbatim and are not admission predicates for this epoch."
-)
 
 
 def sanitizer_images() -> list[tuple[str, str, Path]]:
@@ -378,16 +278,11 @@ def sanitizer_images() -> list[tuple[str, str, Path]]:
 
 
 def run_sanitizers() -> int:
-    host = BUNDLES.parent
-    sys.path.insert(0, str(host))
-    from launch import launch_command
-
     required = {
         "memcheck": 0,
         "racecheck": REQUIRED_RACECHECK_HAZARDS,
         "synccheck": REQUIRED_SYNCCHECK_ERRORS,
     }
-    gating = {"memcheck"}
     sanitizer = str(Path(os.environ["PIPELINK_CUDA_HOME"]) / "bin" / "compute-sanitizer")
     records = []
     owner = SUITES[SUITE]["pipelines"][0]
@@ -396,10 +291,10 @@ def run_sanitizers() -> int:
         path = image_path(pipeline, image)
         for tool, required_count in required.items():
             out = SANITIZER_RUNS / f"{pipeline}-{image}-{bundle.name}" / tool
-            out.mkdir(parents=True, exist_ok=True)
+            out.mkdir(parents=True, exist_ok=False)
             command = launch_command(
                 pipeline, image, bundle, out, "check",
-                runner_args=("--ntok", "1"),
+                runner_args=("--ntok", "1"), runner=RUNNER, provider=PROVIDER,
             )
             record = run_command(
                 [sanitizer, "--tool", tool, "--error-exitcode", "99", *command],
@@ -420,30 +315,26 @@ def run_sanitizers() -> int:
             records.append({
                 **record, "pipeline": pipeline, "image": str(path),
                 "image_role": image, "tool": tool, "count": count,
-                "required": required_count, "passed": passed, "gating": tool in gating,
+                "required": required_count, "passed": passed,
                 "log": str(log), "bundle": str(bundle), "ntok": 1, "watchdog_seconds": 1800,
             })
             print(f"{pipeline} {image} {bundle.name} {tool}: {'PASS' if passed else 'FAIL'}", flush=True)
     if build_generation(owner) != generation:
         raise EvidenceError("Build changed during sanitizers; rerun P2 sanitizers")
-    admitted = all(
-        record["passed"] if record["gating"] else isinstance(record["count"], int)
-        for record in records
-    )
+    passed = all(record["passed"] for record in records)
     result = {
         "generated_at": utc_now(), "gpu": GPU, "required": required,
         "build_generation": generation,
-        "passed": all(record["passed"] for record in records),
-        "admission": {"policy": SANITIZER_ADMISSION, "gating_tools": sorted(gating),
-                      "admitted": admitted},
+        "passed": passed,
         "records": records,
     }
-    sanitize_receipt(owner).write_text(json.dumps(result, indent=2) + "\n")
-    return 0 if admitted else 1
+    destination = OUTPUT_ROOT / ("sanitize-cute.json" if owner == "cute" else "sanitize.json")
+    destination.write_text(json.dumps(result, indent=2) + "\n")
+    return 0 if passed else 1
 
 
 def require_sanitized_images() -> dict[str, dict[str, Any]]:
-    """Admission per SANITIZER_ADMISSION; returns per-case recorded counts for the results.
+    """Require every tool clean on every timed image; returns per-case counts for the results.
 
     Each image is admitted by the receipt of the build that produced it, so a
     cross-library case reads both the reference and the CuTe receipts.
@@ -456,8 +347,8 @@ def require_sanitized_images() -> dict[str, dict[str, Any]]:
         result = json.loads(path.read_text(encoding="utf-8"))
         if result.get("build_generation") != build_generation(pipeline):
             raise EvidenceError(f"P3 requires sanitizers from the current build generation: {path}")
-        if not result.get("admission", {}).get("admitted"):
-            raise EvidenceError(f"P3 requires admitted sanitizers: {path}")
+        if not result.get("passed"):
+            raise EvidenceError(f"P3 requires clean sanitizers: {path}")
         receipts[str(path)] = {
             (row["image"], row["bundle"], row["tool"]): row for row in result["records"]
         }
@@ -472,325 +363,284 @@ def require_sanitized_images() -> dict[str, dict[str, Any]]:
                 row = records.get((str(image_file), str(sanitizer_bundle(case)), tool))
                 if row is None:
                     raise EvidenceError(f"P3 sanitizer coverage missing: {case['case_id']} {role} {tool}")
-                if row["gating"] and not row["passed"]:
+                if not row["passed"] or row["returncode"] != 0 or row["count"] != 0:
                     raise EvidenceError(f"P3 refuses: {tool} not clean for {case['case_id']} {role}")
-                if not isinstance(row["count"], int):
-                    raise EvidenceError(f"P3 refuses: {tool} count not recorded for {case['case_id']} {role}")
-                counts[f"{role}_{tool}"] = {"count": row["count"], "strict_passed": row["passed"]}
+                counts[f"{role}_{tool}"] = {"count": row["count"]}
         per_case[case["case_id"]] = counts
     return per_case
 
 
-def selected_pairs(result: dict[str, Any]) -> list[dict[str, Any]]:
-    target = result["summary"]["pair_valid_target"]
-    return [pair for pair in result["pairs"] if pair["pair_valid"]][:target]
+SNAPSHOT_PHASES = ("initial", "before_reload", "after_reload", "final")
+TOOLS = ("memcheck", "racecheck", "synccheck")
 
 
-def collect_case(case: dict[str, Any], result: dict[str, Any], pair_cap_error: str | None) -> dict[str, Any]:
-    summary = result["summary"]
-    selected = selected_pairs(result)
-    slots: list[dict[str, Any]] = []
-    valid_ms: dict[str, list[float]] = {"reference": [], "linked": []}
-    all_cuda_min: list[float] = []
-    all_cuda_max: list[float] = []
-    batch_sizes: set[int] = set()
-    for pair in result["pairs"]:
-        for role in ("reference", "linked"):
-            output = pair["outputs"][role]
-            throughput = float(output["throughput"])
-            ms_per_token = 1000.0 / throughput
-            slot = {
-                "attempt": pair["attempt"],
-                "role": role,
-                "pair_valid": pair["pair_valid"],
-                "validity_class": pair["validity_class"],
-                "throughput_tokens_per_second": throughput,
-                "milliseconds_per_token": ms_per_token,
-                "iterations": output["iterations"],
-                "steady_cuda_event_milliseconds": output["steady_cuda_event_milliseconds"],
-                "batch_tokens": output["inner_batch_launches"],
-                "observed_batch_cuda_ms_min": output["minimum_observed_batch_ms"],
-                "observed_batch_cuda_ms_max": output["maximum_observed_batch_ms"],
-                "observed_batch_wall_ms_min": output["minimum_observed_batch_wall_ms"],
-                "observed_batch_wall_ms_max": output["maximum_observed_batch_wall_ms"],
-            }
-            slots.append(slot)
-            batch_sizes.add(output["inner_batch_launches"])
-            all_cuda_min.append(float(output["minimum_observed_batch_ms"]))
-            all_cuda_max.append(float(output["maximum_observed_batch_ms"]))
-    for pair in selected:
-        for role in ("reference", "linked"):
-            valid_ms[role].append(1000.0 / float(pair["outputs"][role]["throughput"]))
+def physical_images(case: dict[str, Any]) -> dict[str, Any]:
+    result = {}
+    for arm, role in (("candidate", "linked"), ("reference", "reference")):
+        pipeline = role_pipeline(case, role)
+        image = case[f"{role}_image"]
+        path = image_path(pipeline, image)
+        result[arm] = {
+            "pipeline": pipeline, "image": image, "path": str(path),
+            "sha256": sha256_file(path), "build_generation": build_generation(pipeline),
+            "manifest": str(PORT_BUILD / "linked" / pipeline / "link.json"),
+            "manifest_sha256": sha256_file(PORT_BUILD / "linked" / pipeline / "link.json"),
+        }
+    return result
 
-    invariant = summary["validity_count_invariant"]
-    if invariant.get("equal") is not True:
-        raise EvidenceError(f"{case['case_id']}: harness validity invariant failed")
-    gate_outcome = "NOT_GATED"
-    if case["kind"] == "seam-parity":
-        if summary["median_ratio_linked_over_reference"] is None:
-            gate_outcome = "EXECUTION_FAIL"
-        else:
-            gate_outcome = (
-                "PASS"
-                if summary["median_ratio_linked_over_reference"] >= RATIO_FLOOR
-                else "MISS"
-            )
-    return {
-        "case_id": case["case_id"],
-        "kind": case["kind"],
-        "pipeline": case["pipeline"],
-        "reference_pipeline": role_pipeline(case, "reference"),
-        "bundle": case["bundle"],
+
+def executable_identity() -> dict[str, Any]:
+    return {name: {"path": str(path), "sha256": sha256_file(path)}
+            for name, path in (("runner", RUNNER), ("provider", PROVIDER))}
+
+
+def pair_command(case: dict[str, Any], out: Path, mode: str) -> list[str]:
+    return paired_command(
+        role_pipeline(case, "linked"), case["linked_image"],
+        role_pipeline(case, "reference"), case["reference_image"],
+        (BUNDLES / case["bundle"]).resolve(), out.resolve(), case["pos_id"],
+        mode=mode, runner=RUNNER, provider=PROVIDER,
+    )
+
+
+def check_native_payload(case: dict[str, Any], payload: dict[str, Any], out: Path,
+                         mode: str) -> dict[str, Any]:
+    """Apply compare.py's fresh-slot predicates to the retained snapshots."""
+    import numpy as np
+    from compare import OUTPUT_NAMES, compare_to_reference, decode, load_raw, parse_manifest
+
+    if payload.get("protocol") != PROTOCOL or payload.get("mode") != mode:
+        raise EvidenceError("native paired protocol/mode differs")
+    numeric = payload.get("numerical", {})
+    if (numeric.get("status") != "PASS" or
+            numeric.get("snapshot_phases") != list(SNAPSHOT_PHASES) or
+            numeric.get("root") != str(out.resolve())):
+        raise EvidenceError("native paired numerical snapshots incomplete")
+    images = physical_images(case)
+    provenance = payload.get("provenance", {})
+    expected = {
+        "candidate_image": images["candidate"]["path"],
+        "reference_image": images["reference"]["path"],
+        "bundle": str((BUNDLES / case["bundle"]).resolve()),
+        "visible_device": 0, "shared_runtime_buffers": True,
+        "initial_load_order": ["candidate", "reference"],
+        "reload_load_order": ["reference", "candidate"], "reload_count": 1,
         "pos_id": case["pos_id"],
-        "reference_image": case["reference_image"],
-        "linked_image": case["linked_image"],
-        "status": "EXECUTION_FAIL" if pair_cap_error else summary["status"],
-        "pair_cap_error": pair_cap_error,
-        "pair_valid_target": summary["pair_valid_target"],
-        "pair_valid_count": summary["pair_valid_count"],
-        "pair_valid_pairs_collected": summary["pair_valid_pairs_collected"],
-        "attempted_pairs": summary["attempted_pairs"],
-        "original_valid_count": summary["original_valid_count"],
-        "amended_valid_count": summary["amended_valid_count"],
-        "validity_count_invariant": invariant,
-        "operating_regime": summary["operating_regime"],
-        "pair_valid_ratios_linked_over_reference": summary[
-            "pair_valid_ratios_linked_over_reference"
-        ],
-        "median_ratio_linked_over_reference": summary[
-            "median_ratio_linked_over_reference"
-        ],
-        "ratio_floor": summary["ratio_floor"],
-        "gate_outcome": gate_outcome,
-        "reference_milliseconds_per_token_median": (
-            statistics.median(valid_ms["reference"]) if valid_ms["reference"] else None
-        ),
-        "linked_milliseconds_per_token_median": (
-            statistics.median(valid_ms["linked"]) if valid_ms["linked"] else None
-        ),
-        "batch_token_counts": sorted(batch_sizes),
-        "observed_batch_cuda_ms_min": min(all_cuda_min) if all_cuda_min else None,
-        "observed_batch_cuda_ms_max": max(all_cuda_max) if all_cuda_max else None,
-        "slots": slots,
-        "archive": str((ARCHIVE_ROOT / case["case_id"]).relative_to(ROOT)),
+        "embedding_rows": int(parse_scalars(BUNDLES / case["bundle"])["ntok"]),
+        "queued_probe_repetitions": 2 if mode == "pair-check" else 0,
+        "provider_sessions_per_arm": 1,
+        "provider_sessions_persist_through_reload": True,
     }
+    if any(provenance.get(key) != value for key, value in expected.items()):
+        raise EvidenceError("native physical images, fixture, or reload provenance differs")
+    interval = provenance.get("reload_interval_ns", [])
+    if len(interval) != 2 or not 0 < interval[0] < interval[1]:
+        raise EvidenceError("native reload interval is missing")
+    specs = parse_manifest(BUNDLES / case["bundle"])
+    checks = {}
+    for phase in SNAPSHOT_PHASES:
+        for arm in ("candidate", "reference"):
+            tensors = {}
+            for name in OUTPUT_NAMES:
+                spec = specs[f"ref_tok0_{name}"]
+                observed = decode(load_raw(out / phase / arm / f"tok0_{name}.bin", spec), spec.dtype)
+                reference = decode(load_raw(spec.path, spec), spec.dtype)
+                finite = bool(np.isfinite(observed).all() and np.isfinite(reference).all())
+                tensors[name] = {"finite": finite}
+                if not finite:
+                    raise EvidenceError(f"{phase}/{arm}/{name}: nonfinite snapshot")
+                if name in ("k_row", "v_row"):
+                    strict = compare_to_reference(observed[0], reference[0])
+                    tensors[name]["layer0"] = strict
+                    if not strict["pass"]:
+                        raise EvidenceError(f"{phase}/{arm}/{name}: strict layer-zero KV mismatch")
+            checks[f"{phase}/{arm}"] = tensors
+    return {"status": "PASS", "predicate": numeric["predicate"], "snapshots": checks}
 
 
-def collect_from_archive(case: dict[str, Any], pair_cap_error: str | None = None) -> dict[str, Any]:
-    archive = ARCHIVE_ROOT / case["case_id"]
-    summary_path = archive / "summary.json"
-    if not summary_path.is_file():
-        raise EvidenceError(f"{case['case_id']}: harness did not write summary.json")
-    summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    pairs = [
-        json.loads(path.read_text(encoding="utf-8"))
-        for path in sorted((archive / "pairs").glob("pair-*.json"))
-    ]
-    return collect_case(case, {"summary": summary, "pairs": pairs}, pair_cap_error)
+def sanitizer_pairs() -> list[dict[str, Any]]:
+    """Predeclared coverage: one entry per unique arm pair and sanitizer bundle."""
+    pairs = {}
+    for case in CASES:
+        bundle = sanitizer_bundle(case)
+        key = (role_pipeline(case, "linked"), case["linked_image"],
+               role_pipeline(case, "reference"), case["reference_image"], bundle.name)
+        pairs[key] = {
+            **case, "case_id": "-".join(key), "bundle": bundle.name,
+            "pos_id": int(parse_scalars(bundle)["pos_id_first"]),
+        }
+    return [pairs[key] for key in sorted(pairs)]
 
 
-def json_number(value: Any) -> str:
-    if value is None:
-        return "n/a"
-    if isinstance(value, float) and not math.isfinite(value):
-        raise EvidenceError("non-finite number cannot be rendered")
-    return str(value)
+def pair_coverage(case: dict[str, Any]) -> dict[str, Any]:
+    bundle = sanitizer_bundle(case).resolve()
+    return {"images": physical_images(case), "bundle": str(bundle),
+            "manifest_sha256": sha256_file(bundle / "manifest.txt"),
+            "scalars_sha256": sha256_file(bundle / "scalars.txt")}
 
 
-def write_result_markdown(payload: dict[str, Any]) -> None:
-    rows = []
-    for case in payload["cases"]:
-        comparison = f"{case['linked_image']} / {case['reference_image']}"
-        validity = (
-            f"{case['pair_valid_count']}/{case['attempted_pairs']} pair-valid; "
-            f"{case['operating_regime']}"
-        )
-        rows.append(
-            "| "
-            + " | ".join(
-                (
-                    case["case_id"],
-                    comparison,
-                    json_number(case["median_ratio_linked_over_reference"]),
-                    str(case["pair_valid_count"]),
-                    json_number(case["reference_milliseconds_per_token_median"]),
-                    json_number(case["linked_milliseconds_per_token_median"]),
-                    ",".join(str(value) for value in case["batch_token_counts"]),
-                    validity,
-                    case["gate_outcome"],
-                )
-            )
-            + " |"
-        )
-    seam_pass = (
-        len(payload["cases"]) == len(CASES)
-        and all(case["gate_outcome"] == "PASS" for case in payload["cases"])
-    )
-    cuda_min = min(
-        case["observed_batch_cuda_ms_min"]
-        for case in payload["cases"]
-        if case["observed_batch_cuda_ms_min"] is not None
-    )
-    cuda_max = max(
-        case["observed_batch_cuda_ms_max"]
-        for case in payload["cases"]
-        if case["observed_batch_cuda_ms_max"] is not None
-    )
-    p2_note = (
-        f"**P2 numerical gate PASS:** all {len(payload['p2_receipts'])} receipts "
-        "(five bundles × four pipelines) pass; P3 admission requires it.\n\n"
-    )
-    tools = ("memcheck", "racecheck", "synccheck")
-    sanitizer_rows = "\n".join(
-        f"| {case['case_id']} | "
-        + " | ".join(
-            f"{case['sanitizers'][f'linked_{tool}']['count']} / {case['sanitizers'][f'reference_{tool}']['count']}"
-            for tool in tools
-        )
-        + " |"
-        for case in payload["cases"]
-    )
-    text = f"""# Megakernel llama-1b port — seam-parity evidence
-
-Rendered by `parity/run_parity.py` from `results.json` (campaign generated {payload['generated_at']}).
-
-## Verdict
-
-**Seam-parity gate {'PASS' if seam_pass else 'MISS'}** — all {len(CASES)} linked / same-source one-TU cases {'meet' if seam_pass else 'do not all meet'} the median ratio floor of {RATIO_FLOOR}.
-
-{p2_note}| case | linked / reference | median ratio | pair-valid count | reference median ms/token | linked median ms/token | batch tokens | clock validity | 0.97 seam gate |
-|---|---|---:|---:|---:|---:|---:|---|---|
-{chr(10).join(rows)}
-
-Each slot calibrated a one-token probe and selected an integer batch at a 50 ms target, capped at {MAX_BATCH_TOKENS} tokens. The per-case batch sizes are in the table. Across every slot, observed CUDA-event batch time ranged from {json_number(cuda_min)} ms to {json_number(cuda_max)} ms, below the 100 ms harness quantum. gpulockd held the selected GPU at {payload['lock']['target_sm_mhz']} MHz; its pre-case, per-case, and post-case status checks were healthy with zero recorded violations.
-
-## Sanitizers
-
-Counts on the timed images, linked / one-TU. Admission requires memcheck zero; racecheck and synccheck counts are recorded, not admission predicates. Logs cap reported hazards, so racecheck counts are not exhaustive tallies.
-
-| case | memcheck | racecheck | synccheck |
-|---|---:|---:|---:|
-{sanitizer_rows}
-
-## Images
-
-`port/build.sh` builds the host-ABI-v3 linked, same-source one-TU and monolithic images with fast math (FTZ and FMA enabled, precise division and square root disabled) from upstream Megakernels `7309cec` plus the minimal correctness patches in `port/patches/` (partial-store `laneid`, partial KV stage index, tensor-allocator barrier, reduction page lifetime); without them the multi-partition attention path is dead or racy upstream. The reference is therefore patched upstream, not stock upstream.
-
-## Interpretation
-
-Each PipeLink-linked cubin is compared with its same-source one-TU build, isolating the ABI/link seam. MK-A-1024-red additionally executes two attention partials per KV head followed by terminal attention reductions in all sixteen layers. No upstream performance comparisons are part of this campaign.
-
-## Method
-
-Each case was executed by `evaluator.harness.parity.run_case` with `Protocol.definitive`: five untimed single-token check-mode warmups per image, 3 s nominal slots, 1 s leading discard, first eight chronological primary-valid pairs, and the shared ±3% clock predicate. Before every warmup request and every timed slot request, the adapter ran a separate single-token Gate P2 recheck: all nine outputs finite and layer-0 `k_row`/`v_row` within `rtol=2e-2`, `atol=2e-2*RMS(reference)`. Throughput is complete steady-window tokens divided by summed CUDA-event batch time. Pair orientation is always linked/reference; no ratios were imputed.
-
-Running the campaign also writes machine-readable results (`results.json`) and sanitizer receipts (`sanitize.json`) next to this report; they are not published. Harness-owned requests, slot outputs, telemetry, pair decisions, and summaries are written to the git-ignored `{ARCHIVE_ROOT.relative_to(EVIDENCE)}/<case-id>/`.
-"""
-    RESULT_MARKDOWN_PATH.write_text(text, encoding="utf-8")
+def run_pair_checks(*, sanitize: bool) -> int:
+    # These checks run inside gpu_window.sh; timing must not, because
+    # run_native_pair owns its own window and clock lock.
+    if not os.environ.get("PIPELINK_GPU_WINDOW"):
+        raise EvidenceError("wrap --pair-check / --sanitize-pair in tools/gpu_window.sh")
+    root = OUTPUT_ROOT / ("paired-sanitizers" if sanitize else "pair-check")
+    root.mkdir(parents=True, exist_ok=False)
+    identity = executable_identity()
+    records = []
+    cases = sanitizer_pairs() if sanitize else CASES
+    sanitizer = str(Path(os.environ["PIPELINK_CUDA_HOME"]) / "bin" / "compute-sanitizer") if sanitize else None
+    for case in cases:
+        coverage = pair_coverage(case) if sanitize else {"images": physical_images(case)}
+        for tool in (TOOLS if sanitize else ("native",)):
+            out = root / case["case_id"] / tool
+            out.mkdir(parents=True, exist_ok=False)
+            native_command = pair_command(case, out, "pair-check")
+            sanitizer_log = out / "sanitizer.log"
+            command = ([sanitizer, "--tool", tool, "--error-exitcode", "99",
+                        "--log-file", str(sanitizer_log), *native_command]
+                       if sanitize else native_command)
+            record = run_command(command, env=dict(
+                os.environ, CUDA_VISIBLE_DEVICES=str(GPU), MK_WATCHDOG_SECONDS="1800"))
+            stdout, stderr = record.pop("stdout"), record.pop("stderr")
+            (out / "native.stdout").write_text(stdout)
+            (out / "native.stderr").write_text(stderr)
+            count = None
+            if sanitize:
+                pattern = (r"RACECHECK SUMMARY:\s*(\d+)\s+hazards?" if tool == "racecheck"
+                           else r"ERROR SUMMARY:\s*(\d+)\s+errors?[ \t]*$")
+                text = sanitizer_log.read_text() if sanitizer_log.exists() else ""
+                counts = re.findall(pattern, text, re.MULTILINE)
+                count = int(counts[0]) if len(counts) == 1 else None
+            passed = record["returncode"] == 0 and (not sanitize or count == 0)
+            numeric = None
+            error = None
+            try:
+                native_payload = json.loads(stdout)
+                numeric = check_native_payload(case, native_payload, out, "pair-check")
+            except (ValueError, KeyError, OSError, EvidenceError) as exc:
+                passed, error = False, str(exc)
+            records.append({**record, "case_id": case["case_id"], "coverage": coverage,
+                            "tool": tool, "count": count, "passed": passed, "numeric": numeric,
+                            "error": error, "out": str(out),
+                            "sanitizer_log": str(sanitizer_log) if sanitize else None})
+            print(f"{case['case_id']} {tool}: {'PASS' if passed else 'FAIL'}", flush=True)
+    unchanged = identity == executable_identity() and all(
+        record["coverage"] == (pair_coverage(case) if sanitize else {"images": physical_images(case)})
+        for case in cases for record in records if record["case_id"] == case["case_id"])
+    payload = {"protocol": PROTOCOL, "action": "sanitize-pair" if sanitize else "pair-check",
+               "generated_at": utc_now(), "hostname": socket.gethostname(), "gpu": GPU,
+               "executables": identity, "records": records,
+               "passed": unchanged and all(row["passed"] for row in records)}
+    (root / "receipt.json").write_text(json.dumps(payload, indent=2) + "\n")
+    return 0 if payload["passed"] else 1
 
 
-CUTE_CONTEXT_LABELS = {"p16-n2": "16", "p1024-n8-red": "1024, 2 KV partitions + reduction", "p4096-n2": "4096"}
+def require_pair_sanitizers(path: Path) -> dict[str, Any]:
+    receipt = json.loads(path.read_text())
+    if (receipt.get("protocol") != PROTOCOL or receipt.get("action") != "sanitize-pair" or
+            not receipt.get("passed") or receipt.get("executables") != executable_identity()):
+        raise EvidenceError(f"current runner/provider paired sanitizer evidence required: {path}")
+    for case in CASES:
+        coverage = pair_coverage(case)
+        for tool in TOOLS:
+            matches = [row for row in receipt["records"]
+                       if row["coverage"] == coverage and row["tool"] == tool]
+            if (len(matches) != 1 or not matches[0]["passed"] or
+                    matches[0]["returncode"] != 0 or matches[0]["count"] != 0 or
+                    matches[0].get("numeric", {}).get("status") != "PASS"):
+                raise EvidenceError(f"paired sanitizer coverage missing/failed: {case['case_id']} {tool}")
+    return {"path": str(path.resolve()), "sha256": sha256_file(path), "status": "PASS"}
 
 
-def write_cute_markdown(payload: dict[str, Any]) -> None:
-    def row(case: dict[str, Any], *cells: str) -> str:
-        return "| " + " | ".join((case["case_id"], CUTE_CONTEXT_LABELS[case["bundle"]], *cells)) + " |"
+def collect_case(case: dict[str, Any], execution: dict[str, Any],
+                 numerical: dict[str, Any] | None) -> dict[str, Any]:
+    native = execution.get("payload") or {}
+    admitted = bool(execution["admitted"] and numerical and numerical["status"] == "PASS")
+    ratio = native.get("pair", {}).get("ratio_onetu_over_linked") if admitted else None
+    gate = ("PASS" if ratio >= RATIO_FLOOR else "MISS") if admitted and case["kind"] == "seam-parity" else (
+        "NOT_GATED" if admitted else "EXECUTION_FAIL")
+    return {**case, "protocol": PROTOCOL, "status": "PASS" if admitted else "EXECUTION_FAIL",
+            "ratio_onetu_over_linked": ratio,
+            "ratio_floor": RATIO_FLOOR if case["kind"] == "seam-parity" else None,
+            "gate_outcome": gate, "pair": native.get("pair"), "numerical": numerical,
+            "provenance": native.get("provenance"), "execution": execution}
 
-    def common(case: dict[str, Any]) -> tuple[str, ...]:
-        return (
-            json_number(case["median_ratio_linked_over_reference"]),
-            f"{case['pair_valid_count']}/{case['attempted_pairs']}",
-            json_number(case["reference_milliseconds_per_token_median"]),
-            json_number(case["linked_milliseconds_per_token_median"]),
-            ",".join(str(value) for value in case["batch_token_counts"]),
-        )
 
-    seam = [case for case in payload["cases"] if case["kind"] == "seam-parity"]
-    cross = [case for case in payload["cases"] if case["kind"] == "cross-library"]
-    seam_rows = "\n".join(row(case, *common(case), case["gate_outcome"]) for case in seam)
-    cross_rows = "\n".join(row(case, *common(case), case["status"]) for case in cross)
-    tools = ("memcheck", "racecheck", "synccheck")
-    sanitizer_rows = "\n".join(
-        row(case, *(f"{case['sanitizers'][f'linked_{tool}']['count']} / "
-                    f"{case['sanitizers'][f'reference_{tool}']['count']}" for tool in tools))
-        for case in payload["cases"]
-    )
-    images = "\n".join(f"- `{path}`: `{digest[:12]}`" for path, digest in sorted(payload.get("images", {}).items()))
-    generations = ", ".join(f"{name} `{value[:8]}`" for name, value in payload.get("build_generations", {}).items())
-    status = "complete" if payload["execution_error"] is None and len(payload["cases"]) == len(CASES) else "INCOMPLETE"
-    text = f"""# Megakernel CuTe-attention composition — definitive evidence
+C1_BANNER = ("> Unlocked or unrecorded SM clocks: timings are valid as relative comparisons only, "
+             "not comparable with the paper's locked-clock numbers.")
 
-Rendered by `parity/run_parity.py --suite cute` (campaign generated {payload['generated_at']}; run {status}).
 
-Pipeline `cute` replaces only the attention-partial package of pipeline `a` with a CUTLASS/CuTe
-implementation; the other eight packages, the host provider and the instruction schedule are unchanged.
-
-## Seam parity: CuTe linked / CuTe same-source one-TU
-
-| case | context | median ratio | pair-valid / attempted | one-TU median ms/token | linked median ms/token | batch tokens | 0.97 seam gate |
-|---|---|---:|---:|---:|---:|---:|---|
-{seam_rows}
-
-## Cross-library speedup: CuTe linked / all-ThunderKittens linked
-
-The median ratio is the paired throughput speedup of the CuTe composition over the all-ThunderKittens
-linked kernel. It is descriptive; the seam gate does not apply.
-
-| case | context | paired speedup | pair-valid / attempted | ThunderKittens median ms/token | CuTe median ms/token | batch tokens | harness status |
-|---|---|---:|---:|---:|---:|---:|---|
-{cross_rows}
-
-## Sanitizers
-
-Counts on the timed images, candidate / reference (one token; short contexts use the 16-token bundle, the
-reduction case its own bundle). Admission requires memcheck zero; racecheck and synccheck counts are recorded,
-not admission predicates. Logs cap reported hazards, so racecheck counts are not exhaustive tallies.
-
-| case | context | memcheck | racecheck | synccheck |
-|---|---|---:|---:|---:|
-{sanitizer_rows}
-
-## Method
-
-Each case was executed by `evaluator.harness.parity.run_case` with `Protocol.definitive`, exactly as the
-[all-ThunderKittens evidence](RESULT.md#method): five untimed single-token check-mode warmups per image,
-3 s nominal slots, 1 s leading discard, first eight chronological primary-valid pairs, the shared ±3% clock
-predicate, and a single-token correctness recheck before every warmup and timed slot. Each slot sized its
-batch from a one-token probe (50 ms target, at most {MAX_BATCH_TOKENS} tokens). gpulockd held the GPU at
-{payload['lock']['target_sm_mhz']} MHz. P3 admission required all {len(payload['p2_receipts'])} P2 numerical
-receipts (ThunderKittens and CuTe) to pass.
-
-Images (build generations {generations}), SHA-256 prefixes:
-
-{images}
-"""
-    RESULT_MARKDOWN_PATH.write_text(text, encoding="utf-8")
+def arm_ms_per_token(pair: dict[str, Any]) -> dict[str, float]:
+    """Median over blocks of each arm's two batch totals (2 x 10 decodes) per token."""
+    sums: dict[str, list[float]] = {"candidate": [], "reference": []}
+    for block in pair["blocks"]:
+        for arm, letter in (("candidate", "A"), ("reference", "B")):
+            sums[arm].append(sum(ms for order, ms in zip(block["order"], block["milliseconds"])
+                                 if order == letter) / (2 * pair["repetitions"]))
+    return {arm: statistics.median(values) for arm, values in sums.items()}
 
 
 def write_results(payload: dict[str, Any]) -> None:
     temporary = RESULTS_PATH.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     temporary.replace(RESULTS_PATH)
-    if payload["cases"]:
-        (write_cute_markdown if SUITE == "cute" else write_result_markdown)(payload)
+    rows = []
+    for case in payload["cases"]:
+        images = case["images"]
+        ratio = case["ratio_onetu_over_linked"]
+        ms = arm_ms_per_token(case["pair"]) if case["pair"] and case["pair"].get("blocks") else {}
+        rows.append(f"| {case['case_id']} | {images['candidate']['pipeline']}:{images['candidate']['image']} | "
+                    f"{images['reference']['pipeline']}:{images['reference']['image']} | "
+                    f"{ratio if ratio is not None else 'n/a'} | "
+                    f"{ms.get('reference', float('nan')):.6f} | {ms.get('candidate', float('nan')):.6f} | "
+                    f"{case['status']} | {case['gate_outcome']} |")
+    clock = (f"SM clock locked at {payload['clock_mhz']} MHz" if payload["clock_locked"]
+             else "SM clock unlocked")
+    RESULT_MARKDOWN_PATH.write_text(
+        (C1_BANNER + "\n\n" if not payload["clock_locked"] else "") +
+        f"# Megakernel {SUITE} — paired reload evidence\n\n"
+        f"Protocol `{PROTOCOL}`; local execution on one GPU; "
+        f"{clock}. Generated {payload['generated_at']}.\n\n"
+        "| case | candidate A | reference B | speedup B/A | reference ms/token | candidate ms/token | admission | seam gate |\n"
+        "|---|---|---|---:|---:|---:|---|---|\n" + "\n".join(rows) + "\n\n"
+        "Each case runs 8 blocks × 4 batches × 10 complete fixed-position decodes, ordered "
+        "ABBA, BAAB, BAAB, ABBA | BAAB, ABBA, ABBA, BAAB. The result is "
+        "sqrt(median(first four block B/A ratios) × median(last four)); each block ratio "
+        "is the sum of its two reference times divided by the sum of its two candidate times. "
+        "An arm's ms/token is the median over the eight blocks of its two batch totals divided by 20. "
+        "Only same-source seam comparisons have the 0.97 gate; cross-library ratios are reported ungated. "
+        "Each case runs once, including on a MISS, with no calibration, duration gate, "
+        "time slots or per-arm telemetry coverage.\n\n"
+        "One context, the shared fixture and buffers, immutable pinned embedding rows and "
+        "per-image opaque params persist. Both modules unload at the midpoint and reload "
+        "reference-first with refreshed function attributes. Each event interval covers Bar "
+        "reset, embedding HtoD and the complete decode. Each arm runs one provider query/build "
+        "before all batches; both sessions and their opaque parameter storage persist "
+        "through the reload and are released after the final drain. The common helper runs "
+        "eight warmup calls per arm before each half. Four numerical snapshot "
+        "phases per arm run outside scored timing. results.json and its local execution "
+        "directories keep all 32 raw batch totals, epoch intervals, image identities, "
+        "lock/window receipts and snapshots.\n\n"
+        "Admission requires the P2 predicates, sanitizer receipts for the current image "
+        "generation, runner/provider-bound paired reload sanitizer receipts and "
+        "finite-nine/strict-layer0-KV snapshot checks through compare.py.\n"
+    )
 
 
 P2_BUNDLES = ("p10-n8-l1", "p1024-n8-l1", "p10-n8", "p1024-n8", "p1024-n8-red")
 P2_PIPELINES = ("a", "rebind-smem", "rebind-regs", "rebind-opcode")
 # CuTe P2: both layer-1 fixtures plus full depth at the three timed contexts.
-CUTE_P2 = RUNS / "cute-20261007" / "final-check"
-CUTE_P2_FULL_DEPTH = ("p16-n2", "p1024-n8-red", "p4096-n2")
+CUTE_P2_BUNDLES = ("p10-n8-l1", "p1024-n8-l1", "p16-n2", "p1024-n8-red", "p4096-n2")
 
 
 def require_p2_pass() -> list[dict[str, Any]]:
-    """P3 admission: every saved P2 numerical receipt must PASS (the CuTe suite also
-    needs the ThunderKittens receipts: its cross-library reference is pipeline `a`)."""
-    paths = []
-    for name in P2_BUNDLES:
-        directory = RUNS / "submission-2026-09-17" if name.endswith("-red") else RUNS
-        paths += [(name, pipeline, directory / name / f"compare-{pipeline}.json") for pipeline in P2_PIPELINES]
+    """P3 admission: every saved P2 numerical receipt must PASS. The CuTe suite also
+    needs the ThunderKittens receipts because its cross-library reference is pipeline `a`."""
+    paths = [(name, pipeline, P2_ROOT / name / f"compare-{pipeline}.json")
+             for name in P2_BUNDLES for pipeline in P2_PIPELINES]
     if SUITE == "cute":
-        paths += [(name, "cute", CUTE_P2 / name / "comparison.json") for name in P2_BUNDLES[:2] + CUTE_P2_FULL_DEPTH]
+        paths += [(name, "cute", P2_ROOT / name / "compare-cute.json") for name in CUTE_P2_BUNDLES]
     receipts = []
     for name, pipeline, path in paths:
         result = json.loads(path.read_text(encoding="utf-8"))
@@ -798,122 +648,90 @@ def require_p2_pass() -> list[dict[str, Any]]:
             raise EvidenceError(f"P3 requires every P2 receipt to PASS: {path}")
         receipts.append({
             "bundle": name, "pipeline": pipeline, "status": result["status"],
-            "path": str(path.relative_to(ROOT)),
+            "path": str(path),
         })
     return receipts
 
 
 def main() -> int:
+    global RUNNER, PROVIDER
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", choices=sorted(SUITES), default="reference")
-    parser.add_argument("--sanitize", action="store_true", help="P2 sanitizer pass on the P3 images")
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--sanitize", action="store_true", help="per-image P2 sanitizer coverage")
+    actions.add_argument("--sanitize-pair", action="store_true", help="bounded paired/reload sanitizer coverage")
+    actions.add_argument("--pair-check", action="store_true", help="bounded numerical/reload check; no scored blocks")
+    parser.add_argument("--output-root", required=True, type=Path,
+                        help="local staging root: p2/ numerical receipts, one subdirectory per suite")
+    parser.add_argument("--runner", type=Path, default=RUNNER)
+    parser.add_argument("--provider", type=Path, default=PROVIDER)
+    parser.add_argument("--paired-sanitizers", type=Path,
+                        help="paired sanitizer receipt; default OUTPUT_ROOT/SUITE/paired-sanitizers/receipt.json")
     args = parser.parse_args()
-    if GPU is None or GPU <= 0:
-        parser.error("set MK_GPU to the positive physical GPU index used for this campaign")
-    select_suite(args.suite)
+    if GPU is None:
+        parser.error("set MK_GPU or PIPELINK_GPUS (source tools/env.sh)")
+    RUNNER, PROVIDER = args.runner.resolve(), args.provider.resolve()
+    select_suite(args.suite, args.output_root)
+    for case in CASES:
+        case_config(case)  # Resolve the local bundles.
     if args.sanitize:
+        if not os.environ.get("PIPELINK_GPU_WINDOW"):
+            raise EvidenceError("wrap --sanitize in tools/gpu_window.sh")
         return run_sanitizers()
     p2_receipts = require_p2_pass()
-    target_text = os.environ.get("PIPELINK_LOCK_SM_MHZ")
-    if not target_text:
-        raise EvidenceError("PIPELINK_LOCK_SM_MHZ is not set; source tools/env.sh")
-    try:
-        target_mhz = int(target_text)
-    except ValueError as exc:
-        raise EvidenceError("PIPELINK_LOCK_SM_MHZ must be an integer") from exc
-    if target_mhz <= 0:
-        raise EvidenceError("PIPELINK_LOCK_SM_MHZ must be positive")
-
-    EVIDENCE.mkdir(parents=True, exist_ok=True)
-    ARCHIVE_ROOT.mkdir(parents=True, exist_ok=True)
+    if args.pair_check or args.sanitize_pair:
+        return run_pair_checks(sanitize=args.sanitize_pair)
+    if os.environ.get("PIPELINK_GPU_WINDOW"):
+        raise EvidenceError("normal timing owns its window; remove the outer gpu_window.sh")
+    if RESULTS_PATH.exists() or RESULT_MARKDOWN_PATH.exists():
+        raise EvidenceError("timing output already exists; choose a fresh --output-root, never overwrite evidence")
+    # Unset, empty or 0 PIPELINK_LOCK_SM_MHZ runs with unlocked clocks.
+    target_mhz = int(os.environ.get("PIPELINK_LOCK_SM_MHZ") or 0)
+    sanitizer_counts = require_sanitized_images()
+    paired_sanitizers = require_pair_sanitizers(
+        args.paired_sanitizers or OUTPUT_ROOT / "paired-sanitizers" / "receipt.json")
+    executables = executable_identity()
     payload: dict[str, Any] = {
-        "schema_version": "pipelink-megakernel-parity-results-v1",
-        "suite": SUITE,
-        "generated_at": utc_now(),
-        "gpu": GPU,
-        "protocol": "definitive",
-        "ratio_floor": RATIO_FLOOR,
-        "batch_token_cap": MAX_BATCH_TOKENS,
-        "batch_sizing": "one-token CUDA-event probe; floor(50 ms / probe ms), clamped to [1,32]",
-        "lock": {
-            "target_sm_mhz": target_mhz,
-            "start": None,
-            "initial_status": None,
-            "case_status_checks": [],
-            "final_status": None,
-            "stop": None,
-        },
-        "cases": [],
-        "execution_error": None,
-        "p2_receipts": p2_receipts,
+        "schema_version": "pipelink-megakernel-parity-results-v2",
+        "protocol": PROTOCOL, "suite": SUITE, "generated_at": utc_now(),
+        "hostname": socket.gethostname(), "execution_location": "local",
+        "gpu": GPU, "clock_mhz": target_mhz or None, "clock_locked": bool(target_mhz),
+        "executables": executables,
+        "ratio_floor": RATIO_FLOOR, "repetitions": 10,
+        "cases": [], "execution_error": None, "p2_receipts": p2_receipts,
+        "paired_sanitizers": paired_sanitizers,
     }
-    lock_started = False
     execution_failed = False
     try:
-        image_paths = {
-            image_path(role_pipeline(case, role), case[f"{role}_image"])
-            for case in CASES
-            for role in ("reference", "linked")
-        }
-        image_hashes = {path: sha256_file(path) for path in sorted(image_paths)}
-        payload["images"] = {str(path.relative_to(ROOT)): digest for path, digest in image_hashes.items()}
-        payload["build_generations"] = {
-            pipeline: build_generation(pipeline)
-            for pipeline in sorted({role_pipeline(case, role) for case in CASES for role in ("reference", "linked")})
-        }
-        sanitizer_counts = require_sanitized_images()
-        payload["sanitizer_admission"] = SANITIZER_ADMISSION
-        payload["lock"]["start"] = start_lock(target_mhz)
-        lock_started = True
-        payload["lock"]["initial_status"] = check_lock("before-cases", target_mhz)
         for case in CASES:
-            before = check_lock(f"before-{case['case_id']}", target_mhz)
-            payload["lock"]["case_status_checks"].append(before)
-            archive = ARCHIVE_ROOT / case["case_id"]
-            if archive.exists():
-                shutil.rmtree(archive)
-            reference = image_spec(case, "reference", image_hashes)
-            linked = image_spec(case, "linked", image_hashes)
-            protocol = Protocol.definitive(archive, case_config(case))
-            try:
-                result = run_case(case["case_id"], reference, linked, GPU, protocol)
-                case_result = collect_case(case, result, None)
-            except PairCapError as exc:
-                case_result = collect_from_archive(case, str(exc))
-                execution_failed = True
-            case_result["sanitizers"] = sanitizer_counts[case["case_id"]]
+            archive = OUTPUT_ROOT / "cases" / case["case_id"]
+            snapshots = archive / "snapshots"
+            images = physical_images(case)
+            execution = run_native_pair(
+                pair_command(case, snapshots, "pair"),
+                env=dict(os.environ), gpus=[GPU], clock_mhz=target_mhz,
+                out_dir=archive, timeout=600,
+            )
+            numerical = None
+            if execution.get("command_returncode") == 0 and execution.get("payload"):
+                try:
+                    numerical = check_native_payload(case, execution["payload"], snapshots, "pair")
+                except (ValueError, KeyError, OSError, EvidenceError) as exc:
+                    execution["numerical_error"] = str(exc)
+            if images != physical_images(case) or executables != executable_identity():
+                raise EvidenceError("images, manifest, provider or runner changed during the case")
+            case_result = collect_case(case, execution, numerical)
+            case_result.update(images=images, fixture=case_config(case),
+                               sanitizers=sanitizer_counts[case["case_id"]])
             payload["cases"].append(case_result)
-            after = check_lock(f"after-{case['case_id']}", target_mhz)
-            payload["lock"]["case_status_checks"].append(after)
+            execution_failed |= case_result["status"] != "PASS"
             write_results(payload)
-        payload["lock"]["final_status"] = check_lock("after-cases", target_mhz)
     except Exception as exc:
         execution_failed = True
         payload["execution_error"] = {"type": type(exc).__name__, "message": str(exc)}
     finally:
-        if lock_started:
-            if payload["lock"]["final_status"] is None:
-                try:
-                    payload["lock"]["final_status"] = check_lock("finally-before-stop", target_mhz)
-                except Exception as exc:
-                    execution_failed = True
-                    payload["lock"]["final_status"] = {
-                        "label": "finally-before-stop",
-                        "honored": False,
-                        "error": str(exc),
-                    }
-            stop = stop_lock()
-            payload["lock"]["stop"] = stop
-            if stop["returncode"] != 0:
-                execution_failed = True
-                if payload["execution_error"] is None:
-                    payload["execution_error"] = {
-                        "type": "EvidenceError",
-                        "message": f"gpulockd stop failed: {stop}",
-                    }
         payload["generated_at"] = utc_now()
         write_results(payload)
-
     if payload["execution_error"] is not None:
         print(json.dumps(payload["execution_error"], sort_keys=True), file=sys.stderr)
     return 1 if execution_failed else 0

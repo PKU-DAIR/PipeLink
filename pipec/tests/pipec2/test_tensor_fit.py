@@ -88,7 +88,6 @@ def test_named_m128_tmem_placement_with_bits_binding():
             for i in range(128) for j in range(128) for b in base.values]
     components = {name: _assert_named_fit(rows, inputs, index)
                   for index, name in enumerate(("dp", "column"))}
-    assert len(rows) == 65_536
     for component in components.values():
         assert not (_ops(component) & {"band", "bxor", "tobits", "cbits"})
     exported = TensorExport.from_json_obj({

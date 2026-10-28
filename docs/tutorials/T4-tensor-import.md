@@ -2,193 +2,197 @@
 
 ## Goal and prerequisites
 
-Link **one hand-written epilogue translation unit** against accumulator providers
-whose results occupy different physical storage: TMEM, shared memory or
-registers. The epilogue also imports a row-scale vector from a second provider.
-It computes a 128×128 f32 tile:
+Link **one hand-written SwiGLU consumer translation unit** against separately
+packaged GEMM producers that keep their f32 accumulator in different physical
+storage: TMEM on Blackwell/sm103, WGMMA registers on Hopper/sm90 and `mma.sync`
+registers on consumer Blackwell/sm120. The workload is the
+[CODA campaign](../../campaigns/coda/README.md), Qwen3-32B's MLP: bf16
+`X[M,5120]`, interleaved gate/up weights `W[51200,5120]`, and bf16 output
+`[M,25600]`. Each CTA's producer exports a completed 128×256 accumulator tile
+whose even columns are gate values and odd columns are up values; the consumer
+writes a 128×128 output tile:
 
 ```text
-scale[m] = rsqrt(mean_k(A[m,k]^2) + eps)
-out[m,n] = max(acc[m,n] * scale[m] + bias[m], 0)
+out[m, j] = bf16(silu(acc[m, 2j]) * acc[m, 2j + 1]),   silu(g) = g / (1 + exp(-g))
 ```
 
 Complete [T0](T0-pack-link.md)'s CUDA 13.3, `uv`, `.env` and scratch setup, and
-[T1](T1-hello-callable.md)'s callable/host-less launch walkthrough. Keep the
-repository's CUTLASS headers available under `third_party/cutlass/include`.
-Building and the negative example are GPU-free; running needs Blackwell/sm103,
-Hopper/sm90 or consumer Blackwell/sm120, a compatible driver and Compute Sanitizer. This recipe uses
-Linux x86_64 and the pinned, patched TileLang 0.1.14 environment.
+[T1](T1-hello-callable.md)'s callable/host-less launch walkthrough. The
+repository's submodules must be initialized: `third_party/cutlass` for every
+profile and `third_party/mixture-of-kittens` (with its nested ThunderKittens) for
+the sm103 and sm90 producers. Building and the negative example need no GPU.
+Running needs Blackwell/sm103, Hopper/sm90 or consumer Blackwell/sm120, a
+compatible driver and Compute Sanitizer. The recipe uses Linux x86_64 and the
+pinned, patched TileLang 0.1.14 environment.
 
-Follow the [TileLang environment build instructions](../../frontends/tilelang/env/README.md)
-to obtain the local wheel: `frontends/tilelang/env/build-tilelang.sh` builds it
-from the pinned upstream version plus the repository's two patches. Do this if
-the wheel is absent, before the locked sync below. An arbitrary stock TileLang
-installation is not interchangeable. The wheel rebuild itself is a prerequisite,
-not a step repeated for every example build. Non-alias tensor adapters use the
-TileLang lowering backend even when the consumer is hand-written CUDA.
+If the TileLang wheel is absent, build it once before the locked sync below,
+following the [TileLang environment build instructions](../../frontends/tilelang/env/README.md):
+`frontends/tilelang/env/build-tilelang.sh` builds it from the pinned upstream
+version plus the repository's two patches. A stock TileLang installation will
+not work. Even with a hand-written CUDA consumer, every tensor adapter except a
+plain alias is lowered through the TileLang backend.
 
 ## 1. Placement belongs to the exporter; demand belongs to the importer
 
-The accumulator providers expose the **same tensor identity**: work
-`tensor_work`, snapshot `completed_k`, f32 `accumulator`, numerical meaning
-`fp16_dot_fp32_completed`, and logical axes `m,n` spanning 128×128. Their storage
-maps differ:
+Every producer exports the **same tensor identity**: work `tile_work`, snapshot
+`completed_k`, f32 `accumulator`, numerical meaning `bf16_dot_fp32_completed`,
+and logical axes `m,n` spanning 128×256. Only the storage differs:
 
-| Profile | Hand-consumer cell | Accumulator provider | Export placement |
+| Profile | Producer source | Producer design | Export placement |
 |---|---|---|---|
-| Blackwell/sm103 (`sm_103a`) | `tmem` | CUTLASS tcgen05 GEMM, `producer_source.cu` with `PL_EXPORT_TMEM` | TMEM data-path/column address |
-| Blackwell/sm103 | `smem` | Same provider source with `PL_EXPORT_SMEM` | Shared-memory byte address |
-| Blackwell/sm103 | `tl-reg` | TileLang `T.gemm`, lowered to mma_sync | Register participant/position |
-| Hopper/sm90 (`sm_90a`) | `reg` | CuTe WGMMA GEMM, `producer_sm90.cu` | Register participant/position |
-| Hopper/sm90 | `smem` | Same Hopper provider source with `PL_EXPORT_SMEM` | Shared-memory byte address |
-| Hopper/sm90 | `tl-reg` | TileLang `T.gemm`, lowered to WGMMA | Register participant/position |
-| Consumer Blackwell/sm120 (`sm_120a`) | `reg` | CuTe `mma.sync` GEMM, `producer_sm120.cu` | Register participant/position |
-| Consumer Blackwell/sm120 | `smem` | Same sm120 provider source with `PL_EXPORT_SMEM` | Shared-memory byte address |
-| Consumer Blackwell/sm120 | `tl-reg` | TileLang `T.gemm`, lowered to mma_sync | Register participant/position |
+| Blackwell/sm103 (`sm103`) | [`producers/sm103/producer.cu`](../../campaigns/coda/producers/sm103/producer.cu) | ThunderKittens 2-SM UMMA, 256×256 pair tile; each CTA owns a 128×256 half | TMEM data-path/column address, offset by a link-time `tmem_base` binding |
+| Hopper/sm90 (`sm90`) | [`producers/sm90/producer.cu`](../../campaigns/coda/producers/sm90/producer.cu) | ThunderKittens three-warpgroup WGMMA; one loader and two math warpgroups | Register participant/position over threads 128–383 |
+| Consumer Blackwell/sm120 (`sm120`) | [`producers/sm120/producer.cu`](../../campaigns/coda/producers/sm120/producer.cu) | CUTLASS `mma.sync` with a multistage operand pipeline | Register participant/position |
 
-The native provider sources are in
-[`providers/accumulator/`](../../examples/one-epilogue-many-producers/providers/accumulator/);
-the TileLang provider recipe is
-[`providers/tilelang/gemm_provider.py`](../../examples/one-epilogue-many-producers/providers/tilelang/gemm_provider.py).
-There is no TMEM cell on Hopper or sm120. The TileLang provider publishes registers on
-every profile, not an explicit-TMEM TileLang result.
-
-The CUDA providers are pipelined: a three-slot ring of K64 operand tiles filled
-by TMA and drained by tcgen05 (sm103), WGMMA (sm90) or `mma.sync` (sm120), from the shared
-`gemm_mainloop_sm100.cuh` / `gemm_mainloop_sm90.cuh` / `gemm_mainloop_sm120.cuh`. Their A/B tensor maps
-are the provider's own `PL_PARAMS(pl_gemm_tma_params, a, b)`; a roleless
-provider reads them through the generated accessor
-`pipelink_params_<stage id>()` (non-alphanumerics become `_`), so the
-consumer's call arguments and source stay unchanged. The shared-memory exports
-reuse the dead operand ring after the final MMA and declare an XOR-swizzled
-placement. The TileLang provider keeps cp.async (TMA lowering and automatic
-warp specialization are disabled against a foreign partner).
+Each producer is a **role-free callee**: it runs on the consumer's threads,
+receives a public `coda_tile_args` record, and writes back `m0`/`n0`, the global
+origin of the tile it chose. It reads its own operand pointers and scheduler
+settings from its own host view, which the generated call supplies.
 
 `PL_EXPORT_TENSOR` declares:
 
-- **Identity**: what logical values the tensor denotes, including its snapshot
-  and numerical meaning, not just its dimensions.
-- **Placement**: where each logical coordinate is stored. The provider owns this
-  map; consumers do not duplicate its TMEM address formula or fragment layout.
-- **Capabilities**: admitted transport operations, such as TMEM receipts,
-  shared loads or register copies/shuffles/stores.
-- **Readiness and backing resources**: when the result can be read, when it may
-  be reclaimed, and which provider-owned storage/barriers back it.
-- **Published calls**: `pl::calls{"tensor_produce", "tensor_release"}` names
-  provided call endpoints explicitly; the linker does not guess by prototype.
+- **Identity**: which logical values the tensor holds, including its snapshot
+  and numerical meaning as well as its dimensions.
+- **Placement**: where each logical coordinate is stored. Only the producer
+  states this map; the consumer never repeats its TMEM address formula or
+  fragment layout. The sm90 export, for example, enumerates its WGMMA fragment
+  as an integer map over `m,n`.
+- **Capabilities**: the transport operations it allows, such as TMEM packet
+  receipts, register copies/shuffles or shared-memory stores.
+- **Readiness and backing resources**: when the result can be read, when its
+  storage may be reused, and which producer-owned storage holds it.
+- **Published calls**: `pl::calls{"tensor_produce", "tensor_release"}` names the
+  provided call endpoints; the linker does not match them by prototype.
 
-The smaller [`rowscale.cu`](../../examples/one-epilogue-many-producers/providers/rowscale/rowscale.cu)
-illustrates the same contract in 34 lines. Its `PL_EXPORT_TENSOR(row_scale, ...)`
-publishes f32 `rms_row_scale` values with logical axis `m`, placed at shared byte
-address `m * 4`. `PL_STAGE` names that provider, `PL_NO_PARAMS` keeps its host
-blob empty, two `PL_EXPORT`/`PL_CALL` pairs publish produce/release, and
-`PL_CLAIM` reserves 128 floats of shared storage. Every composition therefore
-has **three packages and two tensor connections**, not a special-case unary
-adapter.
+Every composition has **two packages and one tensor connection**, `acc`: the
+profile's producer and the consumer. The consumer writes the output from its own
+code; the linker does not connect it.
 
-## 2. Read the unchanged consumer
+## 2. Read the consumer
 
-[`consumer/epilogue.cu`](../../examples/one-epilogue-many-producers/consumer/epilogue.cu)
-is **78 physical lines with 11 direct annotation invocations**. The same source
-is packed for every profile and each profile's hand-consumer cells reference
-the same `packed/epilogue.plink`. It contains no architecture conditional, TMEM
-address, hand-written seam fence or provider-specific fragment width.
+[`consumer/epilogue.cu`](../../campaigns/coda/consumer/epilogue.cu) has **10
+device-side annotation invocations**. Its host contract,
+[`host_annotations.cuh`](../../campaigns/coda/consumer/host_annotations.cuh), is
+covered in [T5](T5-host-abi.md); the TileLang consumer of [T6](T6-tilelang.md)
+shares it. The source has no TMEM addresses, fragment indexing or hand-written
+seam fences.
 
 | Annotation in the consumer TU | Count | What it declares |
 |---|---:|---|
-| `PL_TYPE(pl_gemm_tile_args, ...)` | 1 | The published call-argument type and member layout. |
-| `PL_STAGE("rowscale-relu-epilogue", "1.0.0")` | 1 | The consumer's independent stage identity. |
-| `PL_PARAMS(EpilogueParams, ...)` | 1 | Its host parameter fields: input/output pointers, dimensions and epsilon. |
-| `PL_ROLE(epilogue, plx_role_epilogue, 4)` | 1 | A four-warp owner role. |
-| `PL_CALL(..., pl::produce, "epilogue", ...)` | 4 | Produce/release invocations for the accumulator and scale providers. The consumer produces call traffic, as in T1. |
-| `PL_SITE(tensor_import_site, ...)` | 1 | All-thread participation in `tensor_work`, entering once, converged, with full warps and no early return; the site observes the two ready events. |
-| `PL_IMPORT_TENSOR(acc, ...)` | 1 | Accumulator identity, demanded positions, callable argument meanings, scratch/destination/frame/barrier lends and ready/done rendezvous. |
-| `PL_IMPORT_TENSOR(scale, ...)` | 1 | Row-scale identity, one demanded value per thread, its lends and rendezvous. |
-| **Total in this TU** | **11** | No provider placement is restated here. |
+| `PL_TYPE(coda_tile_args, ...)` | 1 | The published call-argument type and member layout, including the producer-written `m0`/`n0`. |
+| `PL_STAGE("coda.swiglu", "1.0.0")` | 1 | The consumer's independent stage identity. |
+| `PL_ROLE(epilogue, plx_role_coda_epilogue, ...)` | 1 | One owner role spanning the CTA (8 warps on sm103/sm120, 12 on sm90). |
+| `PL_TOPOLOGY(...)` | 1 | CTA group and cluster shape: a 2-CTA cluster on sm103, single CTAs elsewhere. |
+| `PL_CALL(..., pl::produce, "epilogue", ...)` | 2 | Produce/release invocations for the producer. The consumer produces call traffic, as in T1. |
+| `PL_BINDING("chunk", ...)` | 1 | A link-visible index over eight 32-column chunks, live from `tensor_ready` to `import_done`. |
+| `PL_SITE(tensor_import_site, ...)` | 1 | 256 data threads participate in `tile_work`, entering once, converged, with full warps and no early return; the site observes `tensor_ready` and the chunk binding. |
+| `PL_CLAIM_SMEM("pipelink_coda_output_smem", ...)` | 1 | A 32 KiB output tile, live from `tensor_ready` to the end of the kernel. |
+| `PL_IMPORT_TENSOR(acc, ...)` | 1 | Accumulator identity, demanded positions, callable argument meanings, frame/scratch/destination/metadata/barrier lends and ready/done rendezvous. |
+| **Total in this TU** | **10** | No producer placement is restated here. |
 
-The included public row-scale header also contains its shared
-`PL_TYPE(pl_rowscale_args, ...)` declaration; the count above is explicitly the
-11 invocations in the 78-line consumer source, not a count of its include closure.
+### A demand the consumer chose
 
-The accumulator demand map sends consumer thread `t`, destination position `p`
-to logical coordinate `(m=t,n=p)`. Each of 128 threads requests a complete row
-of 128 values, regardless of how the provider split its fragment. The scale
-map requests logical row `m=t` into destination position 0. `pl::args` names the
-callable meanings `source_base`, `dest_fragment` and `scratch`; these are
-contracts, not conventions inferred from parameter names.
+The demand maps data thread `t`, destination position `p` and the bound chunk to
+a logical coordinate:
 
-The accumulator import lends up to 65,536 bytes of shared scratch, 128
-register destination positions, two metadata words, a 128-position caller
-frame and a CTA barrier. The scale import lends 1,024 scratch bytes, one
-register destination position and a barrier. These are declared capacities
-and lifetimes; the linker chooses the legal transport, barrier assignments and
-shared-memory offsets within them. Lends do not mean every route needs all
-of the available storage: the linker reserves only what the selected route
-touches. Direct TMEM and shared-memory routes reserve none of the accumulator
-or scale scratch (the handle resolves to 0 and no shared memory is claimed);
-the staged register routes reserve the 64 KiB tile. A staged tile is stored in
-a bank-conflict-free XOR-swizzled layout chosen by the linker from the
-source placement and the demand, not in canonical row-major order.
+```text
+m = row(t),   n = 32 * chunk + 16 * half_row(t) + p,   p in 0..15
+```
 
-The scratch lend's lifetime (`tensor_ready` → `import_done`) is also what lets
-the linker place it on top of provider storage that is dead by then. The
-register and TMEM accumulator providers claim their operand ring with
-`pl::during{"accumulator", "tensor_work", "tensor_ready"}`, and both consumers
-promise `single_completion` (each completion helper runs once, after the last
-use). The two lifetimes are then ordered by the generated readiness rendezvous,
-and the solver, which minimizes each physical domain's high-water mark, overlaps
-them. `link.json` → `tensor.smem_reuse.overlaps` lists the pair, byte ranges and
-witness helper, and that helper issues `fence.proxy.async.shared::cta` before
-its barrier. On sm90 the staged `reg` cell drops from 165,888 B to 99,848 B,
-the same residency as the native. Smem-export providers keep their ring
-kernel-lived because the exported tile lives in it.
+[`geometry.cuh`](../../campaigns/coda/consumer/geometry.cuh) selects `row` and
+`half_row` with `CODA_PROFILE`, together with the thread count, the first data
+thread, the cluster and the scratch lend. On sm103, `row(t) = t % 128`: each of
+the 256 threads receives one row's 16-column half of a chunk. On sm90 and
+sm120, `row(t) = t / 2`: two neighbouring threads share a row. The same source
+is packed once per profile; none of these choices is a producer's placement.
+After an import, `coda_epilogue::stage` applies SwiGLU to the eight gate/up
+pairs, rounds to bf16 and writes one 16-byte vector into the XOR-swizzled output
+tile; after the last chunk, `coda_epilogue::store` drains the tile with
+coalesced 16-byte global stores.
+
+`pl::args` names the callable meanings `source_base`, `binding`,
+`dest_fragment` and `scratch`; the linker uses these declared meanings and
+ignores parameter names.
+
+### Lends, routes and storage reuse
+
+The import lends the linker a 128-position caller frame, 16 register destination
+positions, two metadata words and CTA barriers, plus 16 KiB of shared scratch on
+sm90 and sm120. Each lend is an upper bound with a lifetime, not a reservation.
+Within those bounds the linker chooses a legal transport, barrier assignments
+and shared-memory offsets, and it reserves only what the chosen route uses. It
+records the result in `link.json` → `tensor.connections[0]`: `bounds` lists the
+candidate routes it constructed and `selected` indexes the one it lowered.
+
+| Profile | Selected route | Adapter scratch | Why |
+|---|---|---:|---|
+| sm103 | `tmem>receipt>reg` | 0 B | A TMEM packet receipt delivers a row slice to the thread reading that data-path lane, which is what the demand asks for. |
+| sm90 | `reg>store\|rendezvous\|load>reg` | 16384 B | The WGMMA fragment spreads a row across threads that the demand does not pair; a register copy cannot move values between threads, so the chunk is staged through shared memory. `bounds` also lists `reg>copy>reg` and `reg>shfl>reg`, which were not selected. |
+| sm120 | `reg>store\|rendezvous\|load>reg` | 16384 B | Likewise for the `mma.sync` fragment. |
+
+The staged routes move one 32-column chunk (128 × 32 × 4 B = 16 KiB) at a time,
+so the consumer calls `pl_import_acc_done()` after every chunk: the generated
+rendezvous guards the scratch before the next chunk reuses it. The direct sm103
+route needs no scratch, so the consumer completes once after the last chunk.
+Sm90 lends an extra inner barrier because its data cohort (threads 128–383)
+excludes the producer's loader warpgroup, while the outer barrier spans the
+whole CTA.
+
+Lifetimes let the linker place consumer storage on producer storage that is no
+longer in use. The producers claim their operand storage with
+`pl::during{"accumulator", "tile_work", "tensor_ready"}`; the output tile and
+the scratch lend start at `tensor_ready`. The generated readiness rendezvous
+orders the two, so the solver, which minimizes each physical domain's high-water
+mark, overlaps them. `link.json` → `tensor.smem_reuse.overlaps` lists each pair,
+the byte ranges and the helper that separates them, which issues
+`fence.proxy.async.shared::cta` before its barrier. On sm103 the 32 KiB output
+tile sits at the start of the 96 KiB operand ring (98,416 B dynamic shared memory
+in total); on sm90 both the output tile and the 16 KiB scratch sit inside the
+producer's 193 KiB storage (197,632 B in total).
 
 ### Opaque source handle and published call arguments
 
-[`epilogue_abi.cuh`](../../examples/one-epilogue-many-producers/consumer/epilogue_abi.cuh)
+[`epilogue_abi.cuh`](../../campaigns/coda/consumer/epilogue_abi.cuh)
 publishes a placement-independent produce interface:
 
 ```cpp
 extern "C" __device__ pipelink_tensor_source
-pipelink_call_tensor_produce(const pl_gemm_tile_args* args, void* frame);
+pipelink_call_tensor_produce(const void* view, coda_tile_args* args, void* frame);
 ```
 
-A provider returns `pl::source_of(pointer)` or `pl::source_of_tmem(address)`.
-The consumer forwards that opaque handle to `pl_import_acc`; the generated
-adapter unpacks it according to the **export manifest's placement**. The same
-consumer ABI therefore works for TMEM, smem and register-fragment sources.
+A producer returns `pl::source_of_tmem(address)` (sm103) or
+`pl::source_of(frame)` (register producers, which fill the caller frame). The
+consumer forwards that opaque handle to `pl_import_acc`; the generated adapter
+unpacks it according to the **export manifest's placement**. The same consumer
+ABI therefore works for TMEM and register sources.
 
-The owner constructs `pl_gemm_tile_args{a,b,M,N,K}` and
-`pl_rowscale_args{a,M,K,eps}` from its own `EpilogueParams`. Providers receive
-these public structs, not the caller's private parameter blob. `PL_TYPE`
-registers type spelling, members, size and alignment so the published call
-layouts can be checked at link; its shadow type is checked against the actual
-C++ type at compile time. The providers are roleless callees running on the
-caller's threads, not separate scheduled roles.
+The consumer builds `coda_tile_args{a, b, M, N, K}` from its own params, and the
+producer fills in `m0`/`n0`. `PL_TYPE` records the type's spelling, members,
+size and alignment so the link can check the published call layouts; at compile
+time its shadow type is checked against the actual C++ type.
 
 ### Rendezvous generates the ready/done fences
 
-The consumer's schedule is visible in its arithmetic body:
+The consumer's body follows this schedule:
 
 ```text
-produce accumulator → acc_ready → import accumulator
-produce row scale   → scale_ready → import scale
-row-scale + bias + ReLU → scale_done → release scale
-                       → acc_done   → release accumulator
+produce accumulator → acc_ready → for each chunk: import → SwiGLU → stage to tile
+→ acc_done → store tile → release accumulator
 ```
 
-`pl::rendezvous{"tensor_ready", "acc_barrier", pl::all_threads}` and the matching
-`import_done` event name the barrier lend and the outer participant cohort.
-The generated `pl_import_acc_ready()` and `pl_import_acc_done()` implement that
-contract, including architecture-specific fences and completion waits where
-required. The consumer calls them but contains none of those instructions.
+`pl::rendezvous{"tensor_ready", "acc_outer", pl::all_threads}` and the matching
+`import_done` event name the barrier lend and the participating threads. The
+generated `pl_import_acc_ready()` and `pl_import_acc_done()` implement that
+contract, including any architecture-specific fences and completion waits. The
+consumer calls them and contains none of those instructions itself.
 
-For example, the generated Blackwell TMEM adapter contains these exact bodies
-(from `out/sm_103a/links/tmem/generated/tensor_adapter_000.cu`):
+The generated sm103 adapter (`out/sm103/links/hand/generated/tensor_adapter_000.cu`)
+contains:
 
 ```cpp
 extern "C" __device__ void pl_import_acc_ready() {
   asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory");
+  asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
   __syncthreads();
   asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
 }
@@ -200,260 +204,238 @@ extern "C" __device__ void pl_import_acc_done() {
 }
 ```
 
-Do not copy these back into the consumer: changing the provider may change the
-required transport and fences. The TileLang provider additionally requires the
-whole 128-thread CTA to enter `produce`; its named-barrier participants are
-128. That requirement is a documented recipe constraint, not yet an expressible
-role guarantee of the tensor-export track.
+The sm90 adapter for the same consumer source has no `tcgen05` instructions:
+its ready helper is `fence.proxy.async.shared::cta` plus `__syncthreads()`, and
+its done helper is a bare `__syncthreads()`. Do not copy either into the
+consumer: a different producer may need a different transport and different
+fences.
 
-### Caller frame is not adapter scratch
+### The caller frame
 
 `pl::frame("acc_frame", 128, ...)` lends **per-participant storage passed to
-produce**, with the declared lifetime spanning production through `import_done`.
-The actual C++ storage is `float frame[128]`. For register exports the planner
-requires exactly one sufficiently large `caller_frame` lend. The caller does
-not select the provider's fragment shape: it supplies a capacity, and the
-linker checks the current export against it. TMEM/smem exports do not need this
-frame. Section 5 demonstrates the real rejection for insufficient capacity.
+produce**, live from production through `import_done`. It is separate from the
+adapter's scratch. The C++ storage is `float frame[128]`. For register exports
+the planner requires exactly one large enough `caller_frame` lend; the producer's
+fragment shape determines how much is used, and the linker checks it against
+the capacity. The sm103 TMEM export does not use the frame. Section 5 shows the
+rejection when the capacity is too small.
 
-## 3. Build the six cells per profile
+## 3. Build the cells of a profile
 
-Configure the existing pinned frontend environment from the repository root:
+Configure the pinned frontend environment from the repository root:
 
 ```sh
 source tools/env.sh
 uv lock --project frontends/tilelang --refresh-package tilelang
 uv sync --project frontends/tilelang --locked
-mkdir -p "$PIPELINK_SCRATCH_ROOT/one-epilogue"
-export TMPDIR="$PIPELINK_SCRATCH_ROOT/one-epilogue"
 export PIPELINK_TILELANG_PYTHON="$PWD/frontends/tilelang/.venv/bin/python"
 export TILELANG_INCLUDE_DIR="$PWD/frontends/tilelang/.venv/lib/python3.11/site-packages/tilelang/src"
 export CUTLASS_INCLUDE_DIR="$PWD/third_party/cutlass/include"
-export EX=examples/one-epilogue-many-producers
+export CODA=campaigns/coda
 ```
 
-Until the GitHub release asset exists, the lock pins the owner's local wheel
-hash; the refresh step admits the wheel you rebuilt from the pinned sources
-before the locked sync. It is not a workaround for a changed published release
-artifact.
+No GitHub release asset exists yet, so the lock pins the hash of the owner's
+local wheel. The refresh step updates the lock to the wheel you built from the
+pinned sources, before the locked sync. The frontend lock uses Python 3.11.
 
-The frontend lock uses Python 3.11; `PIPELINK_TILELANG_PYTHON` selects its backend,
-and `TILELANG_INCLUDE_DIR` points at the installed TileLang source headers.
-These two variables are required by the extra-cell build, not optional hints.
-
-The following GPU-free recipe builds every profile. It first packs the hand
-consumer and native providers, then prepares the TileLang provider and the
-additional frontend-consumer package before linking the complete matrix.
-The `-tlc` consumer variants are included for the example's six-cell evidence;
-consumer authoring in TileLang is the topic of
-[T6](T6-tilelang.md), not this hand-consumer walkthrough.
+Building needs no GPU. Pick the profile of the GPU you will run on, or build all
+three:
 
 ```sh
-for P in sm_103a sm_90a sm_120a; do
-  O="$PWD/$EX/out/$P"
-  uv run --project pipec --locked python "$EX/build.py" --profile "$P"
-  "$PIPELINK_TILELANG_PYTHON" -m pipelink_tilelang \
-    --kernel "$EX/providers/tilelang/gemm_provider.py" --profile "$P" --out "$O/tilelang/provider"
-  uv run --project pipec --locked pipec2 pack "$O/tilelang/provider/roles.cu" \
-    -o "$O/packed/tl-reg.plink" -I "$CUTLASS_INCLUDE_DIR" -I "$TILELANG_INCLUDE_DIR" --profile "$P"
-  PIPELINK_ACC_PARTNER="$O/packed/tl-reg.plink" PIPELINK_SCALE_PARTNER="$O/packed/rowscale.plink" \
-    "$PIPELINK_TILELANG_PYTHON" -m pipelink_tilelang \
-    --kernel "$EX/consumer-tilelang/epilogue_contract.py" --profile "$P" --out "$O/tilelang/consumer"
-  uv run --project pipec --locked pipec2 pack \
-    "$O/tilelang/consumer/generation/tilelang-epilogue/roles.cu" -o "$O/packed/tl-epilogue.plink" \
-    -I "$CUTLASS_INCLUDE_DIR" -I "$TILELANG_INCLUDE_DIR" --profile "$P"
-  uv run --project pipec --locked python "$EX/pipelines/extra_cells.py" "$P"
-  uv run --project pipec --locked python "$EX/build.py" \
-    --profile "$P" --extra-cells "$O/extra-cells.json"
+for P in sm103 sm90 sm120; do
+  uv run --project pipec --locked python "$CODA/build.py" --profile "$P"
 done
 ```
 
-`build.py` writes locally ignored `out/<profile>/index.json` and per-cell
-`links/<cell>/{pipeline.cubin,one-tu.cubin,one-tu-lto.cubin,link.json}`. It uses
-the shared same-source `onetu_control` builder, not a substitute baseline
-kernel. The pipeline generator reads each package's export/import identities,
-merges owned resource claims and names two `tensor_connections`: `acc` and
-`scale`. Every hand-consumer link names the same current-profile consumer
-package; no content hash is needed to demonstrate that reuse.
+`build.py` packs the producer and its owner host provider, packs the hand
+consumer (`-D CODA_PROFILE=103/90/120`), lowers and packs the TileLang consumer
+of [T6](T6-tilelang.md) against the producer package, and links two cells,
+`hand` and `tilelang`. For each cell it writes the ignored
+`out/<profile>/links/<cell>/{pipeline.cubin,one-tu.cubin,one-tu-lto.cubin,link.json}`,
+a source-withheld distribution under `out/<profile>/source-withheld/`, and the
+native baselines under `out/<profile>/natives/`; `out/<profile>/index.json`
+lists them. The one-TU controls come from the shared same-source
+`onetu_control` builder. Generated adapters and dispatch code are in each
+link's `generated/` directory. A build takes about 2–3 minutes per profile.
 
-Expect the sm103 index to contain `tmem`, `smem`, `tl-reg`, `tmem-tlc`,
-`smem-tlc`, `tl-reg-tlc`; the Hopper and sm120 indexes substitute `reg`/`reg-tlc` for
-the TMEM entries. Generated adapters and dispatch are under each link's
-`generated/` directory. Compiler scratch remains under `PIPELINK_SCRATCH_ROOT`.
+Read the selected route of each cell:
+
+```sh
+python3 - <<'PY'
+import json
+from pathlib import Path
+for profile in ("sm103", "sm90", "sm120"):
+    for cell in ("hand", "tilelang"):
+        path = Path("campaigns/coda/out") / profile / "links" / cell / "link.json"
+        if not path.exists():
+            continue
+        link = json.loads(path.read_text())
+        connection, = link["tensor"]["connections"]
+        route = connection["bounds"][connection["selected"]]["scope"]["route"]["id"]
+        print(profile, cell, route, "threads", link["threads"], "dyn_smem", link["dyn_smem_bytes"])
+PY
+```
+
+Observed for the sm103 and sm90 builds:
+
+```text
+sm103 hand tmem>receipt>reg threads 256 dyn_smem 98416
+sm103 tilelang tmem>receipt>reg threads 256 dyn_smem 98416
+sm90 hand reg>store|rendezvous|load>reg threads 384 dyn_smem 197632
+sm90 tilelang reg>copy>reg threads 384 dyn_smem 197632
+```
 
 ## 4. Run acceptance on the matching GPU
 
 On Blackwell/sm103:
 
 ```sh
-uv run --project pipec --locked python examples/one-epilogue-many-producers/run.py --profile sm_103a
+uv run --project pipec --locked python campaigns/coda/run.py --profile sm103
 ```
 
-On a **Hopper/sm90 machine**, after building or copying the matching outputs,
-select an available Hopper GPU:
+Use `--profile sm90` on a Hopper machine and `--profile sm120` on a consumer
+Blackwell machine, after building or copying the matching outputs. `--gpu` takes
+a physical GPU index and defaults to the first `.env` `PIPELINK_GPUS` entry.
+`PIPELINK_LOCK_SM_MHZ` requests the machine's qualified clock through a
+`gpulockd` lease, which calls `sudo nvidia-smi -lgc/-rgc`; an empty value or `0`
+runs the same protocol at unlocked clocks without `sudo`. A full run takes about
+8 minutes on sm103 and sm90 and about 15 on sm120, plus the first-time creation
+of the public baseline environment.
+
+For a quick functional check of one image at the smallest shape, use
+`--single <cell> <image>`, for example `--single hand linked`.
+
+Each full run checks, for both cells:
+
+- the numerical matrix against f64 references (`rtol=atol=1e-2`) at the small
+  shapes 256×512×64, 256×512×320, 256×1024×1024 and 512×1024×5120 and both full
+  shapes (M = 16384 and 4096, N = 51200, K = 5120), with finite outputs after NaN
+  poisoning and bitwise linked/one-TU equality over the whole output;
+- `memcheck`, `racecheck` and `synccheck` on linked and one-TU images at the
+  first three shapes;
+- a link and launch from the source-withheld distribution, which holds packages,
+  public headers and owner provider libraries but no producer sources;
+- same-source parity, **one-TU / linked ≥ 0.97**, timed in balanced ABBA/BAAB
+  blocks under one clock lease;
+- diagnostic placements against the hand-fused native, the same GEMM followed by
+  a standalone SwiGLU, cuBLAS + `torch.compile` SwiGLU and cuBLAS + Liger.
+
+Normalized SASS comparison is a diagnostic only. The runner writes
+`out/<profile>/results.json`, plus `functional-results.json`, per-cell evidence
+under `evidence/<cell>/` and `progress.jsonl`, and exits nonzero if acceptance
+fails. This summarizes a run:
 
 ```sh
-uv run --project pipec --locked python examples/one-epilogue-many-producers/run.py --profile sm_90a
-```
-
-On a **consumer Blackwell/sm120 machine**, likewise:
-
-```sh
-uv run --project pipec --locked python examples/one-epilogue-many-producers/run.py --profile sm_120a
-```
-
-`--gpu` is physical, defaults to the first `.env` `PIPELINK_GPUS` entry, and is
-selected before CUDA initializes.
-The host-less params builder fills addresses after allocation; block/shared-
-memory launch requirements come from the link, not a custom host binary.
-
-Every built cell must pass:
-
-- f64 NumPy oracle comparison for 256×256×K, K = 64, 256, 1024, with
-  `rtol=1e-3`, `atol=1e-2`, plus bitwise linked/one-TU equality;
-- finite, bitwise-equal linked/one-TU output on the 4096×8192×4096 benchmark;
-- valid paired timing, **linked vs one-TU on the same buffers**, with observed
-  clocks reported and no implied clock lock;
-- linked vs the cell's hand-fused native control (`native/`, own buffers with
-  identical inputs), a characterization that is not the same-source one-TU
-  parity ratio and not a gate; each native is itself oracle-checked and sanitized;
-- unconditional `memcheck`, `racecheck` **and** `synccheck` on linked, one-TU and native
-  images at 128×128×64 and 256×256×512. There is no sanitizer opt-out.
-
-Normalized SASS comparison is printed as **diagnostic only**. When instruction
-counts differ, the backend-matched LTO one-TU is also compared; an instruction
-count difference is not a numerical or sanitizer failure. The runner writes
-`out/<profile>/results.json` with `natives → verify/sanitize/resources` and
-`cells → verify/bench/sanitize/sass/resources`, plus
-per-cell logs in `evidence/<cell>/`, and exits nonzero on an acceptance failure.
-The [example evidence table](../../examples/one-epilogue-many-producers/README.md#evidence)
-lists all six cells on each profile.
-
-Every profile passes all six cells and both natives with CUDA **13.3**:
-0 oracle mismatches, bitwise linked/control outputs including the benchmark, and
-12/12 sanitizer runs per cell (memcheck, racecheck, synccheck). Clocks were observed,
-not changed or locked. This command summarizes
-the Blackwell measurement:
-
-```sh
-uv run --project pipec --locked python - <<'PY'
+python3 - <<'PY'
 import json
 from pathlib import Path
-r = json.loads(Path("examples/one-epilogue-many-producers/out/sm_103a/results.json").read_text())
-print(r["profile"], r["status"])
+r = json.loads(Path("campaigns/coda/out/sm103/results.json").read_text())
+print(r["profile"], r["mode"], r["status"])
 for name, cell in r["cells"].items():
-    (bench,) = cell["bench"]
-    print(name, "one-TU/linked", format(bench["ratio_onetu_over_linked"], ".6f"),
-          "linked/native", format(bench["native"]["ratio_linked_over_native"], ".4f"),
-          "oracle", [v["oracle_mismatches"] for v in cell["verify"]],
-          "sanitizers", sum(s["status"] == "PASS" for s in cell["sanitize"]))
+    print(name, "matrix", sum(c["status"] == "PASS" for c in cell["correctness"]), "/", len(cell["correctness"]),
+          "sanitizers", sum(s["status"] == "PASS" for s in cell["sanitizers"]), "/", len(cell["sanitizers"]),
+          "source-withheld", cell["source_withheld"]["status"])
+    for timing in cell["timings"]:
+        print("  M", timing["shape"][0], "one-TU/linked",
+              format(timing["pair"]["ratio_onetu_over_linked"], ".4f"), timing["status"])
 PY
 ```
 
-Observed output:
+Observed on sm103 at the qualified 1155 MHz clock, from a fresh build:
 
 ```text
-sm_103a PASS
-tmem one-TU/linked 0.999998 linked/native 0.9610 oracle [0, 0, 0] sanitizers 12
-smem one-TU/linked 1.000048 linked/native 0.9971 oracle [0, 0, 0] sanitizers 12
-tl-reg one-TU/linked 0.999670 linked/native 1.1258 oracle [0, 0, 0] sanitizers 12
-tl-reg-tlc one-TU/linked 0.999943 linked/native 1.0158 oracle [0, 0, 0] sanitizers 12
-tmem-tlc one-TU/linked 0.999648 linked/native 0.9606 oracle [0, 0, 0] sanitizers 12
-smem-tlc one-TU/linked 1.000079 linked/native 1.0025 oracle [0, 0, 0] sanitizers 12
+sm103 locked PASS
+hand matrix 6 / 6 sanitizers 18 / 18 source-withheld PASS
+  M 16384 one-TU/linked 1.0003 PASS
+  M 4096 one-TU/linked 0.9999 PASS
+tilelang matrix 6 / 6 sanitizers 18 / 18 source-withheld PASS
+  M 16384 one-TU/linked 0.9992 PASS
+  M 4096 one-TU/linked 1.0001 PASS
 ```
 
-The same-source one-TU control contains the same generated adapter; comparison
-with the hand-fused native control measures a different composition.
-
-SASS is diagnostic. On sm90 `tl-reg`/`tl-reg-tlc` and on sm120 `reg-tlc`/`smem-tlc`
-the direct-nvcc one-TU instruction stream differs from the linked image, while the
-backend-matched LTO one-TU is identical to it: the difference is nvcc whole-program
-versus nvJitLink code generation, not a seam cost. The `no_local_traffic_or_calls`
-check is false on some images (generated trap stubs and the row-scale `rsqrt` slow
-path are calls). Neither this check nor SASS equality replaces the required sanitizer
-and numerical acceptance.
+The 18 sanitizer runs are three tools on two images at three shapes. Timings
+are measurements, so a rerun does not reproduce them exactly. The CODA README
+lists the published results of every profile: same-source
+parity between 0.9987 and 1.0015 for all twelve timed configurations, all
+numerical, sanitizer and source-withheld checks passing, and the placement
+speedups. The [sm103](../../campaigns/coda/README.md#sm103-results),
+[sm90](../../campaigns/coda/README.md#sm90-results) and
+[sm120](../../campaigns/coda/README.md#sm120-results) sections give the
+measurement conditions. The one-TU control is built from the same sources,
+including the same generated adapter, so one-TU/linked isolates the cost of
+linking.
 
 ## 5. Make a register export outgrow the caller frame
 
-This is a GPU-free, **link-time** negative example, not a runtime buffer-overrun
-experiment. Keep the original consumer intact. After building the Blackwell
-matrix, make a scratch copy with both the declared frame capacity and actual
-C++ array reduced from 128 to 1. Existing accumulator/row-scale packages remain
-unchanged; the scratch pipeline replaces only the consumer package.
+This negative example fails at **link time** and needs no GPU. After building
+the sm90 cells, the script below writes a scratch copy of the consumer with both
+the declared frame capacity and the C++ array reduced from 128 to 1; the
+original consumer is left as is. The scratch pipeline swaps in only the new
+consumer package and reuses the producer package.
 
 ```sh
-export P=sm_103a
-export O="$PWD/$EX/out/$P"
+export O="$PWD/$CODA/out/sm90"
+export TMPDIR="$PIPELINK_SCRATCH_ROOT/t4"
+mkdir -p "$TMPDIR"
 uv run --project pipec --locked python - <<'PY'
 import json, os
 from pathlib import Path
-source = Path(os.environ["EX"]) / "consumer/epilogue.cu"
+source = Path(os.environ["CODA"]) / "consumer/epilogue.cu"
 text = source.read_text()
-print("consumer:", len(text.splitlines()), "lines")
-print("annotations:", sum(line.startswith("PL_") for line in text.splitlines()))
 scratch = Path(os.environ["TMPDIR"]) / "t4-frame"
 scratch.mkdir(parents=True, exist_ok=True)
-text = text.replace('pl::frame("acc_frame", 128,', 'pl::frame("acc_frame", 1,', 1)
-text = text.replace("float frame[128];", "float frame[1];", 1)
+assert text.count('pl::frame("acc_frame", 128,') == text.count("float frame[128];") == 1
+text = text.replace('pl::frame("acc_frame", 128,', 'pl::frame("acc_frame", 1,')
+text = text.replace("float frame[128];", "float frame[1];")
 (scratch / "epilogue.cu").write_text(text)
-original = Path(os.environ["O"]) / "pipelines/tl-reg.json"
+original = Path(os.environ["O"]) / "pipelines/hand.json"
 pipeline = json.loads(original.read_text())
 for stage in pipeline["pipeline"]["stages"]:
     package = (original.parent / stage["artifact_path"]).resolve()
-    if stage["stage_id"] == "rowscale-relu-epilogue":
+    if stage["stage_id"] == "coda.swiglu":
         package = scratch / "epilogue.plink"
     stage["artifact_path"] = str(package)
 (scratch / "pipeline.json").write_text(json.dumps(pipeline, indent=2) + "\n")
 print("scratch consumer: acc_frame capacity 1 (was 128)")
 PY
-uv run --project pipec --locked pipec2 pack "$TMPDIR/t4-frame/epilogue.cu" \
-  --profile sm_103a -I "$PWD/$EX/consumer" -o "$TMPDIR/t4-frame/epilogue.plink" \
+uv run --project pipec --locked pipec2 pack "$TMPDIR/t4-frame/epilogue.cu" --profile sm_90a \
+  -I pipec/src/pipec2/pack/include -I pipec/src/pipec2/host/include -I "$CODA/consumer" \
+  -D CODA_PROFILE=90 --nvcc-flag=-std=c++20 --nvcc-flag=--expt-relaxed-constexpr \
+  --nvcc-flag=--expt-extended-lambda -o "$TMPDIR/t4-frame/epilogue.plink" \
   | python3 -c 'import json,sys; print("packed:", json.load(sys.stdin)["stage_id"])'
-uv run --project pipec --locked python - <<'PY'
-import os, subprocess, sys
-from pathlib import Path
-scratch = Path(os.environ["TMPDIR"]) / "t4-frame"
-result = subprocess.run(
-    [sys.executable, "-m", "pipec2.cli", "link", str(scratch / "pipeline.json"),
-     "--out-dir", str(scratch / "link")],
-    capture_output=True, text=True,
-)
-print(result.stderr.strip())
-print("link exit:", result.returncode)
-assert result.returncode != 0 and "[T-PLAN-FRAME]" in result.stderr
-PY
+uv run --project pipec --locked pipec2 link "$TMPDIR/t4-frame/pipeline.json" \
+  --out-dir "$TMPDIR/t4-frame/link"; echo "link exit: $?"
 ```
 
-Observed with the real `tl-reg` provider package:
+Observed with the real sm90 producer package:
 
 ```text
-consumer: 78 lines
-annotations: 11
 scratch consumer: acc_frame capacity 1 (was 128)
-packed: rowscale-relu-epilogue
+packed: coda.swiglu
 pipec2: [T-PLAN-FRAME] tensor.imports.acc.lends: register export requires exactly one sufficient caller_frame lend
 link exit: 1
 ```
 
-Packing succeeds because the consumer's own declaration is well-formed. Linking
-can compare it with the selected register export and rejects the insufficient
-frame **before any launch**. Restoring capacity 128 is the original accepted
-composition; switching to TMEM/smem changes whether the frame is needed, not
-what the importer claims the logical tensor means.
+Packing succeeds because the consumer's declaration is well-formed on its own.
+Linking compares it with the selected register export and rejects the frame as
+too small **before any launch**. With capacity 128 the composition links as
+before. Against the sm103 TMEM producer the same scratch consumer would not need
+the frame at all; the import's logical tensor stays the same either way.
 
 ## What you declared vs what was derived
 
 | Declared by the hand consumer | Derived by PipeLink |
 |---|---|
-| **11 direct annotations / 78 source lines**: `PL_TYPE` ×1 publishes call-argument layout; `PL_STAGE` ×1 names the stage; `PL_PARAMS` ×1 names host fields. | Checked callable type agreement, stage manifest, compiler-observed params layout and aggregate blob placement. The public row-scale header separately owns its shared `PL_TYPE`. |
-| `PL_ROLE` ×1 promises four warps; `PL_CALL` ×4 promises accumulator/scale produce and release traffic. | A 128-thread owner dispatch and checked bindings to roleless providers. |
-| `PL_SITE` ×1 promises all-thread, converged, once-only participation without early return and names the observed ready events. | Import-site admission against provider readiness and route requirements. |
-| `PL_IMPORT_TENSOR` ×2 states identity, consumer demand maps, argument meanings and available resource lends. | Placement-to-demand adapter selection/code generation, source-handle unpacking, scratch offsets and barrier assignments. |
-| Nested `pl::rendezvous` declarations name ready/done events and their cohorts. | Generated ready/done helpers with route-appropriate synchronization, fences and waits. |
-| Nested `pl::frame` lends 128 per-participant positions over the stated lifetime; C++ allocates the matching array. | Capacity checked against the register export; `T-PLAN-FRAME` rejects insufficient storage. No frame requirement for TMEM/smem sources. |
-| One consumer package per profile and two explicit tensor connections per composition. | The same consumer linked against each admitted placement without source edits or private provider layout knowledge. |
+| **10 device annotations**: `PL_TYPE` ×1 publishes call-argument layout; `PL_STAGE` ×1 names the stage; `PL_ROLE` ×1 and `PL_TOPOLOGY` ×1 state the CTA and cluster shape. | Checked callable type agreement, stage manifest, owner dispatch and launch geometry. |
+| `PL_CALL` ×2 promise produce and release traffic. | Checked bindings to role-free producers, with each producer's own host view supplied by the generated call. |
+| `PL_BINDING` ×1 and `PL_SITE` ×1 name the chunk index and promise all-data-thread, converged, once-only participation without early return. | Import-site check against producer readiness, the chunk domain and route requirements. |
+| `PL_IMPORT_TENSOR` ×1 states identity, the consumer demand map, argument meanings and available resource lends. | Placement-to-demand route selection and adapter code generation, source-handle unpacking, scratch offsets and barrier assignments. |
+| Nested `pl::rendezvous` declarations name ready/done events and the threads that take part. | Generated ready/done helpers with route-appropriate synchronization, fences and waits. |
+| `PL_CLAIM_SMEM` ×1 and the scratch lend give lifetimes starting at `tensor_ready`. | Placement on dead producer operand storage, with the separating proxy fence. |
+| Nested `pl::frame` lends 128 per-participant positions over the stated lifetime; C++ allocates the matching array. | Capacity checked against register exports; `T-PLAN-FRAME` rejects insufficient storage. No frame requirement for the TMEM source. |
+| One consumer source, packed per profile, and one explicit tensor connection per composition. | The consumer linked against TMEM and register placements with no knowledge of private producer layouts. |
 
 Previous: [T3 — Swap a stage; break a contract](T3-contract-gallery.md).
-Example commands and dated matrix: [one-epilogue-many-producers](../../examples/one-epilogue-many-producers/README.md).
+Campaign commands and the full evidence: [CODA: GEMM + SwiGLU](../../campaigns/coda/README.md).
 Next: [T5 — Host ABI v3](T5-host-abi.md).
 For the contract-authored TileLang consumer, continue to [T6](T6-tilelang.md).

@@ -8,12 +8,13 @@ Regenerate from the repository root (no GPU required):
 uv run --project pipec --locked python docs/reference/generate.py
 ```
 
-A primary phase names the check inside the compiler, not necessarily the CLI command that reports it. For example, `link` also performs load, layout, protocol and solve checks. Clause IDs are extensible; this is the complete catalogue registered by the current CLI.
+A primary phase names the compiler check that raises a clause; one CLI command can run several phases (`link` also runs load, layout, protocol and solve checks). Clause IDs are extensible; this catalogue lists every clause the CLI registers.
 
 ## pack
 
 | ID | Primary phase | Description |
 | --- | --- | --- |
+| `P-CALL` | `pack` | Callable interfaces and call sites name declared exports and callsites. |
 | `P-CLAIM` | `pack` | Type-derived shared storage has consistent extent and alignment. |
 | `P-COMPILE` | `pack` | The annotated CUDA translation unit compiles and emits a registry. |
 | `P-CONTAINER` | `pack` | artifact containers and payload declarations are readable and well formed |
@@ -69,7 +70,9 @@ A primary phase names the check inside the compiler, not necessarily the CLI com
 
 | ID | Primary phase | Description |
 | --- | --- | --- |
+| `L-CALL` | `link` | callable interfaces and call sites agree; the call graph is acyclic and barrier-bearing exports run once per barrier instance |
 | `L-HOSTCHAN` | `link` | host declarations and selected resource contracts agree |
+| `L-JOIN` | `link` | role-bearing stages declare one identical entry rendezvous over the launch |
 | `L-LINK` | `link` | artifact linking and dispatch generation complete successfully |
 | `L-PAIR` | `link` | each channel has one compatible producer and consumer |
 | `L-PARAMS` | `link` | stage and aggregate parameter layouts satisfy the target ABI |

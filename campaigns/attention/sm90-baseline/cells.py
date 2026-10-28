@@ -22,7 +22,7 @@ def load_cells(path=SPEC_PATH) -> list[dict]:
 def visible(cell, h, q_idx_tensor, k_idx_tensor, sel=None):
     """Broadcastable token indices; h is a logical query head (scalar or tensor).
 
-    W6 sel must already be on the indices' device; no implicit copying or RNG.
+    W6 sel must already be on the indices' device; it is used as is.
     """
     q, k = q_idx_tensor, k_idx_tensor
     m = cell["mask"]
@@ -64,8 +64,8 @@ def select(cell) -> torch.Tensor:
             out[:, counts > i, i] = i
     elif m["pattern"] == "uniform":
         generator = torch.Generator().manual_seed(m["seed"])
-        # Floyd's collision replacement is exact sampling without replacement;
-        # it needs O(topk) random draws, not an S-by-S random-key array.
+        # Floyd's collision replacement samples exactly without replacement
+        # using O(topk) random draws.
         for i in range(topk - 1):
             j = blocks - counts + i
             random = torch.rand((heads, length), dtype=torch.float64, generator=generator).numpy()
@@ -96,7 +96,7 @@ def load_selection(cell, path) -> torch.Tensor:
 
 
 def pair_count(cell, sel=None) -> int:
-    """Exact integer sum over batch and query heads; no dense token mask."""
+    """Exact integer sum over batch and query heads, computed without a dense token mask."""
     s, m = cell["seqlen_q"], cell["mask"]
     if cell["seqlen_k"] != s:
         raise ValueError("These cells require equal-length causal prefill")
@@ -156,8 +156,8 @@ def oracle_rows(cell) -> list[int]:
 def reference(cell, q, k, v, sel=None, *, rows=None):
     """Return (rows, fp32 O[B,R,H,D], ln-LSE[B,H,R]).
 
-    At most 32 query rows and one KV head are converted/reduced at once.
-    No all-head S-by-S score tensor, even for every 64-token edge at 128K.
+    At most 32 query rows and one KV head are converted and reduced at once, so
+    memory stays bounded even for every 64-token edge at 128K.
     rows (global query positions) defaults to oracle_rows(cell).
     """
     rows = oracle_rows(cell) if rows is None else list(rows)

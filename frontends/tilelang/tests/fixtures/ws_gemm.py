@@ -1,4 +1,4 @@
-"""Pinned TileLang WS transform; lineage: generated/ws_gemm/generate.py."""
+"""Warp-specialized GEMM from the pinned TileLang WS transform, split into producer/consumer stages."""
 import tilelang.language as T
 from pipelink_tilelang.declarations import (
     Declarations, Endpoint, InitContract, ParamField, ParamsSpec, Role, Sharing,

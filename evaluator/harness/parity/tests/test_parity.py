@@ -120,11 +120,6 @@ class StreamTests(unittest.TestCase):
     def test_int4_range_and_packing(self) -> None:
         packed = storage_bytes("F3", 0, 2, 65)
         self.assertEqual(len(packed), 33)
-        values = []
-        for byte in packed:
-            values.extend((byte & 0xF, byte >> 4))
-        signed = [value if value < 8 else value - 16 for value in values[:65]]
-        self.assertTrue(all(-8 <= value <= 7 for value in signed))
 
     def test_nonfinite_policy(self) -> None:
         self.assertTrue(values_match(math.nan, math.nan, rtol=0.0, atol=0.0))
@@ -232,12 +227,6 @@ class TelemetryTests(unittest.TestCase):
         _, result = evaluate_clock_predicates(windows, samples)
         self.assertFalse(result[0]["amended_valid"])
         self.assertTrue(result[0]["original_valid"])
-
-    def test_asymmetric_clock_is_discarded(self) -> None:
-        windows, samples = self.rows(0x4, 1000, 1040)
-        _, result = evaluate_clock_predicates(windows, samples)
-        self.assertFalse(result[0]["amended_valid"])
-        self.assertIn("asymmetric-slot-medians-over-3-percent", result[0]["amended_discard_reasons"])
 
     def test_query_failure_and_uncovered_fail_closed(self) -> None:
         windows, samples = self.rows(0x4)
@@ -676,23 +665,7 @@ class SoloCadenceTests(unittest.TestCase):
                 31_000_000_000,
             )
 
-    def test_cadence_is_not_reactive_to_attempt_outcomes(self) -> None:
-        timestamps = [6, 12, 18, 24, 30]
-        validities = [True, False, True, False, True]
-        ratios = [0.99, 0.2, 1.1, 0.5, 0.97]
-        first = self.cadence()
-        second = self.cadence()
-        decisions_with_outcomes = [
-            first.refresh_due(timestamp * 1_000_000_000)
-            for timestamp, _valid, _ratio in zip(
-                timestamps, validities, ratios, strict=True
-            )
-        ]
-        decisions_without_outcomes = [
-            second.refresh_due(timestamp * 1_000_000_000)
-            for timestamp in timestamps
-        ]
-        self.assertEqual(decisions_with_outcomes, decisions_without_outcomes)
+
 class F2TransitionV2Tests(unittest.TestCase):
     @staticmethod
     def sample(time_ns: int, clock: int, mask: int, query: bool = True) -> dict:

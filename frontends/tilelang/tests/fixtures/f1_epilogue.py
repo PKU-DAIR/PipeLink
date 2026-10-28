@@ -1,4 +1,4 @@
-"""Runtime-scalar linear combination, P-TL-4 generation lineage (not v3 bias)."""
+"""Epilogue computing the runtime-scalar linear combination D = alpha * A + beta * C."""
 import tilelang.language as T
 
 from pipelink_tilelang.declarations import (

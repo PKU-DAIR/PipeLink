@@ -30,10 +30,6 @@ PL_PARAMS(ProducerParams, input, columns);
 PL_ROLE(producer, ring_producer, 1);
 PL_CLAIM_EX(pl::claim("pipelink_ring_base", "smem")
     .extent(0, {{"pipelink_ring_depth", TileBytes}}).align(1024));
-PL_CLAIM_EX(pl::claim("pipelink_ring_full", "mbarrier")
-    .extent(0, {{"pipelink_ring_depth", 1}}));
-PL_CLAIM_EX(pl::claim("pipelink_ring_empty", "mbarrier")
-    .extent(0, {{"pipelink_ring_depth", 1}}));
 PL_CLAIM_EX(pl::claim("pipelink_ring_warp_producer", "warp")
     .extent(1).at(0).roles({"producer"}));
 PL_ENDPOINT(tile_ring, pl::endpoint("tile_ring", pl::produce, "producer")

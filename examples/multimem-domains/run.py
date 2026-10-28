@@ -268,10 +268,11 @@ def time_world(out, index, slices, slice_elements):
         timing["all_rank"] = {"linked": linked.records[-scored:], "one_tu": control.records[-scored:]}
         checks.append({"image": "after-timing", **world.check(0)})
         passed = (all(c["status"] == "PASS" for c in checks) and timing["status"] == "PASS"
-                  and timing["ratio_linked_over_onetu"] <= 1.03)
+                  and timing["ratio_onetu_over_linked"] >= 1 / 1.03)
         return {"status": "PASS" if passed else "FAIL", "geometry": world.geometry,
                 "residency": world.residency, "elements": world.elements, "checks": checks,
-                "timing": timing, "ratio_gate": 1.03, "clock_locked": False}
+                "timing": timing, "ratio_onetu_over_linked_floor": 1 / 1.03,
+                "clock_locked": False}
 
 
 def main():

@@ -1,4 +1,4 @@
-"""Shared parity evaluator for current comparison workloads."""
+"""Shared parity evaluator for the comparison workloads."""
 from .assign import (
     assign_cases,
     DiscoveryLease,

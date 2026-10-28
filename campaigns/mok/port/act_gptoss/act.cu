@@ -233,12 +233,7 @@ MOK_ACT_PASS_EXPORT(rec)
 
 #endif
 PL_STAGE("mok.act", "1.0.0");
-PL_NO_PARAMS();
 PL_TOPOLOGY(pl::topology{2, pl::cluster{{2,1,1}, pl::launch{2,{2,1,1}}}, true, "clc"});
-PL_EXPORT(mok_act_init, mok_act_init);
-PL_EXPORT(mok_act_fwd, mok_act_fwd);
-PL_EXPORT(mok_act_bwd, mok_act_bwd);
-PL_EXPORT(mok_act_rec, mok_act_rec);
 PL_CALL(act_init, mok_act_init, pl::consume, "mok_act_init");
 PL_CALL(act_fwd, mok_act_fwd, pl::consume, "mok_act_fwd");
 PL_CALL(act_bwd, mok_act_bwd, pl::consume, "mok_act_bwd");
@@ -279,7 +274,6 @@ PL_ENDPOINT(routed_buffers_done, pl::endpoint("routed_buffers_done", pl::produce
     .protocol(pl::counter{"pipelink_mok_cnt_routed_buffers_done"}));
 PL_HOST_GROUP("mok.act", "mok.act.params", "mok_act", plk_header_v2, PLK_ABI_TYPE_ID(plk_header_v2), false);
 PL_HOST_DOMAIN(1, "ep");
-PL_HOST_ABI_EMPTY(100, MokActResidue);
 PL_HOST_RESIDUE(2, "mok.act.residue", MokActResidue, 100, true, pl::host::roles({}));
 PL_HOST_SCALARS(1, pl::host::scalars(pl::host::roles({}))
     .field(pl::host::scalar(1, "mok.num_local_tokens", "i64").caller("num_local_tokens"))
@@ -334,5 +328,4 @@ PL_HOST_CHANNEL(29, float, pl::host::channel("mok.act.router_weights", "f32").ra
 PL_HOST_CHANNEL(30, float, pl::host::channel("mok.act.d_router_weight_partials", "f32").rank(2).write().caller("d_router_weight_partials"));
 PL_HOST_CHANNEL(31, int32_t, pl::host::channel("mok.act.schedule_peer_rank", "i32").rank(1).read().caller("schedule_peer_rank"));
 PL_HOST_SCHEDULER(pl::host::scheduler("mok.framework"));
-PL_HOST_TARGET();
 #endif

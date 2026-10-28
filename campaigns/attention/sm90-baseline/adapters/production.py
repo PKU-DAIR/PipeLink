@@ -1,10 +1,10 @@
 """Pinned model-native sparse products, with preparation outside event timing.
 
-Phi's padded wrapper performs a GPU-to-CPU metadata copy on every invocation.
-We exercise that API in preparation, then launch its unchanged inference kernel
-with the same precomputed metadata and output-zeroing operation. Flash-MSA has
-no output/workspace argument: its internal gathers, allocations, resets and
-online merges remain part of each complete run_main_forward call.
+Phi's padded wrapper copies metadata from GPU to CPU on every call. Preparation
+calls that API once; run launches its unchanged inference kernel with the same
+precomputed metadata and output zeroing. Flash-MSA takes no output or workspace
+argument, so its internal gathers, allocations, resets and online merges are part
+of each run_main_forward call.
 """
 from __future__ import annotations
 
@@ -102,15 +102,15 @@ def _prepare_phi3(cell, q, k, v, sel):
 
     # The shipped builder indexes h on the logical Q-head axis. In the kernel,
     # off_h indexes both CSR tensors, while off_h // q_k_ratio indexes K/V.
-    # Thus GQA does not collapse the heterogeneous vertical stripes to KV heads.
+    # The per-head vertical stripes therefore stay per Q head under GQA.
     # Exercise the public inference API once, including its JIT, before timing.
     out = module.blocksparse_flash_attn_padded_fwd(
         q, k, v, cell["scale"], layout, block_size=block, max_seqlen=length,
     )
 
-    # Hoist only padded-wrapper metadata. Its unconditional q_lens.cpu() cannot
-    # appear in an asynchronous event interval. This is the exact unmodified
-    # kernel invocation for equal-length, unpadded, batch-one prefill.
+    # Hoist only the padded wrapper's metadata: its unconditional q_lens.cpu()
+    # would synchronize inside the event interval. The launch below is the
+    # wrapper's unmodified kernel call for equal-length, unpadded, batch-one prefill.
     starts = torch.zeros(1, dtype=torch.int32, device=q.device)
     ends = torch.full((1,), length, dtype=torch.int32, device=q.device)
     batch_ids = torch.zeros(length // block, dtype=torch.int32, device=q.device)
@@ -132,8 +132,8 @@ def _prepare_phi3(cell, q, k, v, sel):
     )
 
     def run():
-        # Retain the public wrapper's per-call zeroing even though these cells
-        # contain no padding. No resets or attention launches are moved to prep.
+        # Keep the public wrapper's per-call zeroing even though these cells
+        # contain no padding; every reset and launch stays in run.
         out.zero_()
         launch(*args, **options)
         return out, None
@@ -172,7 +172,7 @@ def _prepare_vllm_m3(cell, q, k, v, sel):
     block = cell["mask"]["block"]
     pages = length // block
     # One page is one sparse block; K and V occupy the two halves of the last
-    # axis. This packing is a one-time input-layout conversion, not replication.
+    # axis. The packing is a one-time input-layout conversion.
     kv = torch.empty((pages, hkv, block, 2 * dim), dtype=k.dtype, device=k.device)
     kv[..., :dim].copy_(k[0].view(pages, block, hkv, dim).permute(0, 2, 1, 3))
     kv[..., dim:].copy_(v[0].view(pages, block, hkv, dim).permute(0, 2, 1, 3))
@@ -231,8 +231,8 @@ def _prepare_flash_msa(cell, q, k, v, sel):
 
     # The reverse index rejects key_block >= q//128 for remote tasks, including
     # the already-selected local block. run_main_forward adds the causal local
-    # block exactly once. Keep sel unchanged: dropping/appending local entries
-    # is unnecessary, and duplicating earlier blocks would double-count them.
+    # block exactly once, so sel is passed unchanged (duplicating earlier
+    # blocks would double-count them).
     metadata = metadata_module.build_sparse_attention_metadata_cuda(
         sel.unsqueeze(0), backward_query_chunk=32, remote_query_chunk=1024,
     )

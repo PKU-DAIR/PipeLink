@@ -42,7 +42,6 @@ extern "C" __device__ void dp_gather_role(const void* opaque, unsigned) {
 }
 
 PL_STAGE("dp.gather", "1.0.0");
-PL_NO_PARAMS();
 PL_ROLE(dp, dp_gather_role, 1);
 PL_CLAIM_EX(pl::claim("pipelink_dp_warp", "warp").extent(1).align(1).at(1).roles({"dp"}));
 PL_CLAIM_EX(pl::claim("pipelink_dp_barrier", "named_barrier").extent(1).align(1).roles({"dp"}));
@@ -77,4 +76,3 @@ PL_HOST_CHANNEL(5, uint32_t, pl::host::channel("dp.epoch", "u32").rank(1).read_w
 PL_HOST_CHANNEL(6, float, pl::host::channel("dp.out", "f32").rank(1).write()
     .caller("out").peer("dp"));
 PL_HOST_SCHEDULER(pl::host::scheduler("mc.owner"));
-PL_HOST_TARGET();

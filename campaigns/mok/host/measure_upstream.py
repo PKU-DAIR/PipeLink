@@ -10,7 +10,7 @@ import subprocess
 
 HOST = Path(__file__).resolve().parent
 ROOT = HOST.parents[2]
-LOGS = Path(os.environ["PIPELINK_SCRATCH_ROOT"]) / "mok/logs"
+LOGS = Path(os.environ.get("MOK_UPSTREAM_LOG_ROOT") or Path(os.environ["PIPELINK_SCRATCH_ROOT"]) / "mok/logs")
 WINDOW_SUMMARY = re.compile(r"gpu_window: waited=(\d+)s ran=(\d+)s contended=([01]) rc=(\d+)")
 
 

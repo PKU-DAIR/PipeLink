@@ -2,7 +2,7 @@
 set -euo pipefail
 HOST_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$HOST_DIR/env.sh"
-LOG_ROOT="$PIPELINK_SCRATCH_ROOT/mok/logs"
+LOG_ROOT="${MOK_UPSTREAM_LOG_ROOT:-$PIPELINK_SCRATCH_ROOT/mok/logs}"
 LOG_DIR="$LOG_ROOT/tests"
 mkdir -p "$LOG_DIR"
 export MOK_TEST_REPORT_DIR="$LOG_DIR"

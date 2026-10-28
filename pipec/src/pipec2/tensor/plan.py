@@ -1,8 +1,8 @@
 """Contract admission and resource-bearing, model-relative tensor planning.
 
 Stage promises are resolved once into Derived before admission. Expression and
-logical coverage remain independent of synthesis; a candidate class is only
-search order, never a semantic rule.
+logical coverage are checked independently of synthesis; candidate classes only
+order the search.
 """
 from __future__ import annotations
 
@@ -99,8 +99,8 @@ def derive(export: TensorExport, imp: TensorImport, sites: Sequence[Site],
         assumptions.update(f"resource_{resource.name}_available_until_{imp.completion}" for resource in export.backing)
     assumptions.update(f"resource_{resource.name}_available_until_{imp.completion}"
                        for resource in imp.lends if resource.lifetime["to"] == imp.completion)
-    # Model storage is what the site lends; owner backing enters the model only through the
-    # export's own source binding (@export:*), never as additional cells to search over.
+    # Model storage is what the site lends. Owner backing enters the model only through the
+    # export's own source binding (@export:*), so the search never treats it as free cells.
     return Derived(
         selected, tuple(resources[name] for name in sorted(resources)),
         frozenset(resource.name for resource in imp.lends if resource.binding != "caller_frame"),
@@ -169,7 +169,7 @@ def _analyze(expressions: Mapping[str, expr.Expr], domains: Mapping[str, expr.Do
 
 
 def _coverage(export: TensorExport, imp: TensorImport, bindings: Mapping[str, expr.Domain]) -> dict[str, Any]:
-    """T1 identity join, not a transport oracle or a source of candidate edges."""
+    """Check that some placement offers every demanded identity (a necessary condition only)."""
     coordinate_names = sorted(domain.name for domain in export.identity.coords)
     offered_domains = {domain.name: domain for domain in export.identity.coords}
     missing = []
@@ -241,8 +241,8 @@ def admit(export: TensorExport, imp: TensorImport, derived: Derived,
     except machine.ModelError as exc:
         report["model_prerequisite"] = list(exc.issues)
         return Admission(exc.status, tuple(exc.failures), report), None
-    # After the model's contract checks: a TMEM source on a target without TMEM is a
-    # contract error there, not a missing family here.
+    # Runs after the model's contract checks, which already reject a TMEM source on a
+    # target without TMEM.
     requested = set(export.read_capabilities)
     requested.update(op for permitted in derived.permitted.values() for op in permitted)
     if requested - set(instance.catalogue):
@@ -377,8 +377,8 @@ def check_fanout_storage(
 def _oracle(instance: machine.Instance, imp: TensorImport, candidate: synth.SynthResult) -> dict[str, Any]:
     """Replay checker receipts against freshly evaluated frozen demand expressions.
 
-    It checks identity delivery, not liveness (the exact checker certifies that).
-    The oracle's outputs are never supplied to the candidate generator.
+    It checks identity delivery only; the exact checker certifies liveness. The
+    oracle's outputs are never fed back to the candidate generator.
     """
     terminal = candidate.provenance["candidates"][-1]["check"]["provenance"].get("terminal_deliveries")
     if terminal is None:
@@ -492,8 +492,8 @@ def _resource_demands(program: ir.Program, derived: Derived, consumer: StageMani
             barriers.append(request)
             if reserved_zero:
                 continue
-        # A fixed symbolic location is a caller-owned borrow, never a license to
-        # allocate/relocate it. Existing pipeline reservations are also borrowed.
+        # A fixed symbolic location is borrowed from the caller and must not be
+        # allocated or relocated. Existing pipeline reservations are also borrowed.
         if borrowed:
             continue
         handle = Handle(name, "base", "bind",
@@ -560,7 +560,7 @@ class ConnectionPlanner:
     ``next()`` returns the next candidate that certifies (``MODEL_SAT``) or the
     terminal verdict once the candidates are exhausted; ``reject_lowering`` records
     a lowering failure on the current candidate so the link can resume.
-    Route order is structural, never semantics.
+    Route order is purely structural.
     """
 
     def __init__(self, pipeline: Pipeline, stages: Sequence[StageManifest],
@@ -615,7 +615,7 @@ class ConnectionPlanner:
         self.provenance["lowering_context"] = _lowering_context(instance)
         # Routes are enumerated over the union of the sites' facts: a family a route
         # needs at only some sites is still filtered per site by the model's
-        # `derived.permitted` (construct `issue`, synth `action_domain`), as before.
+        # `derived.permitted` (construct `issue`, synth `action_domain`).
         available = frozenset().union(*(routes.facts(export, self.imp, site) for site in self.derived.sites))
         self.available = available
         self._queue, rejected = routes.candidates(routes.source_spaces(export), routes.sink_space(self.imp), available)
@@ -688,8 +688,8 @@ class ConnectionPlanner:
                     provenance.pop(key, None)
             return TensorPlan("MODEL_SAT", self.admission, ir.digest(candidate.program), candidate.program,
                               claims, handles, barriers, None, provenance)
-        # Constructive rejection proves no impossibility. Only the bounded Z3
-        # envelopes participate in the bounded-exhaustion aggregation (T5).
+        # A constructive rejection proves nothing about impossibility, so only the
+        # bounded Z3 envelopes count toward bounded exhaustion.
         bounded = [item for item in provenance["classes"] if item["provenance"].get("generator") != "constructive-v1"]
         if any("lowering" in item for item in provenance["classes"]):
             status = "LOWERING_UNSUPPORTED"

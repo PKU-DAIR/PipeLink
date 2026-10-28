@@ -103,8 +103,8 @@ def _measure_cell(out, cell, shape, inputs, config, gpu):
                   "depth": cell["depth"], "numeric": numeric}
         del expected
         if passed:
-            # Keep independent numerical outputs, but remove allocation/descriptor
-            # differences from the paired timing denominator.
+            # The numerical checks used separate allocations; timing swaps the control image
+            # into the linked session so allocations and descriptors are shared.
             with linked.with_image(out / cell["one_tu"]) as timed_control:
                 timing = time_pair(linked, timed_control, repetitions=20, gpu=gpu)
             baseline = _baseline(blas, shape)
@@ -151,7 +151,7 @@ def main():
     parser.add_argument("--shape", type=int, nargs=3, metavar=("M", "N", "K"),
                         help="replace performance shapes; the small phase-wrap check still runs")
     parser.add_argument("--single", choices=("linked", "one-tu"),
-                        help="one image plus cuBLAS oracle only; do not recurse into sanitizers")
+                        help="one image plus cuBLAS oracle check (sanitizer subprocess)")
     parser.add_argument("--cell", choices=tuple(CELLS), help="required with --single")
     args = parser.parse_args()
     if bool(args.single) != bool(args.cell):
@@ -171,7 +171,7 @@ def main():
     if not config["PIPELINK_CUDA_HOME"]:
         parser.error("set PIPELINK_CUDA_HOME in .env")
     os.environ.update(config)
-    # Neither the launcher nor cuBLAS has initialized CUDA at this point.
+    # Select the GPU before the launcher or cuBLAS initializes CUDA.
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
     scratch = Path(config["PIPELINK_SCRATCH_ROOT"]) / "hopper-gemm-split" / args.profile
     scratch.mkdir(parents=True, exist_ok=True)
@@ -199,8 +199,8 @@ def main():
         "throughput_policy": "2*M*N*K FLOPs; cuBLAS ratios descriptive, cuBLAS excludes epilogues",
         "sanitize": [], "sass": {}, "shapes": [],
     }
-    # Always run both tools on both images of every cell, even when one fails.
-    # Do this first so later numerical/timing errors cannot omit sanitizer legs.
+    # Run both tools on both images of every cell first, so a later numerical or
+    # timing failure cannot skip any of them.
     for name in CELLS:
         for image in ("linked", "one-tu"):
             reports = sanitize(

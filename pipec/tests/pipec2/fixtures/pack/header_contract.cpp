@@ -25,7 +25,6 @@ extern "C" DEVICE void plx_fixed(std::int8_t, std::uint8_t, std::int16_t, std::u
     std::int32_t, std::uint32_t, std::int64_t, std::uint64_t);
 #if defined(__CUDACC__)
 extern "C" DEVICE __half plx_cuda(__half, __nv_bfloat16, const __half*, __nv_bfloat16*);
-PL_EXPORT(cuda, plx_cuda);
 PL_ROLE(cuda_role, plx_cuda, 1);
 PL_CALL(cuda_call, plx_cuda, pl::consume, "cuda");
 #endif
@@ -36,7 +35,6 @@ PL_ROLE(worker, plx_role, 4);
 PL_EXPORT(types, plx_types);
 PL_ROLE(types_role, plx_types, 1);
 PL_CALL(types_call, plx_types, pl::produce, "types_role");
-PL_EXPORT(fixed, plx_fixed);
 PL_ROLE(fixed_role, plx_fixed, 1);
 PL_CALL(fixed_call, plx_fixed, pl::consume, "fixed");
 PL_CALL(produce, plx_produce, pl::produce, "worker", "producer_entry");

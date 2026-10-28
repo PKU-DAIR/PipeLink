@@ -1,6 +1,5 @@
 {
   "name": "mixed_cta_group",
-  "reference": "design §8.3",
   "description": "The two independently valid stage manifests were compiled for different CTA groups.",
   "base": "topology",
   "phase": "solve",

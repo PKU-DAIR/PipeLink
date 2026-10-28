@@ -3,22 +3,26 @@
 #
 #   tools/gpu_window.sh COMMAND [ARGS...]
 #
-# Our own GPU jobs serialize on a lock under $PIPELINK_SCRATCH_ROOT. The command starts only
-# when no compute process uses any of $PIPELINK_GPUS. Its processes (including torchrun ranks
+# Our own GPU jobs serialize per GPU on locks under $PIPELINK_SCRATCH_ROOT, so windows on
+# disjoint GPU sets run concurrently. The command starts only when no compute process uses
+# any of $PIPELINK_GPUS. Its processes (including torchrun ranks
 # and detached daemons) inherit PIPELINK_GPU_WINDOW, which tells them apart from foreign ones.
 # If a foreign process appears on those GPUs during the run, the final line says
 # `contended=1`: correctness results stay valid, timings from that run do not. Exit status is
 # the command's.
 set -euo pipefail
 : "${PIPELINK_GPUS:?source tools/env.sh first}" "${PIPELINK_SCRATCH_ROOT:?source tools/env.sh first}"
-[[ $# -ge 1 ]] || { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[[ $# -ge 1 ]] || { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 busy() { nvidia-smi -i "$PIPELINK_GPUS" --query-compute-apps=pid --format=csv,noheader | tr -d ' '; }
 
-mkdir -p "$PIPELINK_SCRATCH_ROOT"
-exec 9>"$PIPELINK_SCRATCH_ROOT/gpu_window.lock"
-flock 9
+mkdir -p "$PIPELINK_SCRATCH_ROOT/gpu_window"
 SECONDS=0
+# Lock in ascending GPU order so overlapping windows cannot deadlock.
+for gpu in $(tr ',' '\n' <<< "$PIPELINK_GPUS" | sort -nu); do
+  exec {fd}>"$PIPELINK_SCRATCH_ROOT/gpu_window/gpu$gpu.lock"
+  flock "$fd"
+done
 until [[ -z "$(busy)" ]]; do sleep 30; done
 waited=$SECONDS
 token="$$.$(date +%s%N)"
